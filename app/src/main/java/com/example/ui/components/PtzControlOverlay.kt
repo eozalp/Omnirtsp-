@@ -13,10 +13,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowLeft
-import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.RestartAlt
@@ -138,7 +138,7 @@ fun PtzControlOverlay(
                         contentColor = NeonCyan
                     )
                 ) {
-                    Icon(Icons.Default.KeyboardArrowLeft, contentDescription = "Pan Left")
+                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = "Pan Left")
                 }
 
                 // Right
@@ -154,7 +154,7 @@ fun PtzControlOverlay(
                         contentColor = NeonCyan
                     )
                 ) {
-                    Icon(Icons.Default.KeyboardArrowRight, contentDescription = "Pan Right")
+                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "Pan Right")
                 }
 
                 // Center Reset

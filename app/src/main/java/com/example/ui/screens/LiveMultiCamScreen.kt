@@ -35,6 +35,9 @@ import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material.icons.filled.ViewAgenda
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -47,6 +50,7 @@ import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -87,6 +91,7 @@ fun LiveMultiCamScreen(
 
     var showCameraDialog by remember { mutableStateOf(false) }
     var cameraToEdit by remember { mutableStateOf<CameraEntity?>(null) }
+    var cameraToDelete by remember { mutableStateOf<CameraEntity?>(null) }
 
     val recentAlert = alerts.firstOrNull { !it.isRead }
 
@@ -266,6 +271,7 @@ fun LiveMultiCamScreen(
                                     player = player,
                                     telemetry = telemetry,
                                     isTvFocused = isTvMode,
+                                    onRetry = { viewModel.streamManager.retryPlayer(camera) },
                                     onClick = { onSelectCamera(camera) },
                                     modifier = Modifier.fillMaxSize()
                                 )
@@ -312,7 +318,7 @@ fun LiveMultiCamScreen(
 
                                     // Motion Test Trigger
                                     IconButton(
-                                        onClick = { viewModel.triggerMotionSimulation(camera) },
+                                        onClick = { viewModel.triggerMotionAlertManually(camera, level = 80) },
                                         modifier = Modifier.size(32.dp).testTag("test_motion_cam_${camera.id}")
                                     ) {
                                         Icon(
@@ -364,6 +370,19 @@ fun LiveMultiCamScreen(
                                             modifier = Modifier.size(16.dp)
                                         )
                                     }
+
+                                    // Remove / Delete Camera
+                                    IconButton(
+                                        onClick = { cameraToDelete = camera },
+                                        modifier = Modifier.size(32.dp).testTag("delete_cam_${camera.id}")
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Delete,
+                                            contentDescription = "Remove Camera",
+                                            tint = NeonRed.copy(alpha = 0.85f),
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -389,7 +408,7 @@ fun LiveMultiCamScreen(
             Icon(Icons.Default.Add, contentDescription = "Add Camera")
         }
 
-        // Camera Settings Dialog
+        // Camera Settings Dialog with onDelete support
         if (showCameraDialog) {
             CameraSettingsDialog(
                 camera = cameraToEdit,
@@ -397,7 +416,51 @@ fun LiveMultiCamScreen(
                 onSave = { camera ->
                     viewModel.addOrUpdateCamera(camera)
                     showCameraDialog = false
+                },
+                onDelete = { camera ->
+                    viewModel.deleteCamera(camera)
+                    showCameraDialog = false
                 }
+            )
+        }
+
+        // Card Delete Confirmation Dialog
+        cameraToDelete?.let { cam ->
+            AlertDialog(
+                onDismissRequest = { cameraToDelete = null },
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Warning, contentDescription = null, tint = NeonRed)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Remove Camera?", color = Color.White, fontWeight = FontWeight.Bold)
+                    }
+                },
+                text = {
+                    Text(
+                        text = "Are you sure you want to remove '${cam.name}' (${cam.location})? This will disconnect the live stream and delete the camera from your surveillance matrix.",
+                        color = Color.White.copy(alpha = 0.85f),
+                        fontSize = 13.sp
+                    )
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            viewModel.deleteCamera(cam)
+                            cameraToDelete = null
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = NeonRed, contentColor = Color.White),
+                        modifier = Modifier.testTag("confirm_delete_card_btn")
+                    ) {
+                        Text("Remove Camera", fontWeight = FontWeight.Bold)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { cameraToDelete = null }) {
+                        Text("Cancel", color = Color.Gray)
+                    }
+                },
+                containerColor = SurveillanceCardBg,
+                shape = RoundedCornerShape(16.dp)
             )
         }
     }

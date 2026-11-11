@@ -319,26 +319,42 @@ fun RecordingsScreen(
                             fontSize = 15.sp
                         )
                         Spacer(modifier = Modifier.height(10.dp))
+                        val context = androidx.compose.ui.platform.LocalContext.current
+                        val previewPlayer = remember(clip.id) {
+                            androidx.media3.exoplayer.ExoPlayer.Builder(context).build().apply {
+                                setVideoChangeFrameRateStrategy(androidx.media3.common.C.VIDEO_CHANGE_FRAME_RATE_STRATEGY_OFF)
+                                val file = java.io.File(clip.filePath)
+                                if (file.exists() && file.length() > 0) {
+                                    setMediaItem(androidx.media3.common.MediaItem.fromUri(android.net.Uri.fromFile(file)))
+                                    prepare()
+                                    playWhenReady = true
+                                }
+                            }
+                        }
+                        androidx.compose.runtime.DisposableEffect(clip.id) {
+                            onDispose {
+                                previewPlayer.release()
+                            }
+                        }
+
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .aspectRatio(16f / 9f)
                                 .clip(RoundedCornerShape(8.dp))
-                                .background(Color.Black),
-                            contentAlignment = Alignment.Center
+                                .background(Color.Black)
                         ) {
-                            Icon(
-                                Icons.Default.PlayArrow,
-                                contentDescription = null,
-                                tint = NeonCyan,
-                                modifier = Modifier.size(48.dp)
-                            )
-                            Text(
-                                text = "Playing archived clip (${clip.durationSeconds}s)\n${clip.filePath}",
-                                color = Color.White.copy(alpha = 0.8f),
-                                fontSize = 10.sp,
-                                modifier = Modifier.align(Alignment.BottomCenter).padding(8.dp),
-                                fontFamily = FontFamily.Monospace
+                            androidx.compose.ui.viewinterop.AndroidView(
+                                factory = { ctx ->
+                                    (android.view.LayoutInflater.from(ctx).inflate(com.example.R.layout.player_view_texture, null) as androidx.media3.ui.PlayerView).apply {
+                                        this.player = previewPlayer
+                                        useController = true
+                                    }
+                                },
+                                onRelease = { playerView ->
+                                    playerView.player = null
+                                },
+                                modifier = Modifier.fillMaxSize()
                             )
                         }
                         Spacer(modifier = Modifier.height(12.dp))

@@ -175,10 +175,10 @@ fun MotionAlertsScreen(
                         Spacer(modifier = Modifier.height(12.dp))
                         TextButton(
                             onClick = {
-                                cameras.firstOrNull()?.let { viewModel.triggerMotionSimulation(it) }
+                                cameras.firstOrNull()?.let { viewModel.triggerMotionAlertManually(it) }
                             }
                         ) {
-                            Text("Simulate Test Motion Event", color = NeonCyan)
+                            Text("Trigger Test Motion Alert", color = NeonCyan)
                         }
                     }
                 }

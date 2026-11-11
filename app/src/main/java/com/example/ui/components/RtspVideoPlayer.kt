@@ -35,6 +35,7 @@ import androidx.compose.material.icons.filled.MotionPhotosOn
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Icon
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -86,6 +87,7 @@ fun RtspVideoPlayer(
     panOffsetY: Float = 0.0f,
     showControlsOverlay: Boolean = true,
     isTvFocused: Boolean = false,
+    onRetry: (() -> Unit)? = null,
     onClick: (() -> Unit)? = null
 ) {
     var currentTimeString by remember { mutableStateOf("") }
@@ -144,27 +146,91 @@ fun RtspVideoPlayer(
                     translationY = panOffsetY
                 }
         ) {
-            if (player != null && !camera.isDemoCamera) {
+            // Background Surveillance Canvas (always mounted for smooth transitions and offline status)
+            SurveillanceCanvas(
+                camera = camera,
+                isMotionDetected = telemetry.isMotionDetected,
+                motionBoxScale = motionBoxScale
+            )
+
+            // Video Stream View - Kept continuously mounted when player is present
+            if (player != null) {
                 AndroidView(
                     factory = { ctx ->
-                        PlayerView(ctx).apply {
+                        (android.view.LayoutInflater.from(ctx).inflate(com.example.R.layout.player_view_texture, null) as PlayerView).apply {
                             this.player = player
+                            setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
                             useController = false
-                            layoutParams = FrameLayout.LayoutParams(
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                                ViewGroup.LayoutParams.MATCH_PARENT
-                            )
                         }
                     },
-                    modifier = Modifier.fillMaxSize()
+                    update = { playerView ->
+                        if (playerView.player != player) {
+                            playerView.player = player
+                        }
+                    },
+                    onRelease = { playerView ->
+                        try {
+                            playerView.player = null
+                        } catch (ignored: Exception) {}
+                    },
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer {
+                            alpha = if (telemetry.hasError || !telemetry.isLive) 0f else 1f
+                        }
                 )
-            } else {
-                // Synthetic / Demo live surveillance canvas
-                SurveillanceCanvas(
-                    camera = camera,
-                    isMotionDetected = telemetry.isMotionDetected,
-                    motionBoxScale = motionBoxScale
-                )
+            }
+        }
+
+        // Stream Error / Offline Overlay
+        if (telemetry.hasError) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.72f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.padding(16.dp)
+                ) {
+                    Icon(
+                        Icons.Default.Warning,
+                        contentDescription = "Stream Offline",
+                        tint = NeonAmber,
+                        modifier = Modifier.size(32.dp)
+                    )
+                    Text(
+                        text = "FEED OFFLINE",
+                        color = NeonAmber,
+                        fontWeight = FontWeight.Black,
+                        fontSize = 13.sp
+                    )
+                    Text(
+                        text = telemetry.errorMessage ?: "Stream Unreachable",
+                        color = Color.White.copy(alpha = 0.85f),
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    if (onRetry != null) {
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = NeonCyan,
+                            modifier = Modifier
+                                .clickable { onRetry() }
+                                .padding(top = 4.dp)
+                        ) {
+                            Text(
+                                text = "RECONNECT",
+                                color = Color.Black,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+                }
             }
         }
 

@@ -39,5 +39,7 @@ data class StreamTelemetry(
     val latencyMs: Long = 120,
     val isLive: Boolean = true,
     val isRecording: Boolean = false,
-    val isMotionDetected: Boolean = false
+    val isMotionDetected: Boolean = false,
+    val hasError: Boolean = false,
+    val errorMessage: String? = null
 )

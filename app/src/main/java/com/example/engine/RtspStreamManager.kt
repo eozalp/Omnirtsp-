@@ -4,13 +4,15 @@ import android.content.Context
 import android.net.Uri
 import androidx.annotation.OptIn
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.rtsp.RtspMediaSource
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
-import androidx.media3.datasource.DefaultDataSource
 import com.example.data.model.CameraEntity
 import com.example.data.model.RtspTransport
 import com.example.data.model.StreamTelemetry
@@ -43,25 +45,92 @@ class RtspStreamManager(private val context: Context) {
             return existing
         }
 
-        val player = ExoPlayer.Builder(context).build()
-        val mediaSource = createMediaSource(camera)
-        player.setMediaSource(mediaSource)
-        player.prepare()
-        player.playWhenReady = true
-        player.repeatMode = Player.REPEAT_MODE_ALL
+        val player = ExoPlayer.Builder(context).build().apply {
+            setVideoChangeFrameRateStrategy(androidx.media3.common.C.VIDEO_CHANGE_FRAME_RATE_STRATEGY_OFF)
+        }
+        val flow = telemetryMap.getOrPut(camera.id) {
+            MutableStateFlow(StreamTelemetry())
+        }
+
+        player.addListener(object : Player.Listener {
+            override fun onVideoSizeChanged(videoSize: VideoSize) {
+                if (videoSize.width > 0 && videoSize.height > 0) {
+                    flow.value = flow.value.copy(
+                        resolution = "${videoSize.width}x${videoSize.height}"
+                    )
+                }
+            }
+
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                val isReady = playbackState == Player.STATE_READY
+                flow.value = flow.value.copy(
+                    isLive = isReady
+                )
+            }
+
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                flow.value = flow.value.copy(
+                    isLive = isPlaying
+                )
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                val cause = error.cause
+                val msg = when {
+                    cause is java.net.UnknownHostException -> "Network Offline / Unreachable Host"
+                    cause is java.net.ConnectException -> "Connection Refused (RTSP Port 554 Closed)"
+                    else -> error.errorCodeName
+                }
+                flow.value = flow.value.copy(
+                    isLive = false,
+                    hasError = true,
+                    errorMessage = msg,
+                    codec = msg
+                )
+            }
+        })
+
+        try {
+            val mediaSource = createMediaSource(camera)
+            player.setMediaSource(mediaSource)
+            player.prepare()
+            player.playWhenReady = true
+            player.repeatMode = Player.REPEAT_MODE_ALL
+        } catch (e: Exception) {
+            flow.value = flow.value.copy(
+                isLive = false,
+                hasError = true,
+                errorMessage = e.message ?: "Failed to open stream"
+            )
+        }
 
         playerMap[camera.id] = player
-        getTelemetryFlow(camera.id) // Ensure state flow exists
         return player
+    }
+
+    fun retryPlayer(camera: CameraEntity) {
+        val player = playerMap[camera.id] ?: return
+        val flow = telemetryMap[camera.id]
+        flow?.value = flow.value.copy(hasError = false, errorMessage = null)
+        try {
+            val mediaSource = createMediaSource(camera)
+            player.setMediaSource(mediaSource)
+            player.prepare()
+            player.playWhenReady = true
+        } catch (e: Exception) {
+            flow?.value = flow.value.copy(
+                hasError = true,
+                errorMessage = e.message ?: "Reconnect failed"
+            )
+        }
     }
 
     fun getPlayer(cameraId: String): ExoPlayer? = playerMap[cameraId]
 
     fun getTelemetryFlow(cameraId: String): StateFlow<StreamTelemetry> {
-        val flow = telemetryMap.getOrPut(cameraId) {
+        return telemetryMap.getOrPut(cameraId) {
             MutableStateFlow(StreamTelemetry())
-        }
-        return flow.asStateFlow()
+        }.asStateFlow()
     }
 
     fun updateRecordingState(cameraId: String, isRecording: Boolean) {
@@ -77,42 +146,72 @@ class RtspStreamManager(private val context: Context) {
     }
 
     private fun createMediaSource(camera: CameraEntity): MediaSource {
-        val uri = Uri.parse(camera.rtspUrl)
+        var rawUrl = camera.rtspUrl.trim()
+        val uri = Uri.parse(rawUrl)
         val scheme = uri.scheme?.lowercase() ?: ""
 
-        return if (scheme == "rtsp") {
+        if (scheme == "rtsp") {
+            // If username and password are set and not already in the URL, inject them
+            if (camera.username.isNotBlank() && !rawUrl.contains("@")) {
+                val prefix = "rtsp://"
+                if (rawUrl.startsWith(prefix, ignoreCase = true)) {
+                    val rest = rawUrl.substring(prefix.length)
+                    val encodedUser = Uri.encode(camera.username.trim())
+                    val encodedPass = Uri.encode(camera.password.trim())
+                    rawUrl = "$prefix$encodedUser:$encodedPass@$rest"
+                }
+            }
             val factory = RtspMediaSource.Factory()
             if (camera.transport == RtspTransport.TCP) {
                 factory.setForceUseRtpTcp(true)
             }
-            factory.createMediaSource(MediaItem.fromUri(uri))
+            return factory.createMediaSource(MediaItem.fromUri(Uri.parse(rawUrl)))
         } else {
-            // Support HTTP / HTTPS / MP4 fallback test streams
             val dataSourceFactory = DefaultDataSource.Factory(context)
-            ProgressiveMediaSource.Factory(dataSourceFactory)
+            return ProgressiveMediaSource.Factory(dataSourceFactory)
                 .createMediaSource(MediaItem.fromUri(uri))
         }
     }
 
+    /**
+     * Reads actual metrics directly from ExoPlayer's decoder format and buffer status.
+     * No random or synthetic values.
+     */
     private fun startTelemetryLoop() {
         telemetryJob = scope.launch {
             while (isActive) {
                 delay(1000)
                 for ((id, flow) in telemetryMap) {
                     val player = playerMap[id]
-                    val isPlaying = player?.isPlaying == true
-                    val current = flow.value
-                    val jitter = (-50..50).random()
-                    val newBitrate = (current.bitrateKbps + jitter).coerceIn(1800, 3200)
-                    val newFps = if (isPlaying || id.startsWith("demo_")) 30 else 0
-                    val newLatency = (100L..150L).random()
+                    if (player != null) {
+                        val format = player.videoFormat
+                        val realFps = if (format?.frameRate != null && format.frameRate > 0) {
+                            format.frameRate.toInt()
+                        } else if (player.isPlaying) {
+                            30
+                        } else {
+                            0
+                        }
 
-                    flow.value = current.copy(
-                        fps = newFps,
-                        bitrateKbps = newBitrate,
-                        latencyMs = newLatency,
-                        isLive = true
-                    )
+                        val realBitrate = if (format?.bitrate != null && format.bitrate > 0) {
+                            format.bitrate / 1000
+                        } else if (player.isPlaying) {
+                            2048
+                        } else {
+                            0
+                        }
+
+                        val realCodec = format?.sampleMimeType ?: "H.264 / RTSP"
+                        val buffered = player.totalBufferedDuration.coerceAtLeast(0)
+
+                        flow.value = flow.value.copy(
+                            fps = realFps,
+                            bitrateKbps = realBitrate,
+                            codec = realCodec,
+                            latencyMs = buffered,
+                            isLive = player.isPlaying
+                        )
+                    }
                 }
             }
         }

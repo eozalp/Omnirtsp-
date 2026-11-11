@@ -92,12 +92,19 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private fun seedInitialSurveillanceData() {
         viewModelScope.launch {
             val existing = database.cameraDao().getEnabledCameras()
+            for (cam in existing) {
+                if (cam.rtspUrl.contains("wowzaec2demo.streamlock.net")) {
+                    database.cameraDao().insertCamera(
+                        cam.copy(rtspUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4")
+                    )
+                }
+            }
             if (existing.isEmpty()) {
                 val seedCameras = listOf(
                     CameraEntity(
                         id = "cam_front_gate",
                         name = "Front Gate HD",
-                        rtspUrl = "rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mp4",
+                        rtspUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
                         transport = RtspTransport.TCP,
                         quality = StreamQuality.MAIN_HD,
                         isMotionDetectionEnabled = true,
@@ -108,35 +115,35 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                     CameraEntity(
                         id = "cam_driveway",
                         name = "Driveway 4K",
-                        rtspUrl = "rtsp://demo.rtsp.stream/driveway_main",
+                        rtspUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
                         transport = RtspTransport.TCP,
                         quality = StreamQuality.MAIN_HD,
                         isMotionDetectionEnabled = true,
                         motionSensitivity = 60,
                         location = "Driveway North",
-                        isDemoCamera = true
+                        isDemoCamera = false
                     ),
                     CameraEntity(
                         id = "cam_backyard",
                         name = "Backyard Yard",
-                        rtspUrl = "rtsp://demo.rtsp.stream/backyard_sub",
+                        rtspUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4",
                         transport = RtspTransport.UDP,
                         quality = StreamQuality.SUB_SD,
                         isMotionDetectionEnabled = true,
                         motionSensitivity = 80,
                         location = "Garden South",
-                        isDemoCamera = true
+                        isDemoCamera = false
                     ),
                     CameraEntity(
                         id = "cam_living_room",
                         name = "Main Entrance",
-                        rtspUrl = "rtsp://demo.rtsp.stream/entrance",
+                        rtspUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4",
                         transport = RtspTransport.TCP,
                         quality = StreamQuality.MAIN_HD,
                         isMotionDetectionEnabled = true,
                         motionSensitivity = 70,
                         location = "Foyer Indoor",
-                        isDemoCamera = true
+                        isDemoCamera = false
                     )
                 )
                 database.cameraDao().insertCameras(seedCameras)
@@ -214,10 +221,15 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         _activeScreen.value = screen
     }
 
-    fun triggerMotionSimulation(camera: CameraEntity) {
-        val score = (70..95).random()
-        motionDetectionEngine.triggerMotionAlert(camera, score, "Manual test motion trigger (${score}%)")
+    fun triggerMotionAlertManually(camera: CameraEntity, level: Int = 85) {
+        motionDetectionEngine.triggerMotionAlert(
+            camera = camera,
+            motionLevel = level,
+            customDescription = "Manual alert test triggered by operator (${level}% intensity)"
+        )
     }
+
+    fun triggerMotionSimulation(camera: CameraEntity) = triggerMotionAlertManually(camera)
 
     fun startManualRecording(camera: CameraEntity) {
         recordingSchedulerEngine.startManualRecording(camera)

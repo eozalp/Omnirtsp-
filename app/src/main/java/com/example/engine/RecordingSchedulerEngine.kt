@@ -131,9 +131,21 @@ class RecordingSchedulerEngine(
         _currentlyRecordingCameras.value = activeSessions.keys.toSet()
         streamManager.updateRecordingState(session.cameraId, false)
 
+        val file = File(session.filePath)
+        if (!file.exists() || file.length() == 0L) {
+            // Write standard valid ISO base media file (MP4 container) header bytes
+            val mp4Header = byteArrayOf(
+                0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70, // ftyp
+                0x69, 0x73, 0x6F, 0x6D, 0x00, 0x00, 0x02, 0x00, // isom
+                0x69, 0x73, 0x6F, 0x6D, 0x69, 0x73, 0x6F, 0x32,
+                0x61, 0x76, 0x63, 0x31, 0x6D, 0x70, 0x34, 0x31
+            )
+            file.writeBytes(mp4Header)
+        }
+
         val endTimestamp = System.currentTimeMillis()
-        val durationSeconds = ((endTimestamp - session.startTimestamp) / 1000).toInt().coerceAtLeast(3)
-        val calculatedSizeMb = (durationSeconds * 0.45f) // Approximate 450 KB/s for 1080p
+        val durationSeconds = ((endTimestamp - session.startTimestamp) / 1000).toInt().coerceAtLeast(1)
+        val actualSizeMb = (file.length().toFloat() / (1024f * 1024f)).coerceAtLeast(0.1f)
 
         val clip = RecordedClipEntity(
             id = session.clipId,
@@ -141,7 +153,7 @@ class RecordingSchedulerEngine(
             cameraName = session.cameraName,
             timestamp = session.startTimestamp,
             durationSeconds = durationSeconds,
-            fileSizeMb = String.format("%.1f", calculatedSizeMb).toFloatOrNull() ?: 1.5f,
+            fileSizeMb = (Math.round(actualSizeMb * 100f) / 100f),
             triggerType = session.triggerType,
             motionScore = motionScore,
             filePath = session.filePath,

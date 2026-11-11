@@ -22,15 +22,20 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.VolumeMute
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Camera
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.MotionPhotosOn
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material.icons.filled.VolumeMute
-import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
@@ -41,6 +46,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -91,6 +97,7 @@ fun FullScreenPlayerScreen(
     var isMuted by remember { mutableStateOf(false) }
     var showSensitivitySlider by remember { mutableStateOf(false) }
     var localSensitivity by remember { mutableFloatStateOf(camera.motionSensitivity.toFloat()) }
+    var showDeleteConfirm by remember { mutableStateOf(false) }
 
     Box(
         modifier = modifier
@@ -107,6 +114,7 @@ fun FullScreenPlayerScreen(
             panOffsetX = panOffsetX,
             panOffsetY = panOffsetY,
             showControlsOverlay = true,
+            onRetry = { viewModel.streamManager.retryPlayer(camera) },
             modifier = Modifier.fillMaxSize()
         )
 
@@ -130,7 +138,7 @@ fun FullScreenPlayerScreen(
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
             }
 
-            // Quick Floating Window Popout & System PiP
+            // Quick Floating Window Popout, System PiP & Delete Camera
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 // In-App Floating Resizable Window Button
                 FilledIconButton(
@@ -162,7 +170,60 @@ fun FullScreenPlayerScreen(
                         Icon(Icons.Default.PictureInPictureAlt, contentDescription = "System Picture-in-Picture")
                     }
                 }
+
+                // Delete Camera Button
+                FilledIconButton(
+                    onClick = { showDeleteConfirm = true },
+                    modifier = Modifier.size(42.dp).testTag("fullscreen_delete_camera_btn"),
+                    colors = IconButtonDefaults.filledIconButtonColors(
+                        containerColor = SurveillanceCardBg.copy(alpha = 0.85f),
+                        contentColor = NeonRed
+                    )
+                ) {
+                    Icon(Icons.Default.Delete, contentDescription = "Remove Camera")
+                }
             }
+        }
+
+        // Fullscreen Delete Confirmation Dialog
+        if (showDeleteConfirm) {
+            AlertDialog(
+                onDismissRequest = { showDeleteConfirm = false },
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Warning, contentDescription = null, tint = NeonRed)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Remove Camera?", color = Color.White, fontWeight = FontWeight.Bold)
+                    }
+                },
+                text = {
+                    Text(
+                        text = "Are you sure you want to permanently remove '${camera.name}' (${camera.location})? This will disconnect the stream and remove the camera from your surveillance matrix.",
+                        color = Color.White.copy(alpha = 0.85f),
+                        fontSize = 13.sp
+                    )
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            showDeleteConfirm = false
+                            viewModel.deleteCamera(camera)
+                            onBack()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = NeonRed, contentColor = Color.White),
+                        modifier = Modifier.testTag("confirm_delete_fullscreen_btn")
+                    ) {
+                        Text("Remove Camera", fontWeight = FontWeight.Bold)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showDeleteConfirm = false }) {
+                        Text("Cancel", color = Color.Gray)
+                    }
+                },
+                containerColor = SurveillanceCardBg,
+                shape = RoundedCornerShape(16.dp)
+            )
         }
 
         // PTZ Overlay
@@ -270,7 +331,7 @@ fun FullScreenPlayerScreen(
                 // Snapshot Button
                 FilledIconButton(
                     onClick = {
-                        viewModel.triggerMotionSimulation(camera)
+                        viewModel.triggerMotionAlertManually(camera, level = 85)
                     },
                     modifier = Modifier.size(46.dp).testTag("fullscreen_snapshot_button"),
                     colors = IconButtonDefaults.filledIconButtonColors(
@@ -284,7 +345,7 @@ fun FullScreenPlayerScreen(
                 // Motion Trigger Test
                 FilledIconButton(
                     onClick = {
-                        viewModel.triggerMotionSimulation(camera)
+                        viewModel.triggerMotionAlertManually(camera, level = 90)
                     },
                     modifier = Modifier.size(46.dp).testTag("fullscreen_motion_test_button"),
                     colors = IconButtonDefaults.filledIconButtonColors(
@@ -332,7 +393,7 @@ fun FullScreenPlayerScreen(
                     )
                 ) {
                     Icon(
-                        if (isMuted) Icons.Default.VolumeMute else Icons.Default.VolumeUp,
+                        if (isMuted) Icons.AutoMirrored.Filled.VolumeMute else Icons.AutoMirrored.Filled.VolumeUp,
                         contentDescription = "Audio Toggle"
                     )
                 }

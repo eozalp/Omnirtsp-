@@ -30,12 +30,16 @@ class ExampleUnitTest {
       id = "cam_front",
       name = "Front Gate HD",
       rtspUrl = "rtsp://192.168.1.10:554/live",
+      username = "admin",
+      password = "secretPassword123!",
       transport = RtspTransport.TCP,
       quality = StreamQuality.MAIN_HD,
       motionSensitivity = 75
     )
     assertEquals("Front Gate HD", camera.name)
     assertEquals(RtspTransport.TCP, camera.transport)
+    assertEquals("admin", camera.username)
+    assertEquals("secretPassword123!", camera.password)
     assertEquals(75, camera.motionSensitivity)
     assertTrue(camera.isMotionDetectionEnabled)
   }

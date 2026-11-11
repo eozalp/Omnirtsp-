@@ -5,6 +5,8 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.Color
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import com.example.MainActivity
@@ -20,31 +22,42 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.FileOutputStream
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.abs
 
 class MotionDetectionEngine(
     private val context: Context,
     private val database: AppDatabase,
     private val streamManager: RtspStreamManager
 ) {
-    private val scope = CoroutineScope(Dispatchers.IO + Job())
-    private var simulationJob: Job? = null
+    private val scope = CoroutineScope(Dispatchers.Default + Job())
     private val notificationManager =
         context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
     private val _motionAlertEvents = MutableSharedFlow<MotionAlertEntity>(extraBufferCapacity = 64)
     val motionAlertEvents: SharedFlow<MotionAlertEntity> = _motionAlertEvents.asSharedFlow()
 
-    private val lastTriggerTimestamp = mutableMapOf<String, Long>()
+    private val lastTriggerTimestamp = ConcurrentHashMap<String, Long>()
+    private val previousFrameLuminance = ConcurrentHashMap<String, IntArray>()
 
-    // Motion trigger callback (e.g. to start recording)
     var onMotionTriggered: ((CameraEntity, MotionAlertEntity) -> Unit)? = null
 
     init {
         createNotificationChannel()
-        startPeriodicMotionSimulation()
+        ensureSnapshotsDirectory()
+    }
+
+    private fun ensureSnapshotsDirectory(): File {
+        val dir = File(context.filesDir, "snapshots")
+        if (!dir.exists()) {
+            dir.mkdirs()
+        }
+        return dir
     }
 
     private fun createNotificationChannel() {
@@ -62,7 +75,86 @@ class MotionDetectionEngine(
         }
     }
 
-    fun triggerMotionAlert(camera: CameraEntity, motionLevel: Int, customDescription: String? = null) {
+    /**
+     * Real-time Computer Vision Frame Differencing Algorithm:
+     * Analyzes video frames pixel-by-pixel using luminance delta comparison.
+     */
+    fun processVideoFrame(camera: CameraEntity, frameBitmap: Bitmap) {
+        if (!camera.isMotionDetectionEnabled) return
+
+        scope.launch {
+            try {
+                // Downscale to 64x36 for high-performance low-overhead pixel differencing
+                val width = 64
+                val height = 36
+                val scaled = Bitmap.createScaledBitmap(frameBitmap, width, height, false)
+                val totalPixels = width * height
+                val currentLuminance = IntArray(totalPixels)
+                val pixels = IntArray(totalPixels)
+                scaled.getPixels(pixels, 0, width, 0, 0, width, height)
+
+                // Calculate ITU-R BT.601 luminance for each pixel
+                for (i in 0 until totalPixels) {
+                    val p = pixels[i]
+                    val r = Color.red(p)
+                    val g = Color.green(p)
+                    val b = Color.blue(p)
+                    currentLuminance[i] = (0.299 * r + 0.587 * g + 0.114 * b).toInt()
+                }
+
+                val previous = previousFrameLuminance[camera.id]
+                previousFrameLuminance[camera.id] = currentLuminance
+
+                if (previous != null) {
+                    var changedPixels = 0
+                    val luminanceDeltaThreshold = 25 // Minimum grayscale intensity change per pixel
+
+                    for (i in 0 until totalPixels) {
+                        if (abs(currentLuminance[i] - previous[i]) > luminanceDeltaThreshold) {
+                            changedPixels++
+                        }
+                    }
+
+                    val motionScore = ((changedPixels.toFloat() / totalPixels) * 100).toInt()
+
+                    // Sensitivity: 100 means trigger on 3% change, 50 means 15% change, 10 means 30% change
+                    val triggerThreshold = ((100 - camera.motionSensitivity) * 0.3f + 3).toInt()
+
+                    if (motionScore >= triggerThreshold) {
+                        // Save real frame snapshot to disk
+                        val snapshotFile = saveSnapshotToFile(camera.id, frameBitmap)
+                        triggerMotionAlert(
+                            camera = camera,
+                            motionLevel = motionScore.coerceIn(1, 100),
+                            snapshotPath = snapshotFile?.absolutePath,
+                            customDescription = "Motion detected: ${motionScore}% frame variation (Threshold: ${triggerThreshold}%)"
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                // Frame processing error handling
+            }
+        }
+    }
+
+    private fun saveSnapshotToFile(cameraId: String, bitmap: Bitmap): File? {
+        return try {
+            val file = File(ensureSnapshotsDirectory(), "snap_${cameraId}_${System.currentTimeMillis()}.jpg")
+            FileOutputStream(file).use { out ->
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 85, out)
+            }
+            file
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    fun triggerMotionAlert(
+        camera: CameraEntity,
+        motionLevel: Int,
+        snapshotPath: String? = null,
+        customDescription: String? = null
+    ) {
         val now = System.currentTimeMillis()
         val lastTime = lastTriggerTimestamp[camera.id] ?: 0L
         val cooldownMs = camera.motionCooldownSeconds * 1000L
@@ -74,14 +166,14 @@ class MotionDetectionEngine(
         lastTriggerTimestamp[camera.id] = now
 
         val severity = when {
-            motionLevel >= 80 -> MotionSeverity.HIGH
-            motionLevel >= 50 -> MotionSeverity.MEDIUM
+            motionLevel >= 60 -> MotionSeverity.HIGH
+            motionLevel >= 30 -> MotionSeverity.MEDIUM
             else -> MotionSeverity.LOW
         }
 
         val desc = customDescription ?: when (severity) {
-            MotionSeverity.HIGH -> "Significant motion detected in primary security zone (${motionLevel}%)"
-            MotionSeverity.MEDIUM -> "Movement detected near camera view (${motionLevel}%)"
+            MotionSeverity.HIGH -> "High-intensity motion detected in primary zone (${motionLevel}%)"
+            MotionSeverity.MEDIUM -> "Motion detected across frame area (${motionLevel}%)"
             MotionSeverity.LOW -> "Subtle motion detected in perimeter (${motionLevel}%)"
         }
 
@@ -93,6 +185,7 @@ class MotionDetectionEngine(
             motionLevel = motionLevel,
             severity = severity,
             description = desc,
+            snapshotPath = snapshotPath,
             isRead = false
         )
 
@@ -139,29 +232,9 @@ class MotionDetectionEngine(
         notificationManager.notify(alert.id.hashCode(), notification)
     }
 
-    private fun startPeriodicMotionSimulation() {
-        // Automatically simulates natural security camera motion triggers (e.g. for demo cameras or test streams)
-        simulationJob = scope.launch {
-            while (isActive) {
-                delay(18000) // Every 18-25 seconds, chance of motion on enabled cameras
-                val cameras = database.cameraDao().getEnabledCameras()
-                for (camera in cameras) {
-                    if (camera.isMotionDetectionEnabled) {
-                        val randomScore = (30..95).random()
-                        // Sensitivity threshold: higher sensitivity means triggers more easily
-                        val threshold = (100 - camera.motionSensitivity).coerceAtLeast(10)
-                        if (randomScore >= threshold) {
-                            triggerMotionAlert(camera, randomScore)
-                            break // Trigger one camera per interval to avoid flooding
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     fun release() {
-        simulationJob?.cancel()
+        previousFrameLuminance.clear()
+        lastTriggerTimestamp.clear()
     }
 
     companion object {
