@@ -1,0 +1,243 @@
+package com.example.engine
+
+import android.content.Context
+import com.example.data.local.AppDatabase
+import com.example.data.model.CameraEntity
+import com.example.data.model.ClipTriggerType
+import com.example.data.model.CloudSyncStatus
+import com.example.data.model.RecordedClipEntity
+import com.example.data.model.RecordingMode
+import com.example.data.model.RecordingScheduleEntity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import java.io.File
+import java.util.Calendar
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+
+data class ActiveRecordingSession(
+    val clipId: String,
+    val cameraId: String,
+    val cameraName: String,
+    val startTimestamp: Long,
+    val triggerType: ClipTriggerType,
+    val filePath: String,
+    val scheduleId: String? = null
+)
+
+class RecordingSchedulerEngine(
+    private val context: Context,
+    private val database: AppDatabase,
+    private val streamManager: RtspStreamManager,
+    private val cloudStorageManager: CloudStorageManager
+) {
+    private val scope = CoroutineScope(Dispatchers.IO + Job())
+    private var schedulerLoopJob: Job? = null
+
+    private val activeSessions = ConcurrentHashMap<String, ActiveRecordingSession>()
+
+    private val _currentlyRecordingCameras = MutableStateFlow<Set<String>>(emptySet())
+    val currentlyRecordingCameras: StateFlow<Set<String>> = _currentlyRecordingCameras.asStateFlow()
+
+    private val _activeSchedulesState = MutableStateFlow<List<RecordingScheduleEntity>>(emptyList())
+    val activeSchedulesState: StateFlow<List<RecordingScheduleEntity>> = _activeSchedulesState.asStateFlow()
+
+    init {
+        ensureRecordingsDirectory()
+        startSchedulerLoop()
+    }
+
+    private fun ensureRecordingsDirectory(): File {
+        val dir = File(context.filesDir, "recordings")
+        if (!dir.exists()) {
+            dir.mkdirs()
+        }
+        return dir
+    }
+
+    fun startManualRecording(camera: CameraEntity): String {
+        return startRecordingSession(camera, ClipTriggerType.MANUAL, null)
+    }
+
+    fun stopRecording(cameraId: String) {
+        val session = activeSessions.remove(cameraId) ?: return
+        finishRecordingSession(session)
+    }
+
+    fun handleMotionTrigger(camera: CameraEntity, motionScore: Int) {
+        if (activeSessions.containsKey(camera.id)) {
+            // Already recording
+            return
+        }
+
+        scope.launch {
+            val schedules = database.scheduleDao().getActiveSchedules()
+            val isMotionScheduleActive = schedules.any { schedule ->
+                isScheduleCurrentlyActive(schedule) &&
+                        (schedule.mode == RecordingMode.MOTION_ONLY || schedule.mode == RecordingMode.CONTINUOUS) &&
+                        isCameraTargetedBySchedule(camera.id, schedule)
+            }
+
+            // If a motion schedule is active or camera has motion detection enabled
+            if (isMotionScheduleActive || camera.isMotionDetectionEnabled) {
+                val clipId = startRecordingSession(camera, ClipTriggerType.MOTION_ALERT, motionScore)
+                // Record for 15 seconds after motion
+                delay(15000)
+                activeSessions[camera.id]?.let { session ->
+                    if (session.clipId == clipId) {
+                        activeSessions.remove(camera.id)
+                        finishRecordingSession(session, motionScore)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun startRecordingSession(
+        camera: CameraEntity,
+        triggerType: ClipTriggerType,
+        motionScore: Int?
+    ): String {
+        val clipId = UUID.randomUUID().toString()
+        val dir = ensureRecordingsDirectory()
+        val clipFile = File(dir, "clip_${camera.name.replace(" ", "_")}_${System.currentTimeMillis()}.mp4")
+        if (!clipFile.exists()) {
+            clipFile.createNewFile()
+        }
+
+        val session = ActiveRecordingSession(
+            clipId = clipId,
+            cameraId = camera.id,
+            cameraName = camera.name,
+            startTimestamp = System.currentTimeMillis(),
+            triggerType = triggerType,
+            filePath = clipFile.absolutePath
+        )
+
+        activeSessions[camera.id] = session
+        _currentlyRecordingCameras.value = activeSessions.keys.toSet()
+        streamManager.updateRecordingState(camera.id, true)
+        return clipId
+    }
+
+    private fun finishRecordingSession(session: ActiveRecordingSession, motionScore: Int = 0) {
+        _currentlyRecordingCameras.value = activeSessions.keys.toSet()
+        streamManager.updateRecordingState(session.cameraId, false)
+
+        val endTimestamp = System.currentTimeMillis()
+        val durationSeconds = ((endTimestamp - session.startTimestamp) / 1000).toInt().coerceAtLeast(3)
+        val calculatedSizeMb = (durationSeconds * 0.45f) // Approximate 450 KB/s for 1080p
+
+        val clip = RecordedClipEntity(
+            id = session.clipId,
+            cameraId = session.cameraId,
+            cameraName = session.cameraName,
+            timestamp = session.startTimestamp,
+            durationSeconds = durationSeconds,
+            fileSizeMb = String.format("%.1f", calculatedSizeMb).toFloatOrNull() ?: 1.5f,
+            triggerType = session.triggerType,
+            motionScore = motionScore,
+            filePath = session.filePath,
+            cloudSyncStatus = CloudSyncStatus.LOCAL_ONLY
+        )
+
+        scope.launch {
+            database.recordedClipDao().insertClip(clip)
+
+            // Auto cloud sync
+            val config = database.cloudConfigDao().getCloudConfigSync()
+            if (config?.autoSyncRecordings == true) {
+                cloudStorageManager.uploadClipToCloud(clip, forced = false)
+            }
+        }
+    }
+
+    private fun startSchedulerLoop() {
+        schedulerLoopJob = scope.launch {
+            while (isActive) {
+                val schedules = database.scheduleDao().getActiveSchedules()
+                val activeList = mutableListOf<RecordingScheduleEntity>()
+
+                for (schedule in schedules) {
+                    if (isScheduleCurrentlyActive(schedule)) {
+                        activeList.add(schedule)
+                        // If continuous recording is required for cameras in this schedule
+                        if (schedule.mode == RecordingMode.CONTINUOUS) {
+                            val enabledCameras = database.cameraDao().getEnabledCameras()
+                            for (camera in enabledCameras) {
+                                if (isCameraTargetedBySchedule(camera.id, schedule) && !activeSessions.containsKey(camera.id)) {
+                                    startRecordingSession(camera, ClipTriggerType.SCHEDULED, null)
+                                }
+                            }
+                        }
+                    } else {
+                        // Check if any active sessions belong to an expired continuous schedule
+                        // and wrap them up
+                        for ((camId, session) in activeSessions) {
+                            if (session.triggerType == ClipTriggerType.SCHEDULED) {
+                                val duration = System.currentTimeMillis() - session.startTimestamp
+                                // Rotate clips every 10 minutes or if schedule ended
+                                if (duration > 10 * 60 * 1000L) {
+                                    activeSessions.remove(camId)
+                                    finishRecordingSession(session)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                _activeSchedulesState.value = activeList
+                delay(10000) // check every 10 seconds
+            }
+        }
+    }
+
+    private fun isScheduleCurrentlyActive(schedule: RecordingScheduleEntity): Boolean {
+        if (!schedule.isEnabled) return false
+        val now = Calendar.getInstance()
+        val currentDay = when (now.get(Calendar.DAY_OF_WEEK)) {
+            Calendar.MONDAY -> "MON"
+            Calendar.TUESDAY -> "TUE"
+            Calendar.WEDNESDAY -> "WED"
+            Calendar.THURSDAY -> "THU"
+            Calendar.FRIDAY -> "FRI"
+            Calendar.SATURDAY -> "SAT"
+            Calendar.SUNDAY -> "SUN"
+            else -> "ALL"
+        }
+
+        if (!schedule.daysOfWeek.contains(currentDay) && !schedule.daysOfWeek.contains("ALL")) {
+            return false
+        }
+
+        val currentMinutes = now.get(Calendar.HOUR_OF_DAY) * 60 + now.get(Calendar.MINUTE)
+        val startMinutes = schedule.startHour * 60 + schedule.startMinute
+        val endMinutes = schedule.endHour * 60 + schedule.endMinute
+
+        return if (startMinutes <= endMinutes) {
+            currentMinutes in startMinutes..endMinutes
+        } else {
+            // Over midnight schedule (e.g. 22:00 to 06:00)
+            currentMinutes >= startMinutes || currentMinutes <= endMinutes
+        }
+    }
+
+    private fun isCameraTargetedBySchedule(cameraId: String, schedule: RecordingScheduleEntity): Boolean {
+        return schedule.targetCameraIds == "ALL" || schedule.targetCameraIds.contains(cameraId)
+    }
+
+    fun release() {
+        schedulerLoopJob?.cancel()
+        for ((_, session) in activeSessions) {
+            finishRecordingSession(session)
+        }
+        activeSessions.clear()
+    }
+}

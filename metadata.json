@@ -1,0 +1,6 @@
+{
+  "name": "OmniView RTSP",
+  "description": "RTSP camera viewer and recorder with motion detection alerts, cloud storage sync, scheduled recordings, full-screen and resizable floating window view.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
