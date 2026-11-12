@@ -96,8 +96,26 @@ class ExampleUnitTest {
 
     val s3Config = gDriveConfig.copy(
       provider = CloudProviderType.AWS_S3_COMPATIBLE,
-      endpointUrl = "https://s3.us-west-2.amazonaws.com"
+      endpointUrl = "https://s3.us-west-2.amazonaws.com",
+      s3AccessKeyId = "AKIAIOSFODNN7EXAMPLE",
+      s3SecretAccessKey = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+      s3Bucket = "surveillance-vault-prod",
+      s3Region = "us-west-2"
     )
     assertEquals(CloudProviderType.AWS_S3_COMPATIBLE, s3Config.provider)
+    assertEquals("AKIAIOSFODNN7EXAMPLE", s3Config.s3AccessKeyId)
+    assertEquals("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", s3Config.s3SecretAccessKey)
+    assertEquals("surveillance-vault-prod", s3Config.s3Bucket)
+    assertEquals("us-west-2", s3Config.s3Region)
+
+    val webdavConfig = gDriveConfig.copy(
+      provider = CloudProviderType.WEBDAV,
+      endpointUrl = "https://nextcloud.company.com/remote.php/dav/files/user/cctv",
+      webdavUsername = "sec_admin",
+      webdavPassword = "DavSecretPassword123!"
+    )
+    assertEquals(CloudProviderType.WEBDAV, webdavConfig.provider)
+    assertEquals("sec_admin", webdavConfig.webdavUsername)
+    assertEquals("DavSecretPassword123!", webdavConfig.webdavPassword)
   }
 }

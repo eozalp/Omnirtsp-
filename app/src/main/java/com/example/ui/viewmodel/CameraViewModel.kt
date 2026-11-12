@@ -229,8 +229,6 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         )
     }
 
-    fun triggerMotionSimulation(camera: CameraEntity) = triggerMotionAlertManually(camera)
-
     fun startManualRecording(camera: CameraEntity) {
         recordingSchedulerEngine.startManualRecording(camera)
     }

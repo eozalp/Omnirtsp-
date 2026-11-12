@@ -1,0 +1,130 @@
+name: Android CI Build
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build target'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - 'all'
+          - 'debug'
+          - 'test_only'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build & Verify Android App
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Java JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: 11076708
+
+      - name: Accept Android SDK Licenses
+        run: |
+          yes | sdkmanager --licenses || true
+
+      - name: Setup Environment Files (.env)
+        run: |
+          # Secrets Gradle Plugin requires .env file to be present
+          if [ ! -f .env ]; then
+            if [ -f .env.example ]; then
+              cp .env.example .env
+              echo "Created .env from .env.example"
+            else
+              touch .env
+              echo "Created empty .env"
+            fi
+          fi
+
+      - name: Setup Debug Keystore
+        run: |
+          # Restore debug keystore if base64 secret is available
+          if [ -f debug.keystore.base64 ]; then
+            base64 -d debug.keystore.base64 > debug.keystore
+            echo "Decoded debug.keystore from base64"
+          fi
+          
+          # Generate fallback debug keystore if still missing
+          if [ ! -f debug.keystore ]; then
+            keytool -genkey -v \
+              -keystore debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+            echo "Generated new debug.keystore"
+          fi
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
+          cache-read-only: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master' }}
+
+      - name: Ensure Executable Permissions
+        run: |
+          if [ -f gradlew ]; then
+            chmod +x gradlew
+          fi
+
+      - name: Run Unit Tests & Verifications
+        run: |
+          if [ -f gradlew ]; then
+            ./gradlew testDebugUnitTest --stacktrace --continue
+          else
+            gradle testDebugUnitTest --stacktrace --continue
+          fi
+
+      - name: Upload Test Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-results
+          path: app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: ignore
+
+      - name: Build Debug APK
+        if: ${{ github.event.inputs.build_type != 'test_only' }}
+        run: |
+          if [ -f gradlew ]; then
+            ./gradlew assembleDebug --stacktrace
+          else
+            gradle assembleDebug --stacktrace
+          fi
+
+      - name: Upload Debug APK Artifact
+        if: ${{ github.event.inputs.build_type != 'test_only' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: OmniView-RTSP-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14

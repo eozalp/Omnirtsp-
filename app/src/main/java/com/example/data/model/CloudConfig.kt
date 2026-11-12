@@ -18,6 +18,22 @@ data class CloudConfigEntity(
     val endpointUrl: String = "https://cloud.surveillance.storage/v1/sync",
     val bucketOrFolderName: String = "OmniView-RTSP-Clips",
     val apiKeyOrToken: String = "",
+    // Real S3 / MinIO / R2 credentials
+    val s3AccessKeyId: String = "",
+    val s3SecretAccessKey: String = "",
+    val s3Region: String = "us-east-1",
+    val s3Bucket: String = "omniview-recordings",
+    val s3Endpoint: String = "https://s3.amazonaws.com",
+    // Real WebDAV / NextCloud credentials
+    val webdavUsername: String = "",
+    val webdavPassword: String = "",
+    // Real NAS / Local Gateway credentials
+    val nasUsername: String = "",
+    val nasPassword: String = "",
+    // Real Webhook / REST headers
+    val customHeaderName: String = "Authorization",
+    val customHeaderValue: String = "",
+    // Policies
     val autoSyncRecordings: Boolean = true,
     val autoSyncMotionSnapshots: Boolean = true,
     val wifiOnly: Boolean = true,
