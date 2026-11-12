@@ -5,15 +5,32 @@ import com.example.data.model.ClipTriggerType
 import com.example.data.model.CloudConfigEntity
 import com.example.data.model.CloudProviderType
 import com.example.data.model.CloudSyncStatus
+import com.example.data.model.LocalSaveDestination
 import com.example.data.model.MotionSeverity
 import com.example.data.model.RecordedClipEntity
 import com.example.data.model.RecordingMode
 import com.example.data.model.RecordingScheduleEntity
 import com.example.data.model.RtspTransport
 import com.example.data.model.StreamQuality
+import com.example.engine.CameraDiscoveryEngine
+import com.example.engine.OnvifPtzClient
+import com.example.engine.StorageRetentionEngine
+import com.example.i18n.AppLocaleManager
+import com.example.service.FloatingOverlayStateHolder
+import com.example.ui.components.ResizeCorner
+import com.example.ui.components.baseWidthFromActualWidthDp
+import com.example.ui.components.computeCoverFrameSizeForRotation
+import com.example.ui.components.computeEffectiveContainerAspectRatio
+import com.example.ui.components.formatRotationLabel
+import com.example.ui.components.normalizeRotationDegrees
+import com.example.ui.components.parseResolutionAspectRatio
+import com.example.ui.components.resolveFloatingWindowSizeDp
+import com.example.ui.viewmodel.CornerPosition
+import com.example.ui.viewmodel.FloatingWindowState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -117,5 +134,306 @@ class ExampleUnitTest {
     assertEquals(CloudProviderType.WEBDAV, webdavConfig.provider)
     assertEquals("sec_admin", webdavConfig.webdavUsername)
     assertEquals("DavSecretPassword123!", webdavConfig.webdavPassword)
+  }
+
+  @Test
+  fun floatingWindowState_supportsCornersAndFreePositioning() {
+    val defaultWin = FloatingWindowState(cameraId = "cam_1")
+    assertEquals(200f, defaultWin.widthDp, 0.01f)
+    assertEquals(CornerPosition.TOP_RIGHT, defaultWin.cornerSnap)
+    assertNull(defaultWin.offsetX)
+    assertNull(defaultWin.offsetY)
+
+    val freeMoved = defaultWin.copy(
+      offsetX = 120f,
+      offsetY = 340f,
+      cornerSnap = null,
+      widthDp = 320f.coerceIn(130f, 540f)
+    )
+    assertNull(freeMoved.cornerSnap)
+    assertEquals(120f, freeMoved.offsetX!!, 0.01f)
+    assertEquals(340f, freeMoved.offsetY!!, 0.01f)
+    assertEquals(320f, freeMoved.widthDp, 0.01f)
+    assertEquals(4, CornerPosition.entries.size)
+    assertEquals(4, ResizeCorner.entries.size)
+  }
+
+  @Test
+  fun floatingOverlayStateHolder_managesMultipleWindowsAndResize() {
+    FloatingOverlayStateHolder.closeAll()
+    FloatingOverlayStateHolder.floatAllCameras(listOf("cam_a", "cam_b", "cam_c", "cam_d"), defaultWidthDp = 180f)
+    val windows = FloatingOverlayStateHolder.floatingWindows.value
+    assertEquals(4, windows.size)
+    assertEquals(CornerPosition.TOP_LEFT, windows[0].cornerSnap)
+    assertEquals(CornerPosition.TOP_RIGHT, windows[1].cornerSnap)
+    assertEquals(CornerPosition.BOTTOM_LEFT, windows[2].cornerSnap)
+    assertEquals(CornerPosition.BOTTOM_RIGHT, windows[3].cornerSnap)
+
+    FloatingOverlayStateHolder.resizeWindow("cam_b", widthDp = 999f, offsetX = 50f, offsetY = 80f)
+    val resizedB = FloatingOverlayStateHolder.floatingWindows.value.first { it.cameraId == "cam_b" }
+    assertEquals(540f, resizedB.widthDp, 0.01f)
+    assertEquals(50f, resizedB.offsetX!!, 0.01f)
+    assertEquals(80f, resizedB.offsetY!!, 0.01f)
+    assertNull(resizedB.cornerSnap)
+
+    FloatingOverlayStateHolder.closeFloatingCamera("cam_a")
+    assertEquals(3, FloatingOverlayStateHolder.floatingWindows.value.size)
+
+    FloatingOverlayStateHolder.closeAll()
+    assertTrue(FloatingOverlayStateHolder.floatingWindows.value.isEmpty())
+  }
+
+  @Test
+  fun localAndSafStorageOptions_configAndClipTracking() {
+    val defaultConfig = CloudConfigEntity()
+    assertEquals(LocalSaveDestination.PUBLIC_MOVIES, defaultConfig.localSaveDestination)
+    assertEquals("", defaultConfig.safFolderUri)
+    assertEquals("", defaultConfig.safFolderDisplayName)
+    assertTrue(defaultConfig.autoSaveToDeviceFolder)
+    assertEquals(3, LocalSaveDestination.entries.size)
+
+    val customFolderConfig = defaultConfig.copy(
+      localSaveDestination = LocalSaveDestination.CUSTOM_SAF_FOLDER,
+      safFolderUri = "content://com.android.externalstorage.documents/tree/primary%3ACamClips",
+      safFolderDisplayName = "Device / CamClips",
+      autoSaveToDeviceFolder = true
+    )
+    assertEquals(LocalSaveDestination.CUSTOM_SAF_FOLDER, customFolderConfig.localSaveDestination)
+    assertEquals("Device / CamClips", customFolderConfig.safFolderDisplayName)
+
+    val clipWithExport = RecordedClipEntity(
+      id = "clip_local_1",
+      cameraId = "cam_1",
+      cameraName = "Front Gate",
+      timestamp = 1731333600000L,
+      durationSeconds = 10,
+      fileSizeMb = 4.2f,
+      triggerType = ClipTriggerType.MANUAL,
+      filePath = "/data/user/0/com.example/files/recordings/clip_local_1.mp4",
+      localExportUri = "content://com.google.android.apps.docs.storage/document/acc%3D1%3Bdoc%3D42"
+    )
+    assertEquals(
+      "content://com.google.android.apps.docs.storage/document/acc%3D1%3Bdoc%3D42",
+      clipWithExport.localExportUri
+    )
+  }
+
+  @Test
+  fun videoRotation_normalizesDegreesAndSyncsFloatingWindows() {
+    assertEquals(0f, normalizeRotationDegrees(0f), 0.01f)
+    assertEquals(0f, normalizeRotationDegrees(360f), 0.01f)
+    assertEquals(270f, normalizeRotationDegrees(-90f), 0.01f)
+    assertEquals(42.5f, normalizeRotationDegrees(402.5f), 0.01f)
+    assertEquals("90°", formatRotationLabel(90f))
+    assertEquals("42.5°", formatRotationLabel(42.5f))
+
+    val cam = CameraEntity(
+      id = "cam_rot",
+      name = "Garden Cam",
+      rtspUrl = "rtsp://192.168.1.55:554/stream",
+      rotationDegrees = 90f
+    )
+    FloatingOverlayStateHolder.closeAll()
+    FloatingOverlayStateHolder.updateCameras(listOf(cam))
+    FloatingOverlayStateHolder.openFloatingCamera("cam_rot")
+
+    val openedWin = FloatingOverlayStateHolder.floatingWindows.value.first { it.cameraId == "cam_rot" }
+    assertEquals(90f, openedWin.rotationDegrees, 0.01f)
+
+    // Free rotation update syncs both floating window and live camera state
+    FloatingOverlayStateHolder.setRotation("cam_rot", -37.5f)
+    val rotatedWin = FloatingOverlayStateHolder.floatingWindows.value.first { it.cameraId == "cam_rot" }
+    val rotatedCam = FloatingOverlayStateHolder.cameras.value.first { it.id == "cam_rot" }
+    assertEquals(322.5f, rotatedWin.rotationDegrees, 0.01f)
+    assertEquals(322.5f, rotatedCam.rotationDegrees, 0.01f)
+
+    FloatingOverlayStateHolder.closeAll()
+  }
+
+  @Test
+  fun onvifPtz_buildsRealSoapRequestsAndExtractsHost() {
+    val cam = CameraEntity(
+      id = "cam_ptz",
+      name = "PTZ Dome",
+      rtspUrl = "rtsp://192.168.1.120:554/h264Preview_01_main",
+      username = "admin",
+      password = "ptzPassword!",
+      onvifPort = 8000
+    )
+    assertEquals(8000, cam.onvifPort)
+    assertEquals("192.168.1.120", OnvifPtzClient.extractHost(cam.rtspUrl))
+    assertEquals(null, OnvifPtzClient.extractHost("android.resource://com.example/raw/sample"))
+    assertEquals(
+      "http://192.168.1.120:8000/onvif/ptz_service",
+      OnvifPtzClient.defaultPtzUrl("192.168.1.120", cam.onvifPort)
+    )
+
+    val moveBody = OnvifPtzClient.buildContinuousMoveBody(
+      profileToken = "Profile_1",
+      panX = 0.6f,
+      tiltY = -0.3f,
+      zoomX = 0.8f
+    )
+    assertTrue(moveBody.contains("<tptz:ContinuousMove>"))
+    assertTrue(moveBody.contains("<tptz:ProfileToken>Profile_1</tptz:ProfileToken>"))
+    assertTrue(moveBody.contains("x=\"0.60\""))
+    assertTrue(moveBody.contains("y=\"-0.30\""))
+
+    val stopBody = OnvifPtzClient.buildStopBody("Profile_1")
+    assertTrue(stopBody.contains("<tptz:Stop>"))
+    assertTrue(stopBody.contains("<tptz:PanTilt>true</tptz:PanTilt>"))
+    assertTrue(stopBody.contains("<tptz:Zoom>true</tptz:Zoom>"))
+
+    val soap = OnvifPtzClient.buildSoapEnvelope("admin", "ptzPassword!", moveBody)
+    assertTrue(soap.contains("<Username>admin</Username>"))
+    assertTrue(soap.contains("PasswordDigest"))
+    assertTrue(soap.contains("<tptz:ContinuousMove>"))
+  }
+
+  @Test
+  fun rotationGeometry_rotates16by9To9by16WithZeroBlackSides() {
+    val srcAspect = parseResolutionAspectRatio("1920x1080")
+    assertEquals(16f / 9f, srcAspect, 0.001f)
+
+    // Container flips from 16:9 to 9:16 at 90° and 270°
+    assertEquals(16f / 9f, computeEffectiveContainerAspectRatio(srcAspect, 0f), 0.001f)
+    assertEquals(9f / 16f, computeEffectiveContainerAspectRatio(srcAspect, 90f), 0.001f)
+    assertEquals(9f / 16f, computeEffectiveContainerAspectRatio(srcAspect, 270f), 0.001f)
+
+    // In a 9:16 frame (900x1600) rotated 90°, cover frame is 1600x900 -> rotated 900x1600 (exact 0px black sides)
+    val (coverW, coverH) = computeCoverFrameSizeForRotation(
+      viewportW = 900f,
+      viewportH = 1600f,
+      sourceAspect = srcAspect,
+      rotationDegrees = 90f
+    )
+    assertEquals(1600f, coverW, 0.5f)
+    assertEquals(900f, coverH, 0.5f)
+
+    // In taller fullscreen portrait phone (1080x1800) rotated 90°, cover frame fills entire width & height
+    val (fullW, fullH) = computeCoverFrameSizeForRotation(
+      viewportW = 1080f,
+      viewportH = 1800f,
+      sourceAspect = srcAspect,
+      rotationDegrees = 90f
+    )
+    assertTrue(fullH >= 1080f - 0.1f)
+    assertTrue(fullW >= 1800f - 0.1f)
+
+    // Floating window rotates footprint cleanly from 200x112.5 to 112.5x200 and preserves inverse base width
+    val (floatW, floatH) = resolveFloatingWindowSizeDp(
+      baseWidthDp = 200f,
+      effectiveAspect = 9f / 16f,
+      maxWidthDp = 340f,
+      maxHeightDp = 600f
+    )
+    assertEquals(112.5f, floatW, 0.2f)
+    assertEquals(200f, floatH, 0.2f)
+    assertEquals(200f, baseWidthFromActualWidthDp(floatW, 9f / 16f), 0.2f)
+  }
+
+  @Test
+  fun cameraDiscovery_parsesOnvifWsDiscoveryAndRtspStreamUri() {
+    val probeXml = CameraDiscoveryEngine.buildWsDiscoveryProbeXml("1111-2222")
+    assertTrue(probeXml.contains("dn:NetworkVideoTransmitter"))
+    assertTrue(probeXml.contains("uuid:1111-2222"))
+
+    val sampleResponse = """
+      <s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:d="http://schemas.xmlsoap.org/ws/2005/04/discovery">
+        <s:Body>
+          <d:ProbeMatches>
+            <d:ProbeMatch>
+              <d:Scopes>onvif://www.onvif.org/type/Network_Video_Transmitter onvif://www.onvif.org/name/Reolink%20Front</d:Scopes>
+              <d:XAddrs>http://192.168.1.120:8000/onvif/device_service</d:XAddrs>
+            </d:ProbeMatch>
+          </d:ProbeMatches>
+        </s:Body>
+      </s:Envelope>
+    """.trimIndent()
+
+    val parsed = CameraDiscoveryEngine.parseWsDiscoveryResponse(sampleResponse, "192.168.1.120")
+    assertNotNull(parsed)
+    assertEquals("192.168.1.120", parsed?.ipAddress)
+    assertEquals(8000, parsed?.onvifPort)
+    assertEquals("Reolink", parsed?.manufacturer)
+    assertEquals("rtsp://192.168.1.120:554/h264Preview_01_main", parsed?.suggestedRtspUrl)
+
+    val streamUriXml = """
+      <trt:GetStreamUriResponse xmlns:trt="http://www.onvif.org/ver10/media/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
+        <trt:MediaUri>
+          <tt:Uri>rtsp://192.168.1.120:554/h264Preview_01_main?token=1&amp;ch=1</tt:Uri>
+        </trt:MediaUri>
+      </trt:GetStreamUriResponse>
+    """.trimIndent()
+    assertEquals(
+      "rtsp://192.168.1.120:554/h264Preview_01_main?token=1&ch=1",
+      OnvifPtzClient.extractStreamUriFromXml(streamUriXml)
+    )
+
+    val hosts = CameraDiscoveryEngine.enumerateSubnetHosts("192.168.1.42")
+    assertEquals(253, hosts.size)
+    assertFalse(hosts.contains("192.168.1.42"))
+    assertTrue(hosts.contains("192.168.1.1"))
+    assertTrue(hosts.contains("192.168.1.254"))
+  }
+
+  @Test
+  fun rollingStorageRetention_calculatesCutoffAndReplacesExpiredClips() {
+    val defaultCfg = CloudConfigEntity()
+    assertTrue(defaultCfg.retentionEnabled)
+    assertEquals(3, defaultCfg.retentionDays)
+    assertEquals(0, defaultCfg.retentionHours)
+    assertEquals(0, defaultCfg.retentionMinutes)
+    assertEquals(3L * 24L * 60L * 60L * 1000L, defaultCfg.totalRetentionMillis())
+    assertEquals("3d", defaultCfg.formatRetentionWindow())
+
+    val customCfg = defaultCfg.copy(
+      retentionDays = 1,
+      retentionHours = 6,
+      retentionMinutes = 30
+    )
+    val expectedMs = ((1L * 24L + 6L) * 60L + 30L) * 60L * 1000L
+    assertEquals(expectedMs, customCfg.totalRetentionMillis())
+    assertEquals("1d 6h 30m", customCfg.formatRetentionWindow())
+
+    val disabledCfg = customCfg.copy(retentionEnabled = false)
+    assertEquals(0L, disabledCfg.totalRetentionMillis())
+
+    val now = 1_800_000_000_000L
+    val threeDaysCutoff = StorageRetentionEngine.computeCutoffTimestamp(
+      nowMillis = now,
+      days = 3,
+      hours = 0,
+      minutes = 0
+    )!!
+    assertEquals(now - 3L * 86_400_000L, threeDaysCutoff)
+
+    val fourDaysAgo = now - 4L * 86_400_000L
+    val threeDaysAndOneSecAgo = now - (3L * 86_400_000L + 1_000L)
+    val twoDaysAgo = now - 2L * 86_400_000L
+    val fiveMinutesAgo = now - 5L * 60_000L
+
+    val retained = StorageRetentionEngine.filterRetainedTimestamps(
+      timestamps = listOf(fourDaysAgo, threeDaysAndOneSecAgo, twoDaysAgo, fiveMinutesAgo),
+      cutoffTimestamp = threeDaysCutoff
+    )
+    assertEquals(listOf(twoDaysAgo, fiveMinutesAgo), retained)
+  }
+
+  @Test
+  fun appLocaleManager_normalizesAndResolvesLanguagesCorrectly() {
+    assertEquals(AppLocaleManager.LANG_TURKISH, AppLocaleManager.normalizeTag("tr"))
+    assertEquals(AppLocaleManager.LANG_TURKISH, AppLocaleManager.normalizeTag("TR-tr"))
+    assertEquals(AppLocaleManager.LANG_ENGLISH, AppLocaleManager.normalizeTag("en"))
+    assertEquals(AppLocaleManager.LANG_ENGLISH, AppLocaleManager.normalizeTag("en-US"))
+    assertEquals(AppLocaleManager.LANG_SYSTEM, AppLocaleManager.normalizeTag("system"))
+    assertEquals(AppLocaleManager.LANG_SYSTEM, AppLocaleManager.normalizeTag("fr"))
+
+    assertEquals("tr", AppLocaleManager.resolveEffectiveLanguage("system", "tr"))
+    assertEquals("tr", AppLocaleManager.resolveEffectiveLanguage("system", "tr-TR"))
+    assertEquals("en", AppLocaleManager.resolveEffectiveLanguage("system", "en"))
+    assertEquals("en", AppLocaleManager.resolveEffectiveLanguage("system", "de"))
+    assertEquals("tr", AppLocaleManager.resolveEffectiveLanguage("tr", "en"))
+    assertEquals("en", AppLocaleManager.resolveEffectiveLanguage("en", "tr"))
   }
 }

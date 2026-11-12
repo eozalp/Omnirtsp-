@@ -35,6 +35,18 @@ interface RecordedClipDao {
         provider: String?
     )
 
+    @Query("UPDATE recorded_clips SET localExportUri = :localUri WHERE id = :clipId")
+    suspend fun updateLocalExportUri(clipId: String, localUri: String?)
+
+    @Query("SELECT * FROM recorded_clips ORDER BY timestamp DESC")
+    suspend fun getAllClipsSync(): List<RecordedClipEntity>
+
+    @Query("SELECT * FROM recorded_clips WHERE timestamp < :cutoffTimestamp ORDER BY timestamp ASC")
+    suspend fun getClipsOlderThan(cutoffTimestamp: Long): List<RecordedClipEntity>
+
+    @Query("DELETE FROM recorded_clips WHERE timestamp < :cutoffTimestamp")
+    suspend fun deleteClipsOlderThan(cutoffTimestamp: Long): Int
+
     @Delete
     suspend fun deleteClip(clip: RecordedClipEntity)
 

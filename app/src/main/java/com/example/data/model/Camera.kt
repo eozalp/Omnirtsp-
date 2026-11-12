@@ -28,7 +28,10 @@ data class CameraEntity(
     val motionCooldownSeconds: Int = 10,
     val isDemoCamera: Boolean = false,
     val location: String = "Entrance",
-    val isEnabled: Boolean = true
+    val isEnabled: Boolean = true,
+    val rotationDegrees: Float = 0f,
+    val onvifPort: Int = 80,
+    val ptzProfileToken: String = ""
 )
 
 data class StreamTelemetry(

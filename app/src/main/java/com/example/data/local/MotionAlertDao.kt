@@ -35,6 +35,9 @@ interface MotionAlertDao {
     @Delete
     suspend fun deleteAlert(alert: MotionAlertEntity)
 
+    @Query("DELETE FROM motion_alerts WHERE timestamp < :cutoffTimestamp")
+    suspend fun deleteAlertsOlderThan(cutoffTimestamp: Long): Int
+
     @Query("DELETE FROM motion_alerts")
     suspend fun clearAllAlerts()
 }

@@ -5,6 +5,9 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -13,6 +16,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -51,10 +55,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import com.example.R
 import com.example.data.model.RecordingMode
 import com.example.data.model.RecordingScheduleEntity
 import com.example.ui.theme.NeonAmber
@@ -90,17 +96,21 @@ fun ScheduleScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
+                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                     Text(
-                        text = "Recording Schedules",
+                        text = stringResource(R.string.schedules_title),
                         fontSize = 20.sp,
                         fontWeight = FontWeight.Black,
-                        color = NeonCyan
+                        color = NeonCyan,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = "Automated continuous & motion recording plans",
+                        text = stringResource(R.string.schedules_subtitle),
                         fontSize = 12.sp,
-                        color = Color.White.copy(alpha = 0.7f)
+                        color = Color.White.copy(alpha = 0.7f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
@@ -109,10 +119,16 @@ fun ScheduleScreen(
                     color = if (activeSchedules.isNotEmpty()) Color(0xFF1E3A2B) else SurveillanceSurface
                 ) {
                     Text(
-                        text = if (activeSchedules.isNotEmpty()) "ACTIVE NOW (${activeSchedules.size})" else "STANDBY",
+                        text = if (activeSchedules.isNotEmpty()) {
+                            stringResource(R.string.schedules_active_count, activeSchedules.size)
+                        } else {
+                            stringResource(R.string.common_standby)
+                        },
                         color = if (activeSchedules.isNotEmpty()) NeonGreen else Color.Gray,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        softWrap = false,
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                     )
                 }
@@ -135,7 +151,7 @@ fun ScheduleScreen(
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = "No schedules created yet",
+                            text = stringResource(R.string.schedules_empty_title),
                             color = Color.White.copy(alpha = 0.7f),
                             fontSize = 14.sp
                         )
@@ -195,16 +211,29 @@ fun ScheduleScreen(
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    @OptIn(ExperimentalLayoutApi::class)
+                                    FlowRow(
+                                        modifier = Modifier.weight(1f).padding(end = 8.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        val localizedDays = schedule.daysOfWeek
+                                            .split(",")
+                                            .map { it.trim() }
+                                            .filter { it.isNotEmpty() }
+                                            .map { code -> localizedDayFullLabel(code) }
+                                            .joinToString(",")
                                         Surface(
                                             shape = RoundedCornerShape(4.dp),
                                             color = SurveillanceSurface
                                         ) {
                                             Text(
-                                                text = schedule.daysOfWeek,
+                                                text = localizedDays,
                                                 color = Color.White.copy(alpha = 0.8f),
                                                 fontSize = 10.sp,
                                                 fontWeight = FontWeight.Bold,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
                                                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                                             )
                                         }
@@ -214,10 +243,16 @@ fun ScheduleScreen(
                                             color = if (schedule.mode == RecordingMode.CONTINUOUS) Color(0xFF1E293B) else Color(0xFF332A15)
                                         ) {
                                             Text(
-                                                text = schedule.mode.name.replace("_", " "),
+                                                text = if (schedule.mode == RecordingMode.CONTINUOUS) {
+                                                    stringResource(R.string.schedules_mode_continuous)
+                                                } else {
+                                                    stringResource(R.string.schedules_mode_motion_only)
+                                                },
                                                 color = if (schedule.mode == RecordingMode.CONTINUOUS) NeonCyan else NeonAmber,
                                                 fontSize = 10.sp,
                                                 fontWeight = FontWeight.Bold,
+                                                maxLines = 1,
+                                                softWrap = false,
                                                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                                             )
                                         }
@@ -227,7 +262,7 @@ fun ScheduleScreen(
                                         if (schedule.cloudBackupOnFinish) {
                                             Icon(
                                                 Icons.Default.CloudUpload,
-                                                contentDescription = "Cloud Backup",
+                                                contentDescription = stringResource(R.string.schedules_cloud_backup_desc),
                                                 tint = NeonCyan,
                                                 modifier = Modifier.size(16.dp).padding(end = 4.dp)
                                             )
@@ -235,13 +270,13 @@ fun ScheduleScreen(
 
                                         IconButton(
                                             onClick = { viewModel.deleteSchedule(schedule.id) },
-                                            modifier = Modifier.size(28.dp).testTag("delete_schedule_${schedule.id}")
+                                            modifier = Modifier.size(40.dp).testTag("delete_schedule_${schedule.id}")
                                         ) {
                                             Icon(
                                                 Icons.Default.Delete,
-                                                contentDescription = "Delete",
+                                                contentDescription = stringResource(R.string.common_delete),
                                                 tint = Color.Gray,
-                                                modifier = Modifier.size(16.dp)
+                                                modifier = Modifier.size(18.dp)
                                             )
                                         }
                                     }
@@ -267,7 +302,7 @@ fun ScheduleScreen(
                 .padding(20.dp)
                 .testTag("add_schedule_fab")
         ) {
-            Icon(Icons.Default.Add, contentDescription = "Add Schedule")
+            Icon(Icons.Default.Add, contentDescription = stringResource(R.string.schedules_add_desc))
         }
 
         if (showAddDialog) {
@@ -283,13 +318,15 @@ fun ScheduleScreen(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun AddScheduleDialog(
     schedule: RecordingScheduleEntity?,
     onDismiss: () -> Unit,
     onSave: (RecordingScheduleEntity) -> Unit
 ) {
-    var name by remember { mutableStateOf(schedule?.name ?: "Custom Schedule") }
+    val defaultScheduleName = stringResource(R.string.schedules_custom_default)
+    var name by remember(schedule?.id) { mutableStateOf(schedule?.name ?: defaultScheduleName) }
     var startHour by remember { mutableIntStateOf(schedule?.startHour ?: 9) }
     var startMinute by remember { mutableIntStateOf(schedule?.startMinute ?: 0) }
     var endHour by remember { mutableIntStateOf(schedule?.endHour ?: 17) }
@@ -321,26 +358,30 @@ fun AddScheduleDialog(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = if (schedule == null) "New Recording Schedule" else "Edit Schedule",
+                        text = if (schedule == null) {
+                            stringResource(R.string.schedules_dialog_new)
+                        } else {
+                            stringResource(R.string.schedules_dialog_edit)
+                        },
                         fontSize = 17.sp,
                         fontWeight = FontWeight.Bold,
                         color = Color.White
                     )
                     IconButton(onClick = onDismiss) {
-                        Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
+                        Icon(Icons.Default.Close, contentDescription = stringResource(R.string.common_close), tint = Color.White)
                     }
                 }
 
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it },
-                    label = { Text("Schedule Name") },
+                    label = { Text(stringResource(R.string.schedules_name_label)) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
 
                 // Days selector
-                Text("Days of Week:", fontSize = 12.sp, color = Color.White)
+                Text(stringResource(R.string.schedules_days_label), fontSize = 12.sp, color = Color.White)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
@@ -360,7 +401,7 @@ fun AddScheduleDialog(
                             color = if (isSelected) NeonCyan else SurveillanceSurface
                         ) {
                             Text(
-                                text = day.take(2),
+                                text = localizedDayShortLabel(day),
                                 color = if (isSelected) Color.Black else Color.White,
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
@@ -372,51 +413,60 @@ fun AddScheduleDialog(
 
                 // Time window
                 Text(
-                    text = "Time Window: ${String.format("%02d:%02d", startHour, startMinute)} to ${String.format("%02d:%02d", endHour, endMinute)}",
+                    text = stringResource(
+                        R.string.schedules_time_window,
+                        String.format("%02d:%02d", startHour, startMinute),
+                        String.format("%02d:%02d", endHour, endMinute)
+                    ),
                     fontSize = 13.sp,
                     color = NeonCyan,
                     fontWeight = FontWeight.Bold
                 )
 
-                Row(
+                FlowRow(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     FilterChip(
-                        selected = startHour == 0 && endHour == 24,
+                        selected = startHour == 0 && endHour >= 23,
                         onClick = {
                             startHour = 0; startMinute = 0; endHour = 23; endMinute = 59
                         },
-                        label = { Text("24/7 All Day", fontSize = 10.sp) }
+                        label = { Text(stringResource(R.string.schedules_preset_all_day), fontSize = 11.sp, maxLines = 1, softWrap = false) }
                     )
                     FilterChip(
                         selected = startHour == 22 && endHour == 6,
                         onClick = {
                             startHour = 22; startMinute = 0; endHour = 6; endMinute = 0
                         },
-                        label = { Text("Night Sentry", fontSize = 10.sp) }
+                        label = { Text(stringResource(R.string.schedules_preset_night), fontSize = 11.sp, maxLines = 1, softWrap = false) }
                     )
                     FilterChip(
                         selected = startHour == 8 && endHour == 18,
                         onClick = {
                             startHour = 8; startMinute = 30; endHour = 18; endMinute = 0
                         },
-                        label = { Text("Business Hours", fontSize = 10.sp) }
+                        label = { Text(stringResource(R.string.schedules_preset_business), fontSize = 11.sp, maxLines = 1, softWrap = false) }
                     )
                 }
 
                 // Mode
-                Text("Recording Mode:", fontSize = 12.sp, color = Color.White)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(stringResource(R.string.schedules_mode_label), fontSize = 12.sp, color = Color.White)
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
                     FilterChip(
                         selected = mode == RecordingMode.MOTION_ONLY,
                         onClick = { mode = RecordingMode.MOTION_ONLY },
-                        label = { Text("Motion Only") }
+                        label = { Text(stringResource(R.string.schedules_mode_motion_chip), maxLines = 1, softWrap = false) }
                     )
                     FilterChip(
                         selected = mode == RecordingMode.CONTINUOUS,
                         onClick = { mode = RecordingMode.CONTINUOUS },
-                        label = { Text("Continuous 24/7") }
+                        label = { Text(stringResource(R.string.schedules_mode_continuous_chip), maxLines = 1, softWrap = false) }
                     )
                 }
 
@@ -426,7 +476,12 @@ fun AddScheduleDialog(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Auto-backup clips to Cloud", color = Color.White, fontSize = 13.sp)
+                    Text(
+                        text = stringResource(R.string.schedules_auto_backup_switch),
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        modifier = Modifier.weight(1f).padding(end = 8.dp)
+                    )
                     Switch(
                         checked = cloudBackup,
                         onCheckedChange = { cloudBackup = it },
@@ -438,13 +493,15 @@ fun AddScheduleDialog(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.End
                 ) {
-                    TextButton(onClick = onDismiss) { Text("Cancel", color = Color.Gray) }
+                    TextButton(onClick = onDismiss) {
+                        Text(stringResource(R.string.common_cancel), color = Color.Gray, maxLines = 1, softWrap = false)
+                    }
                     Spacer(modifier = Modifier.width(8.dp))
                     Button(
                         onClick = {
                             val newSchedule = RecordingScheduleEntity(
                                 id = schedule?.id ?: UUID.randomUUID().toString(),
-                                name = name.ifBlank { "Schedule" },
+                                name = name.ifBlank { defaultScheduleName },
                                 daysOfWeek = selectedDays.joinToString(","),
                                 startHour = startHour,
                                 startMinute = startMinute,
@@ -458,12 +515,37 @@ fun AddScheduleDialog(
                             onSave(newSchedule)
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = Color.Black),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
                         modifier = Modifier.testTag("save_schedule_button")
                     ) {
-                        Text("Save Plan")
+                        Text(stringResource(R.string.schedules_save_plan), maxLines = 1, softWrap = false)
                     }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun localizedDayFullLabel(code: String): String = when (code.uppercase()) {
+    "MON" -> stringResource(R.string.day_mon)
+    "TUE" -> stringResource(R.string.day_tue)
+    "WED" -> stringResource(R.string.day_wed)
+    "THU" -> stringResource(R.string.day_thu)
+    "FRI" -> stringResource(R.string.day_fri)
+    "SAT" -> stringResource(R.string.day_sat)
+    "SUN" -> stringResource(R.string.day_sun)
+    else -> code
+}
+
+@Composable
+private fun localizedDayShortLabel(code: String): String = when (code.uppercase()) {
+    "MON" -> stringResource(R.string.day_short_mon)
+    "TUE" -> stringResource(R.string.day_short_tue)
+    "WED" -> stringResource(R.string.day_short_wed)
+    "THU" -> stringResource(R.string.day_short_thu)
+    "FRI" -> stringResource(R.string.day_short_fri)
+    "SAT" -> stringResource(R.string.day_short_sat)
+    "SUN" -> stringResource(R.string.day_short_sun)
+    else -> code.take(2)
 }

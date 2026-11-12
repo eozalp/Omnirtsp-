@@ -15,6 +15,7 @@ import com.example.data.local.AppDatabase
 import com.example.data.model.CameraEntity
 import com.example.data.model.MotionAlertEntity
 import com.example.data.model.MotionSeverity
+import com.example.i18n.AppLocaleManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -64,10 +65,10 @@ class MotionDetectionEngine(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "Motion Detection Alerts",
+                AppLocaleManager.getString(context, R.string.alerts_channel_name),
                 NotificationManager.IMPORTANCE_HIGH
             ).apply {
-                description = "Real-time alerts triggered by RTSP camera motion events"
+                description = AppLocaleManager.getString(context, R.string.alerts_channel_desc)
                 enableVibration(true)
                 enableLights(true)
             }
@@ -127,7 +128,12 @@ class MotionDetectionEngine(
                             camera = camera,
                             motionLevel = motionScore.coerceIn(1, 100),
                             snapshotPath = snapshotFile?.absolutePath,
-                            customDescription = "Motion detected: ${motionScore}% frame variation (Threshold: ${triggerThreshold}%)"
+                            customDescription = AppLocaleManager.getString(
+                                context,
+                                R.string.alerts_frame_var_desc,
+                                motionScore,
+                                triggerThreshold
+                            )
                         )
                     }
                 }
@@ -172,9 +178,9 @@ class MotionDetectionEngine(
         }
 
         val desc = customDescription ?: when (severity) {
-            MotionSeverity.HIGH -> "High-intensity motion detected in primary zone (${motionLevel}%)"
-            MotionSeverity.MEDIUM -> "Motion detected across frame area (${motionLevel}%)"
-            MotionSeverity.LOW -> "Subtle motion detected in perimeter (${motionLevel}%)"
+            MotionSeverity.HIGH -> AppLocaleManager.getString(context, R.string.alerts_desc_high, motionLevel)
+            MotionSeverity.MEDIUM -> AppLocaleManager.getString(context, R.string.alerts_desc_medium, motionLevel)
+            MotionSeverity.LOW -> AppLocaleManager.getString(context, R.string.alerts_desc_low, motionLevel)
         }
 
         val alert = MotionAlertEntity(
@@ -219,9 +225,11 @@ class MotionDetectionEngine(
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        createNotificationChannel()
+
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentTitle("🚨 Motion Detected: ${alert.cameraName}")
+            .setContentTitle("🚨 ${AppLocaleManager.getString(context, R.string.alerts_notif_title, alert.cameraName)}")
             .setContentText(alert.description)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_ALARM)

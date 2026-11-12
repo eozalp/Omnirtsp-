@@ -32,6 +32,9 @@ interface CameraDao {
     @Delete
     suspend fun deleteCamera(camera: CameraEntity)
 
+    @Query("UPDATE cameras SET rotationDegrees = :rotationDegrees WHERE id = :cameraId")
+    suspend fun updateRotation(cameraId: String, rotationDegrees: Float)
+
     @Query("DELETE FROM cameras WHERE id = :id")
     suspend fun deleteCameraById(id: String)
 }

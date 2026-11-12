@@ -28,6 +28,7 @@ data class RecordedClipEntity(
     val triggerType: ClipTriggerType,
     val motionScore: Int = 0,
     val filePath: String,
+    val localExportUri: String? = null,
     val cloudSyncStatus: CloudSyncStatus = CloudSyncStatus.LOCAL_ONLY,
     val cloudStorageUrl: String? = null,
     val cloudProvider: String? = null

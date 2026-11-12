@@ -1,11 +1,13 @@
 package com.example.engine
 
 import android.content.Context
+import com.example.R
 import com.example.data.local.AppDatabase
 import com.example.data.model.CloudConfigEntity
 import com.example.data.model.CloudProviderType
 import com.example.data.model.CloudSyncStatus
 import com.example.data.model.RecordedClipEntity
+import com.example.i18n.AppLocaleManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -63,7 +65,7 @@ class CloudStorageManager(
             }
 
             val file = File(clip.filePath)
-            _syncProgress.value = "Preparing upload for ${clip.cameraName} (${file.name})..."
+            _syncProgress.value = AppLocaleManager.getString(context, R.string.cloud_prep_upload, clip.cameraName, file.name)
             database.recordedClipDao().updateCloudSyncStatus(
                 clipId = clip.id,
                 status = CloudSyncStatus.UPLOADING,
@@ -79,7 +81,7 @@ class CloudStorageManager(
                 }
 
                 val request = buildUploadRequest(config, clip, file)
-                _syncProgress.value = "Uploading ${file.length() / 1024} KB to ${config.provider.name}..."
+                _syncProgress.value = AppLocaleManager.getString(context, R.string.cloud_uploading_kb, (file.length() / 1024).toInt(), config.provider.name)
 
                 val response = withContext(Dispatchers.IO) {
                     httpClient.newCall(request).execute()
@@ -100,7 +102,7 @@ class CloudStorageManager(
                         config.copy(lastSyncTimestamp = System.currentTimeMillis())
                     )
 
-                    _syncProgress.value = "Synced successfully to ${config.provider.name} (HTTP ${response.code})"
+                    _syncProgress.value = AppLocaleManager.getString(context, R.string.cloud_synced_http, config.provider.name, response.code)
                 } else {
                     database.recordedClipDao().updateCloudSyncStatus(
                         clipId = clip.id,
@@ -108,7 +110,7 @@ class CloudStorageManager(
                         cloudUrl = null,
                         provider = config.provider.name
                     )
-                    _syncProgress.value = "Upload error HTTP ${response.code}: ${response.message}"
+                    _syncProgress.value = AppLocaleManager.getString(context, R.string.cloud_upload_http_err, response.code, response.message)
                 }
                 response.close()
             } catch (e: Exception) {
@@ -118,7 +120,11 @@ class CloudStorageManager(
                     cloudUrl = null,
                     provider = config.provider.name
                 )
-                _syncProgress.value = "Sync failed: ${e.localizedMessage ?: e.javaClass.simpleName}"
+                _syncProgress.value = AppLocaleManager.getString(
+                    context,
+                    R.string.cloud_sync_failed,
+                    e.localizedMessage ?: e.javaClass.simpleName
+                )
             }
         }
     }
@@ -254,7 +260,7 @@ class CloudStorageManager(
     fun testCloudConnection(config: CloudConfigEntity) {
         scope.launch {
             _isTestingConnection.value = true
-            _lastConnectionTestResult.value = "Authenticating with ${config.provider.name}..."
+            _lastConnectionTestResult.value = AppLocaleManager.getString(context, R.string.cloud_auth_progress, config.provider.name)
 
             val startTime = System.currentTimeMillis()
             try {
@@ -329,11 +335,23 @@ class CloudStorageManager(
                 }
 
                 val latency = System.currentTimeMillis() - startTime
-                _lastConnectionTestResult.value = "Handshake OK: HTTP ${response.code} ${response.message} (${latency}ms) [${config.provider.name}]"
+                _lastConnectionTestResult.value = AppLocaleManager.getString(
+                    context,
+                    R.string.cloud_handshake_ok,
+                    response.code,
+                    response.message,
+                    latency.toInt(),
+                    config.provider.name
+                )
                 response.close()
             } catch (e: Exception) {
                 val latency = System.currentTimeMillis() - startTime
-                _lastConnectionTestResult.value = "Connection Failed (${latency}ms): ${e.localizedMessage ?: e.javaClass.simpleName}"
+                _lastConnectionTestResult.value = AppLocaleManager.getString(
+                    context,
+                    R.string.cloud_conn_failed,
+                    latency.toInt(),
+                    e.localizedMessage ?: e.javaClass.simpleName
+                )
             } finally {
                 _isTestingConnection.value = false
             }

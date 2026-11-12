@@ -5,6 +5,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -13,6 +15,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -44,13 +47,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.R
 import com.example.data.model.MotionAlertEntity
 import com.example.data.model.MotionSeverity
+import com.example.i18n.AppLocaleManager
 import com.example.ui.theme.NeonAmber
 import com.example.ui.theme.NeonCyan
 import com.example.ui.theme.NeonGreen
@@ -61,23 +68,27 @@ import com.example.ui.theme.SurveillanceSurface
 import com.example.ui.viewmodel.CameraViewModel
 import java.text.SimpleDateFormat
 import java.util.Date
-import java.util.Locale
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun MotionAlertsScreen(
     viewModel: CameraViewModel,
     onViewCamera: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     val alerts by viewModel.alerts.collectAsState()
     val cameras by viewModel.cameras.collectAsState()
+    val selectedLanguageTag by viewModel.selectedLanguageTag.collectAsState()
     var selectedSeverityFilter by remember { mutableStateOf<MotionSeverity?>(null) }
 
     val filteredAlerts = alerts.filter { alert ->
         selectedSeverityFilter == null || alert.severity == selectedSeverityFilter
     }
 
-    val dateFormatter = remember { SimpleDateFormat("MMM dd, yyyy • HH:mm:ss", Locale.US) }
+    val dateFormatter = remember(selectedLanguageTag) {
+        SimpleDateFormat("MMM dd, yyyy • HH:mm:ss", AppLocaleManager.getEffectiveLocale(context))
+    }
 
     Box(
         modifier = modifier
@@ -92,17 +103,21 @@ fun MotionAlertsScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
+                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
                     Text(
-                        text = "Motion Detection Alerts",
+                        text = stringResource(R.string.alerts_title),
                         fontSize = 20.sp,
                         fontWeight = FontWeight.Black,
-                        color = NeonCyan
+                        color = NeonCyan,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = "${alerts.size} Total Events • ${alerts.count { !it.isRead }} Unread",
+                        text = stringResource(R.string.alerts_summary, alerts.size, alerts.count { !it.isRead }),
                         fontSize = 12.sp,
-                        color = Color.White.copy(alpha = 0.7f)
+                        color = Color.White.copy(alpha = 0.7f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
@@ -111,13 +126,13 @@ fun MotionAlertsScreen(
                         onClick = { viewModel.markAllAlertsRead() },
                         modifier = Modifier.testTag("mark_all_read_btn")
                     ) {
-                        Icon(Icons.Default.CheckCircle, contentDescription = "Mark All Read", tint = NeonCyan)
+                        Icon(Icons.Default.CheckCircle, contentDescription = stringResource(R.string.alerts_mark_all_read), tint = NeonCyan)
                     }
                     IconButton(
                         onClick = { viewModel.clearAllAlerts() },
                         modifier = Modifier.testTag("clear_all_alerts_btn")
                     ) {
-                        Icon(Icons.Default.DeleteSweep, contentDescription = "Clear Alerts", tint = Color.Gray)
+                        Icon(Icons.Default.DeleteSweep, contentDescription = stringResource(R.string.alerts_clear_all), tint = Color.Gray)
                     }
                 }
             }
@@ -125,29 +140,30 @@ fun MotionAlertsScreen(
             Spacer(modifier = Modifier.height(12.dp))
 
             // Filter Chips
-            Row(
+            FlowRow(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 FilterChip(
                     selected = selectedSeverityFilter == null,
                     onClick = { selectedSeverityFilter = null },
-                    label = { Text("All (${alerts.size})") }
+                    label = { Text(stringResource(R.string.alerts_filter_all, alerts.size), maxLines = 1, softWrap = false) }
                 )
                 FilterChip(
                     selected = selectedSeverityFilter == MotionSeverity.HIGH,
                     onClick = { selectedSeverityFilter = MotionSeverity.HIGH },
-                    label = { Text("High") }
+                    label = { Text(stringResource(R.string.alerts_filter_high), maxLines = 1, softWrap = false) }
                 )
                 FilterChip(
                     selected = selectedSeverityFilter == MotionSeverity.MEDIUM,
                     onClick = { selectedSeverityFilter = MotionSeverity.MEDIUM },
-                    label = { Text("Medium") }
+                    label = { Text(stringResource(R.string.alerts_filter_medium), maxLines = 1, softWrap = false) }
                 )
                 FilterChip(
                     selected = selectedSeverityFilter == MotionSeverity.LOW,
                     onClick = { selectedSeverityFilter = MotionSeverity.LOW },
-                    label = { Text("Low") }
+                    label = { Text(stringResource(R.string.alerts_filter_low), maxLines = 1, softWrap = false) }
                 )
             }
 
@@ -168,7 +184,7 @@ fun MotionAlertsScreen(
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = "No motion events recorded",
+                            text = stringResource(R.string.alerts_empty_title),
                             color = Color.White.copy(alpha = 0.7f),
                             fontSize = 14.sp
                         )
@@ -178,7 +194,7 @@ fun MotionAlertsScreen(
                                 cameras.firstOrNull()?.let { viewModel.triggerMotionAlertManually(it) }
                             }
                         ) {
-                            Text("Trigger Test Motion Alert", color = NeonCyan)
+                            Text(stringResource(R.string.alerts_trigger_test), color = NeonCyan)
                         }
                     }
                 }
@@ -229,12 +245,17 @@ fun MotionAlertsScreen(
                                     }
 
                                     // Severity Badge
+                                    val severityLabel = when (alert.severity) {
+                                        MotionSeverity.HIGH -> stringResource(R.string.alerts_filter_high).uppercase()
+                                        MotionSeverity.MEDIUM -> stringResource(R.string.alerts_filter_medium).uppercase()
+                                        MotionSeverity.LOW -> stringResource(R.string.alerts_filter_low).uppercase()
+                                    }
                                     Surface(
                                         shape = RoundedCornerShape(4.dp),
                                         color = severityColor.copy(alpha = 0.2f)
                                     ) {
                                         Text(
-                                            text = "${alert.severity.name} • ${alert.motionLevel}%",
+                                            text = "$severityLabel • ${alert.motionLevel}%",
                                             color = severityColor,
                                             fontSize = 10.sp,
                                             fontWeight = FontWeight.Black,
@@ -275,7 +296,7 @@ fun MotionAlertsScreen(
                                         color = Color.Gray
                                     )
                                     Text(
-                                        text = "Tap to view feed →",
+                                        text = stringResource(R.string.alerts_tap_to_view),
                                         fontSize = 10.sp,
                                         color = NeonCyan,
                                         fontWeight = FontWeight.Bold
