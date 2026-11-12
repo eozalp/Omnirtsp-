@@ -48,6 +48,16 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     val cameras: StateFlow<List<CameraEntity>> = database.cameraDao().getAllCameras()
+        .map { list ->
+            val localFeed = "android.resource://${getApplication<Application>().packageName}/${com.example.R.raw.surveillance_feed}"
+            list.map { cam ->
+                if (cam.rtspUrl.contains("commondatastorage.googleapis.com") || cam.rtspUrl.contains("wowzaec2demo")) {
+                    cam.copy(rtspUrl = localFeed)
+                } else {
+                    cam
+                }
+            }
+        }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val alerts: StateFlow<List<MotionAlertEntity>> = database.motionAlertDao().getAllAlerts()
@@ -91,11 +101,14 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun seedInitialSurveillanceData() {
         viewModelScope.launch {
+            val localFeedUri = "android.resource://${getApplication<Application>().packageName}/${com.example.R.raw.surveillance_feed}"
             val existing = database.cameraDao().getEnabledCameras()
             for (cam in existing) {
-                if (cam.rtspUrl.contains("wowzaec2demo.streamlock.net")) {
+                if (cam.rtspUrl.contains("commondatastorage.googleapis.com") ||
+                    cam.rtspUrl.contains("wowzaec2demo.streamlock.net")
+                ) {
                     database.cameraDao().insertCamera(
-                        cam.copy(rtspUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4")
+                        cam.copy(rtspUrl = localFeedUri)
                     )
                 }
             }
@@ -104,7 +117,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                     CameraEntity(
                         id = "cam_front_gate",
                         name = "Front Gate HD",
-                        rtspUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
+                        rtspUrl = localFeedUri,
                         transport = RtspTransport.TCP,
                         quality = StreamQuality.MAIN_HD,
                         isMotionDetectionEnabled = true,
@@ -115,7 +128,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                     CameraEntity(
                         id = "cam_driveway",
                         name = "Driveway 4K",
-                        rtspUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
+                        rtspUrl = localFeedUri,
                         transport = RtspTransport.TCP,
                         quality = StreamQuality.MAIN_HD,
                         isMotionDetectionEnabled = true,
@@ -126,7 +139,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                     CameraEntity(
                         id = "cam_backyard",
                         name = "Backyard Yard",
-                        rtspUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4",
+                        rtspUrl = localFeedUri,
                         transport = RtspTransport.UDP,
                         quality = StreamQuality.SUB_SD,
                         isMotionDetectionEnabled = true,
@@ -137,7 +150,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                     CameraEntity(
                         id = "cam_living_room",
                         name = "Main Entrance",
-                        rtspUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4",
+                        rtspUrl = localFeedUri,
                         transport = RtspTransport.TCP,
                         quality = StreamQuality.MAIN_HD,
                         isMotionDetectionEnabled = true,

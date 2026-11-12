@@ -8,29 +8,25 @@ on:
 jobs:
   release:
     name: Build & Publish Production Release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
 
     steps:
       - name: Checkout Source Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Setup Java JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          cmdline-tools-version: 11076708
-
-      - name: Accept Android SDK Licenses
+      - name: Configure Android SDK Licenses
         run: |
-          yes | sdkmanager --licenses || true
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses || true
 
       - name: Setup Environment Files (.env)
         run: |
@@ -82,7 +78,7 @@ jobs:
           fi
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: '9.3.1'
 
@@ -108,16 +104,19 @@ jobs:
             gradle assembleRelease bundleRelease --stacktrace
           fi
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Create GitHub Release via GitHub CLI
         if: startsWith(github.ref, 'refs/tags/')
-        with:
-          draft: false
-          prerelease: false
-          name: "OmniView RTSP ${{ github.ref_name }}"
-          generate_release_notes: true
-          files: |
-            app/build/outputs/apk/release/*.apk
-            app/build/outputs/bundle/release/*.aab
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
+          FILES=()
+          for f in app/build/outputs/apk/release/*.apk app/build/outputs/bundle/release/*.aab; do
+            if [ -f "$f" ]; then
+              FILES+=("$f")
+            fi
+          done
+
+          gh release create "$TAG_NAME" "${FILES[@]}" \
+            --title "OmniView RTSP $TAG_NAME" \
+            --generate-notes

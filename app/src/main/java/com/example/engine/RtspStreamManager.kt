@@ -39,12 +39,26 @@ class RtspStreamManager(private val context: Context) {
         startTelemetryLoop()
     }
 
+    private val activeUrlMap = ConcurrentHashMap<String, String>()
+
     fun getOrCreatePlayer(camera: CameraEntity): ExoPlayer {
         val existing = playerMap[camera.id]
+        val currentUrl = camera.rtspUrl.trim()
         if (existing != null) {
+            val previousUrl = activeUrlMap[camera.id]
+            if (previousUrl != null && previousUrl != currentUrl) {
+                activeUrlMap[camera.id] = currentUrl
+                try {
+                    val mediaSource = createMediaSource(camera)
+                    existing.setMediaSource(mediaSource)
+                    existing.prepare()
+                    existing.playWhenReady = true
+                } catch (ignored: Exception) {}
+            }
             return existing
         }
 
+        activeUrlMap[camera.id] = currentUrl
         val player = ExoPlayer.Builder(context).build().apply {
             setVideoChangeFrameRateStrategy(androidx.media3.common.C.VIDEO_CHANGE_FRAME_RATE_STRATEGY_OFF)
         }
@@ -75,10 +89,13 @@ class RtspStreamManager(private val context: Context) {
             }
 
             override fun onPlayerError(error: PlaybackException) {
+                player.playWhenReady = false
                 val cause = error.cause
                 val msg = when {
+                    cause is androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException -> "HTTP ${cause.responseCode} Access Denied / Stream Unavailable"
                     cause is java.net.UnknownHostException -> "Network Offline / Unreachable Host"
                     cause is java.net.ConnectException -> "Connection Refused (RTSP Port 554 Closed)"
+                    cause is androidx.media3.exoplayer.rtsp.RtspMediaSource.RtspPlaybackException -> "RTSP Feed Error: ${cause.message}"
                     else -> error.errorCodeName
                 }
                 flow.value = flow.value.copy(
@@ -147,6 +164,9 @@ class RtspStreamManager(private val context: Context) {
 
     private fun createMediaSource(camera: CameraEntity): MediaSource {
         var rawUrl = camera.rtspUrl.trim()
+        if (rawUrl.contains("commondatastorage.googleapis.com") || rawUrl.contains("wowzaec2demo")) {
+            rawUrl = "android.resource://${context.packageName}/${com.example.R.raw.surveillance_feed}"
+        }
         val uri = Uri.parse(rawUrl)
         val scheme = uri.scheme?.lowercase() ?: ""
 
@@ -167,7 +187,12 @@ class RtspStreamManager(private val context: Context) {
             }
             return factory.createMediaSource(MediaItem.fromUri(Uri.parse(rawUrl)))
         } else {
-            val dataSourceFactory = DefaultDataSource.Factory(context)
+            val httpFactory = androidx.media3.datasource.DefaultHttpDataSource.Factory()
+                .setUserAgent("OmniView-RTSP/1.0 (Android; Surveillance Engine)")
+                .setConnectTimeoutMs(15000)
+                .setReadTimeoutMs(20000)
+                .setAllowCrossProtocolRedirects(true)
+            val dataSourceFactory = DefaultDataSource.Factory(context, httpFactory)
             return ProgressiveMediaSource.Factory(dataSourceFactory)
                 .createMediaSource(MediaItem.fromUri(uri))
         }
