@@ -67,7 +67,7 @@ data class FloatingWindowState(
 class CameraViewModel(application: Application) : AndroidViewModel(application) {
 
     private val database = AppDatabase.getDatabase(application)
-    val streamManager = RtspStreamManager(application)
+    val streamManager = RtspStreamManager.getInstance(application)
     val onvifPtzClient = OnvifPtzClient(application)
     val cameraDiscoveryEngine = CameraDiscoveryEngine(application, onvifPtzClient)
     val cloudStorageManager = CloudStorageManager(application, database)
@@ -334,13 +334,18 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun selectFullscreenCamera(camera: CameraEntity?, openPtz: Boolean = false) {
+        FloatingOverlayStateHolder.setFullscreenCameraId(camera?.id)
+        if (camera != null && FloatingOverlayStateHolder.floatingWindows.value.any { it.cameraId == camera.id }) {
+            closeFloatingCamera(camera.id)
+        }
         _openFullscreenWithPtz.value = openPtz && camera != null
         _selectedFullscreenCamera.value = camera
     }
 
     fun probeCameraPtz(camera: CameraEntity) {
         viewModelScope.launch {
-            onvifPtzClient.probeCamera(camera)
+            val state = onvifPtzClient.probeCamera(camera)
+            persistDiscoveredPtzMetadata(camera, state)
         }
     }
 
@@ -358,6 +363,21 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 tiltVelocity = tiltVelocity,
                 zoomVelocity = zoomVelocity,
                 actionLabel = actionLabel
+            )
+            persistDiscoveredPtzMetadata(camera, onvifPtzClient.status.value)
+        }
+    }
+
+    private suspend fun persistDiscoveredPtzMetadata(camera: CameraEntity, state: PtzCommandState) {
+        if (state.cameraId != camera.id || state.lastError != null) return
+        val newPort = state.resolvedOnvifPort ?: camera.onvifPort
+        val newToken = state.profileToken.ifBlank { camera.ptzProfileToken }
+        if (newPort != camera.onvifPort || (newToken.isNotBlank() && newToken != camera.ptzProfileToken)) {
+            database.cameraDao().insertCamera(
+                camera.copy(
+                    onvifPort = newPort,
+                    ptzProfileToken = newToken
+                )
             )
         }
     }
@@ -875,7 +895,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     override fun onCleared() {
         super.onCleared()
-        streamManager.releaseAll()
+        if (!FloatingOverlayStateHolder.isSystemOverlayActive.value) {
+            streamManager.releaseAll()
+        }
         motionDetectionEngine.release()
         recordingSchedulerEngine.release()
     }

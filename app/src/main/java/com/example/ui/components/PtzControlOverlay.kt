@@ -132,7 +132,7 @@ fun PtzControlOverlay(
                         color = statusColor,
                         fontSize = 10.sp,
                         fontFamily = FontFamily.Monospace,
-                        maxLines = 1,
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis
                     )
                 }

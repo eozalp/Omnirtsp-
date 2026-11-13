@@ -122,7 +122,7 @@ class FloatingCameraOverlayService : Service() {
         super.onCreate()
         FloatingOverlayStateHolder.initAudioSettings(applicationContext)
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        streamManager = RtspStreamManager(applicationContext)
+        streamManager = RtspStreamManager.getInstance(applicationContext)
         FloatingOverlayStateHolder.setSystemOverlayActive(true)
         acquireWakeLock()
         startForegroundNotification()
@@ -218,21 +218,23 @@ class FloatingCameraOverlayService : Service() {
         serviceScope.launch {
             combine(
                 FloatingOverlayStateHolder.floatingWindows,
-                FloatingOverlayStateHolder.cameras
-            ) { windows, cameras ->
-                windows to cameras
-            }.collect { (windows, cameras) ->
+                FloatingOverlayStateHolder.cameras,
+                FloatingOverlayStateHolder.fullscreenCameraId
+            ) { windows, cameras, fullscreenId ->
+                Triple(windows, cameras, fullscreenId)
+            }.collect { (windows, cameras, fullscreenId) ->
                 if (!Settings.canDrawOverlays(this@FloatingCameraOverlayService) || windows.isEmpty()) {
                     removeAllOverlays()
                     stopSelf()
                     return@collect
                 }
 
-                val desiredIds = windows.map { it.cameraId }.toSet()
+                val desiredIds = windows.map { it.cameraId }.filter { it != fullscreenId }.toSet()
                 val toRemove = attachedOverlays.keys.filter { it !in desiredIds }
                 toRemove.forEach { removeOverlay(it) }
 
                 windows.sortedBy { it.zIndex }.forEach { winState ->
+                    if (winState.cameraId == fullscreenId) return@forEach
                     val cam = cameras.find { it.id == winState.cameraId } ?: return@forEach
                     val existing = attachedOverlays[cam.id]
                     if (existing == null) {
@@ -321,7 +323,8 @@ class FloatingCameraOverlayService : Service() {
             pos.second,
             windowType,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -418,6 +421,7 @@ class FloatingCameraOverlayService : Service() {
 
         try {
             windowManager.addView(composeView, params)
+            lifecycleOwner.onResume()
             attachedOverlays[camera.id] = AttachedOverlay(composeView, params, lifecycleOwner)
         } catch (_: Exception) {
             lifecycleOwner.onDestroy()
@@ -456,7 +460,7 @@ class FloatingCameraOverlayService : Service() {
             } catch (_: Exception) {}
             entry.lifecycleOwner.onDestroy()
         }
-        streamManager.releasePlayer(cameraId)
+        // Keep shared ExoPlayer warm for seamless return to Live Grid or Fullscreen
     }
 
     private fun removeAllOverlays() {
@@ -468,7 +472,6 @@ class FloatingCameraOverlayService : Service() {
         releaseWakeLock()
         removeAllOverlays()
         FloatingOverlayStateHolder.setSystemOverlayActive(false)
-        streamManager.releaseAll()
         serviceScope.cancel()
         super.onDestroy()
     }

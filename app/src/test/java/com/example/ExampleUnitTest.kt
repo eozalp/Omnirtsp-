@@ -270,6 +270,17 @@ class ExampleUnitTest {
       OnvifPtzClient.defaultPtzUrl("192.168.1.120", cam.onvifPort)
     )
 
+    // Pan/Tilt-only cameras (e.g. Tapo C520WS) omit unused <tt:Zoom> to avoid 400 Bad Request
+    val panOnlyBody = OnvifPtzClient.buildContinuousMoveBody(
+      profileToken = "profile_1",
+      panX = 0.6f,
+      tiltY = 0f,
+      zoomX = 0f
+    )
+    assertTrue(panOnlyBody.contains("<tt:PanTilt"))
+    assertFalse(panOnlyBody.contains("<tt:Zoom"))
+
+    // Combined PTZ includes both axes
     val moveBody = OnvifPtzClient.buildContinuousMoveBody(
       profileToken = "Profile_1",
       panX = 0.6f,
@@ -280,6 +291,7 @@ class ExampleUnitTest {
     assertTrue(moveBody.contains("<tptz:ProfileToken>Profile_1</tptz:ProfileToken>"))
     assertTrue(moveBody.contains("x=\"0.60\""))
     assertTrue(moveBody.contains("y=\"-0.30\""))
+    assertTrue(moveBody.contains("<tt:Zoom"))
 
     val stopBody = OnvifPtzClient.buildStopBody("Profile_1")
     assertTrue(stopBody.contains("<tptz:Stop>"))
@@ -287,9 +299,34 @@ class ExampleUnitTest {
     assertTrue(stopBody.contains("<tptz:Zoom>true</tptz:Zoom>"))
 
     val soap = OnvifPtzClient.buildSoapEnvelope("admin", "ptzPassword!", moveBody)
+    // Regression check: XML declaration must start at byte 0 (no leading spaces -> avoids HTTP 400)
+    assertTrue(soap.startsWith("<?xml version=\"1.0\" encoding=\"utf-8\"?>"))
+    assertFalse(soap.first().isWhitespace())
     assertTrue(soap.contains("<Username>admin</Username>"))
     assertTrue(soap.contains("PasswordDigest"))
     assertTrue(soap.contains("<tptz:ContinuousMove>"))
+
+    // Embedded RTSP credentials fallback when camera.username is empty
+    val embeddedCam = CameraEntity(
+      id = "tapo_cam",
+      name = "C520WS",
+      rtspUrl = "rtsp://tapoUser:tapoPass%21@192.168.1.148:554/stream1"
+    )
+    assertEquals("tapoUser" to "tapoPass!", OnvifPtzClient.resolveCredentials(embeddedCam))
+
+    // Candidate ports always include 2020 (Tapo) and standard ONVIF ports without duplicates
+    val ports = OnvifPtzClient.candidateOnvifPorts(80)
+    assertEquals(80, ports.first())
+    assertTrue(ports.contains(2020))
+
+    // Prefers PTZ-enabled profile when GetProfiles returns multiple profiles
+    val multiProfilesXml = """
+      <trt:GetProfilesResponse>
+        <trt:Profiles token="snapshot_only"><tt:Name>Snap</tt:Name></trt:Profiles>
+        <trt:Profiles token="profile_1"><tt:Name>Main</tt:Name><tt:PTZConfiguration token="ptz_0"/></trt:Profiles>
+      </trt:GetProfilesResponse>
+    """.trimIndent()
+    assertEquals("profile_1", OnvifPtzClient.extractFirstProfileToken(multiProfilesXml))
   }
 
   @Test
@@ -551,5 +588,56 @@ class ExampleUnitTest {
     assertFalse(rtspEnded.healthyProgress)
     assertEquals(3, rtspEnded.stallIncrement)
     assertTrue(rtspEnded.isReconnecting)
+
+    // Startup grace prevents aggressive reconnect loops during initial RTSP handshake & first keyframe wait
+    assertTrue(
+      RtspStreamManager.isWithinStartupGrace(
+        hasRenderedFrame = false,
+        elapsedSincePrepareMs = 5_000L,
+        hasError = false,
+        playbackState = Player.STATE_BUFFERING
+      )
+    )
+    assertFalse(
+      RtspStreamManager.isWithinStartupGrace(
+        hasRenderedFrame = false,
+        elapsedSincePrepareMs = 15_000L,
+        hasError = false,
+        playbackState = Player.STATE_BUFFERING
+      )
+    )
+    assertFalse(
+      RtspStreamManager.isWithinStartupGrace(
+        hasRenderedFrame = true,
+        elapsedSincePrepareMs = 3_000L,
+        hasError = false,
+        playbackState = Player.STATE_READY
+      )
+    )
+    assertFalse(
+      RtspStreamManager.isWithinStartupGrace(
+        hasRenderedFrame = false,
+        elapsedSincePrepareMs = 3_000L,
+        hasError = false,
+        playbackState = Player.STATE_ENDED
+      )
+    )
+
+    // When offscreen (e.g. on Alerts/Storage tab with no attached TextureView), advancing timeline stays healthy
+    val offscreenAdvancing = RtspStreamManager.evaluateLiveVideoHealth(
+      isLiveRtsp = true,
+      isPlaying = true,
+      playbackState = Player.STATE_READY,
+      hasError = false,
+      hasSelectedVideoTrack = true,
+      rawBufferedMs = 250L,
+      currentRenderedFrames = 990,
+      previousRenderedFrames = 990,
+      currentPositionMs = 42_000L,
+      previousPositionMs = 41_000L,
+      hasAttachedSurface = false
+    )
+    assertTrue(offscreenAdvancing.healthyProgress)
+    assertEquals(0, offscreenAdvancing.stallIncrement)
   }
 }

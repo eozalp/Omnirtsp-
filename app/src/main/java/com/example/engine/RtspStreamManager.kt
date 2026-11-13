@@ -50,6 +50,9 @@ class RtspStreamManager(private val context: Context) {
     private val activeUrlMap = ConcurrentHashMap<String, String>()
     private val activeCameraMap = ConcurrentHashMap<String, CameraEntity>()
     private val hasRenderedFrameMap = ConcurrentHashMap<String, Boolean>()
+    private val preparedAtMsMap = ConcurrentHashMap<String, Long>()
+    private val attachedSurfaceCountMap = ConcurrentHashMap<String, Int>()
+    private val surfaceGraceUntilMsMap = ConcurrentHashMap<String, Long>()
     private val stalledSecondsMap = ConcurrentHashMap<String, Int>()
     private val lastRetryAtMap = ConcurrentHashMap<String, Long>()
     private val lastRenderedFramesMap = ConcurrentHashMap<String, Int>()
@@ -79,6 +82,21 @@ class RtspStreamManager(private val context: Context) {
         }
     }
 
+    fun onSurfaceAttached(cameraId: String) {
+        attachedSurfaceCountMap[cameraId] = (attachedSurfaceCountMap[cameraId] ?: 0) + 1
+        surfaceGraceUntilMsMap[cameraId] = System.currentTimeMillis() + SURFACE_SWITCH_GRACE_MS
+        stalledSecondsMap[cameraId] = 0
+    }
+
+    fun onSurfaceDetached(cameraId: String) {
+        val next = (attachedSurfaceCountMap[cameraId] ?: 0) - 1
+        if (next <= 0) {
+            attachedSurfaceCountMap.remove(cameraId)
+        } else {
+            attachedSurfaceCountMap[cameraId] = next
+        }
+    }
+
     fun getPlayerFlow(cameraId: String): StateFlow<ExoPlayer?> {
         return playerFlowMap.getOrPut(cameraId) {
             MutableStateFlow(playerMap[cameraId])
@@ -99,6 +117,7 @@ class RtspStreamManager(private val context: Context) {
             if (previousUrl != null && previousUrl != currentUrl) {
                 activeUrlMap[camera.id] = currentUrl
                 hasRenderedFrameMap[camera.id] = false
+                preparedAtMsMap[camera.id] = System.currentTimeMillis()
                 stalledSecondsMap[camera.id] = 0
                 lastRenderedFramesMap.remove(camera.id)
                 lastPlaybackPosMap.remove(camera.id)
@@ -128,6 +147,7 @@ class RtspStreamManager(private val context: Context) {
         activeCameraMap[camera.id] = camera
         activeUrlMap[camera.id] = currentUrl
         hasRenderedFrameMap[camera.id] = false
+        preparedAtMsMap[camera.id] = System.currentTimeMillis()
         stalledSecondsMap[camera.id] = 0
         healthySecondsMap[camera.id] = 0
         lastRenderedFramesMap.remove(camera.id)
@@ -142,8 +162,8 @@ class RtspStreamManager(private val context: Context) {
             .setBufferDurationsMs(
                 /* minBufferMs = */ 1_500,
                 /* maxBufferMs = */ 10_000,
-                /* bufferForPlaybackMs = */ 400,
-                /* bufferForPlaybackAfterRebufferMs = */ 1_000
+                /* bufferForPlaybackMs = */ 300,
+                /* bufferForPlaybackAfterRebufferMs = */ 600
             )
             .setPrioritizeTimeOverSizeThresholds(true)
             .setBackBuffer(0, false)
@@ -208,17 +228,17 @@ class RtspStreamManager(private val context: Context) {
                         )
                     }
                     Player.STATE_BUFFERING -> {
-                        val hadFrame = hasRenderedFrameMap[camera.id] == true
+                        val isRetrying = (recoveryAttemptsMap[camera.id] ?: 0) > 0
                         flow.value = flow.value.copy(
                             isLive = false,
-                            isReconnecting = hadFrame
+                            isReconnecting = isRetrying
                         )
                     }
                     Player.STATE_ENDED -> {
                         val latestCam = activeCameraMap[camera.id] ?: camera
                         if (isLiveRtsp) {
                             // Live RTSP reached END_OF_SOURCE (e.g. camera 30s session drop):
-                            // never loop a closed period; immediately mark reconnecting and rebuild session.
+                            // never loop a closed period; rebuild session cleanly after cooldown.
                             hasRenderedFrameMap[camera.id] = false
                             flow.value = flow.value.copy(
                                 isLive = false,
@@ -227,7 +247,7 @@ class RtspStreamManager(private val context: Context) {
                             )
                             val now = System.currentTimeMillis()
                             val lastRetry = lastRetryAtMap[camera.id] ?: 0L
-                            if (now - lastRetry >= 3000L) {
+                            if (now - lastRetry >= EOS_RETRY_COOLDOWN_MS) {
                                 recoverCameraStream(latestCam)
                             }
                         } else if (!flow.value.hasError) {
@@ -300,13 +320,15 @@ class RtspStreamManager(private val context: Context) {
         val player = playerMap[camera.id]
         val flow = telemetryMap[camera.id]
         val attempt = (recoveryAttemptsMap[camera.id] ?: 0)
+        val now = System.currentTimeMillis()
         recoveryAttemptsMap[camera.id] = attempt + 1
         stalledSecondsMap[camera.id] = 0
         healthySecondsMap[camera.id] = 0
         hasRenderedFrameMap[camera.id] = false
+        preparedAtMsMap[camera.id] = now
         lastRenderedFramesMap.remove(camera.id)
         lastPlaybackPosMap.remove(camera.id)
-        lastRetryAtMap[camera.id] = System.currentTimeMillis()
+        lastRetryAtMap[camera.id] = now
 
         flow?.value = flow.value.copy(
             isLive = false,
@@ -316,7 +338,7 @@ class RtspStreamManager(private val context: Context) {
             latencyMs = 0L
         )
 
-        if (player == null || forceRebuild || attempt >= 1) {
+        if (player == null || forceRebuild || attempt >= 2) {
             playerMap.remove(camera.id)?.let { old ->
                 try {
                     old.stop()
@@ -453,6 +475,17 @@ class RtspStreamManager(private val context: Context) {
 
                     val hasSelectedVideo = player.currentTracks.isTypeSelected(C.TRACK_TYPE_VIDEO)
                     val currentlyStalled = stalledSecondsMap[id] ?: 0
+                    val hasRenderedBefore = hasRenderedFrameMap[id] == true
+                    val preparedAt = preparedAtMsMap[id] ?: now
+                    val elapsedSincePrepare = (now - preparedAt).coerceAtLeast(0L)
+                    val inStartupGrace = isWithinStartupGrace(
+                        hasRenderedFrame = hasRenderedBefore,
+                        elapsedSincePrepareMs = elapsedSincePrepare,
+                        hasError = flow.value.hasError,
+                        playbackState = player.playbackState
+                    )
+                    val inSurfaceGrace = now < (surfaceGraceUntilMsMap[id] ?: 0L)
+                    val hasSurface = (attachedSurfaceCountMap[id] ?: 0) > 0
 
                     val eval = evaluateLiveVideoHealth(
                         isLiveRtsp = isLiveRtsp,
@@ -464,7 +497,8 @@ class RtspStreamManager(private val context: Context) {
                         currentRenderedFrames = renderedFrames,
                         previousRenderedFrames = previousRendered,
                         currentPositionMs = posMs,
-                        previousPositionMs = prevPos
+                        previousPositionMs = prevPos,
+                        hasAttachedSurface = hasSurface
                     )
 
                     if (eval.healthyProgress) {
@@ -472,9 +506,12 @@ class RtspStreamManager(private val context: Context) {
                         hasRenderedFrameMap[id] = true
                         val healthyStreak = (healthySecondsMap[id] ?: 0) + 1
                         healthySecondsMap[id] = healthyStreak
-                        if (healthyStreak >= 15) {
+                        if (healthyStreak >= 12) {
                             recoveryAttemptsMap[id] = 0
                         }
+                    } else if (inStartupGrace || inSurfaceGrace) {
+                        // Allow initial RTSP TCP handshake + first IDR keyframe and surface handoffs without false stalls
+                        stalledSecondsMap[id] = 0
                     } else if (!flow.value.hasError) {
                         healthySecondsMap[id] = 0
                         stalledSecondsMap[id] = currentlyStalled + eval.stallIncrement
@@ -499,8 +536,15 @@ class RtspStreamManager(private val context: Context) {
 
                     val realCodec = format?.sampleMimeType ?: flow.value.codec.takeIf { !flow.value.hasError } ?: "H.264 / RTSP"
                     val showLiveBadge = !flow.value.hasError && (eval.isLive && updatedStalled < 3)
-                    val showReconnectingBadge = !flow.value.hasError &&
-                        (eval.isReconnecting || updatedStalled >= 3 || flow.value.isReconnecting)
+                    val attemptCount = recoveryAttemptsMap[id] ?: 0
+                    val showReconnectingBadge = !flow.value.hasError && when {
+                        eval.healthyProgress -> false
+                        inStartupGrace -> attemptCount > 0
+                        else -> (eval.isReconnecting && updatedStalled >= 2) ||
+                            updatedStalled >= 3 ||
+                            isAbnormalBufferSentinel(rawBuffered, isLiveRtsp) ||
+                            player.playbackState == Player.STATE_ENDED
+                    }
 
                     flow.value = flow.value.copy(
                         fps = realFps,
@@ -508,23 +552,27 @@ class RtspStreamManager(private val context: Context) {
                         codec = realCodec,
                         latencyMs = safeLatency,
                         isLive = showLiveBadge,
-                        isReconnecting = if (eval.healthyProgress) false else showReconnectingBadge
+                        isReconnecting = showReconnectingBadge
                     )
 
                     // Automatic Watchdog: recover from frozen frames, TIME_END_OF_SOURCE, track loss, or errors
                     if (cam != null) {
                         val lastRetry = lastRetryAtMap[id] ?: 0L
-                        val canRetryNow = now - lastRetry >= 4000L
+                        val sinceLastRetry = now - lastRetry
+                        val canRetryError = sinceLastRetry >= ERROR_RETRY_COOLDOWN_MS
+                        val canRetryEos = sinceLastRetry >= EOS_RETRY_COOLDOWN_MS
+                        val canRetryNormal = sinceLastRetry >= RETRY_COOLDOWN_MS
 
                         val shouldRecover = when {
-                            flow.value.hasError -> canRetryNow
-                            isAbnormalBufferSentinel(rawBuffered, isLiveRtsp) -> updatedStalled >= 2 && canRetryNow
-                            player.playbackState == Player.STATE_ENDED -> updatedStalled >= 1 && canRetryNow
-                            player.playbackState == Player.STATE_IDLE -> updatedStalled >= 2 && canRetryNow
+                            flow.value.hasError -> canRetryError
+                            isAbnormalBufferSentinel(rawBuffered, isLiveRtsp) -> updatedStalled >= 2 && canRetryEos
+                            player.playbackState == Player.STATE_ENDED -> updatedStalled >= 2 && canRetryEos
+                            inStartupGrace -> false
+                            player.playbackState == Player.STATE_IDLE -> updatedStalled >= 3 && canRetryNormal
                             isLiveRtsp && player.playbackState == Player.STATE_READY && !hasSelectedVideo ->
-                                updatedStalled >= 3 && canRetryNow
-                            player.isPlaying && !eval.healthyProgress -> updatedStalled >= 5 && canRetryNow
-                            else -> updatedStalled >= 8 && canRetryNow
+                                updatedStalled >= 4 && canRetryNormal
+                            player.isPlaying && !eval.healthyProgress -> updatedStalled >= 6 && canRetryNormal
+                            else -> updatedStalled >= 10 && canRetryNormal
                         }
 
                         if (shouldRecover) {
@@ -543,6 +591,9 @@ class RtspStreamManager(private val context: Context) {
         activeUrlMap.remove(cameraId)
         activeCameraMap.remove(cameraId)
         hasRenderedFrameMap.remove(cameraId)
+        preparedAtMsMap.remove(cameraId)
+        attachedSurfaceCountMap.remove(cameraId)
+        surfaceGraceUntilMsMap.remove(cameraId)
         stalledSecondsMap.remove(cameraId)
         lastRetryAtMap.remove(cameraId)
         lastRenderedFramesMap.remove(cameraId)
@@ -552,10 +603,10 @@ class RtspStreamManager(private val context: Context) {
     }
 
     fun releaseAll() {
-        telemetryJob?.cancel()
-        scope.cancel()
         for ((_, player) in playerMap) {
-            player.release()
+            try {
+                player.release()
+            } catch (_: Exception) {}
         }
         playerMap.clear()
         playerFlowMap.clear()
@@ -563,6 +614,9 @@ class RtspStreamManager(private val context: Context) {
         activeUrlMap.clear()
         activeCameraMap.clear()
         hasRenderedFrameMap.clear()
+        preparedAtMsMap.clear()
+        attachedSurfaceCountMap.clear()
+        surfaceGraceUntilMsMap.clear()
         stalledSecondsMap.clear()
         lastRetryAtMap.clear()
         lastRenderedFramesMap.clear()
@@ -573,6 +627,20 @@ class RtspStreamManager(private val context: Context) {
 
     companion object {
         const val ABNORMAL_BUFFERED_THRESHOLD_MS = 3_600_000L
+        const val STARTUP_GRACE_MS = 14_000L
+        const val SURFACE_SWITCH_GRACE_MS = 3_000L
+        const val EOS_RETRY_COOLDOWN_MS = 3_000L
+        const val RETRY_COOLDOWN_MS = 8_000L
+        const val ERROR_RETRY_COOLDOWN_MS = 15_000L
+
+        @Volatile
+        private var instance: RtspStreamManager? = null
+
+        fun getInstance(context: Context): RtspStreamManager {
+            return instance ?: synchronized(this) {
+                instance ?: RtspStreamManager(context.applicationContext).also { instance = it }
+            }
+        }
 
         /**
          * Clamps invalid Media3 buffer durations such as Long.MAX_VALUE / 1000 - pos
@@ -594,6 +662,22 @@ class RtspStreamManager(private val context: Context) {
         }
 
         /**
+         * Avoids connect/reconnect thrashing during the initial RTSP TCP handshake + first keyframe window.
+         */
+        fun isWithinStartupGrace(
+            hasRenderedFrame: Boolean,
+            elapsedSincePrepareMs: Long,
+            hasError: Boolean,
+            playbackState: Int,
+            gracePeriodMs: Long = STARTUP_GRACE_MS
+        ): Boolean {
+            return !hasRenderedFrame &&
+                !hasError &&
+                playbackState != Player.STATE_ENDED &&
+                elapsedSincePrepareMs in 0L until gracePeriodMs
+        }
+
+        /**
          * Evaluates actual frame-level stream health instead of blindly trusting player.isPlaying.
          */
         fun evaluateLiveVideoHealth(
@@ -606,7 +690,8 @@ class RtspStreamManager(private val context: Context) {
             currentRenderedFrames: Int,
             previousRenderedFrames: Int,
             currentPositionMs: Long,
-            previousPositionMs: Long
+            previousPositionMs: Long,
+            hasAttachedSurface: Boolean = true
         ): StreamHealthEvaluation {
             if (hasError) {
                 return StreamHealthEvaluation(
@@ -654,11 +739,16 @@ class RtspStreamManager(private val context: Context) {
             }
 
             if (isPlaying) {
-                val frameProgressed = when {
-                    currentRenderedFrames >= 0 && previousRenderedFrames >= 0 ->
-                        currentRenderedFrames > previousRenderedFrames
-                    currentRenderedFrames > 0 && previousRenderedFrames < 0 -> true
-                    else -> currentPositionMs > previousPositionMs || previousPositionMs < 0L
+                val frameProgressed = if (hasAttachedSurface) {
+                    when {
+                        currentRenderedFrames >= 0 && previousRenderedFrames >= 0 ->
+                            currentRenderedFrames > previousRenderedFrames
+                        currentRenderedFrames > 0 && previousRenderedFrames < 0 -> true
+                        else -> currentPositionMs > previousPositionMs || previousPositionMs < 0L
+                    }
+                } else {
+                    // Offscreen/no visible PlayerView: judge liveness by packet timeline progress
+                    currentPositionMs > previousPositionMs || previousPositionMs < 0L
                 }
                 return if (frameProgressed) {
                     StreamHealthEvaluation(

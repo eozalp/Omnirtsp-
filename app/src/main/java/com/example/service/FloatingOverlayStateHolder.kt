@@ -43,6 +43,9 @@ object FloatingOverlayStateHolder {
     private val _isSystemOverlayActive = MutableStateFlow(false)
     val isSystemOverlayActive: StateFlow<Boolean> = _isSystemOverlayActive.asStateFlow()
 
+    private val _fullscreenCameraId = MutableStateFlow<String?>(null)
+    val fullscreenCameraId: StateFlow<String?> = _fullscreenCameraId.asStateFlow()
+
     private val _isGlobalMuted = MutableStateFlow(false)
     val isGlobalMuted: StateFlow<Boolean> = _isGlobalMuted.asStateFlow()
 
@@ -101,6 +104,10 @@ object FloatingOverlayStateHolder {
 
     fun setSystemOverlayActive(active: Boolean) {
         _isSystemOverlayActive.value = active
+    }
+
+    fun setFullscreenCameraId(cameraId: String?) {
+        _fullscreenCameraId.value = cameraId
     }
 
     fun setRotation(cameraId: String, degrees: Float) {

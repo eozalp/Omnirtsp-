@@ -52,6 +52,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -106,6 +107,19 @@ fun RtspVideoPlayer(
     var viewportSize by remember { mutableStateOf(IntSize.Zero) }
     var playerViewRef by remember { mutableStateOf<PlayerView?>(null) }
     val lifecycleOwner = LocalLifecycleOwner.current
+    val context = LocalContext.current
+    val sharedStreamManager = remember(context) { com.example.engine.RtspStreamManager.getInstance(context) }
+
+    DisposableEffect(camera.id, player != null) {
+        if (player != null) {
+            sharedStreamManager.onSurfaceAttached(camera.id)
+        }
+        onDispose {
+            if (player != null) {
+                sharedStreamManager.onSurfaceDetached(camera.id)
+            }
+        }
+    }
 
     // Re-attach video surface cleanly when returning from background, screen lock, or another route
     DisposableEffect(lifecycleOwner, player) {
@@ -133,14 +147,25 @@ fun RtspVideoPlayer(
     }
 
     LaunchedEffect(camera.id, player) {
-        delay(60)
-        playerViewRef?.let { pv ->
-            if (player != null) {
+        delay(90)
+        val pv = playerViewRef ?: return@LaunchedEffect
+        if (player != null) {
+            val tv = pv.videoSurfaceView as? android.view.TextureView
+            if (tv != null) {
+                var waits = 0
+                while (!tv.isAvailable && waits < 10) {
+                    delay(80)
+                    waits++
+                }
                 if (pv.player !== player) {
                     pv.player = player
+                } else if (tv.isAvailable) {
+                    player.setVideoTextureView(tv)
                 }
-                pv.onResume()
+            } else if (pv.player !== player) {
+                pv.player = player
             }
+            pv.onResume()
         }
     }
 

@@ -646,7 +646,6 @@ fun LiveMultiCamScreen(
                         val telemetry by viewModel.streamManager.getTelemetryFlow(camera.id).collectAsState()
                         val isRecording = recordingCameras.contains(camera.id)
                         val isFloating = floatingIds.contains(camera.id)
-                        val isInAppFloatingActive = isFloating && !isSystemOverlayActive
                         val sizeScale = feedSizeScales[camera.id] ?: 1.0f
                         var menuExpanded by remember { mutableStateOf(false) }
 
@@ -668,8 +667,8 @@ fun LiveMultiCamScreen(
                                         .fillMaxWidth()
                                         .aspectRatio(dynamicAspectRatio)
                                 ) {
-                                    if (isInAppFloatingActive) {
-                                        // Avoid competing for the single ExoPlayer video surface while in-app FloatingCameraWindow is active
+                                    if (isFloating) {
+                                        // Yield the single ExoPlayer video surface to the active floating window (in-app or system overlay)
                                         Box(
                                             modifier = Modifier
                                                 .fillMaxSize()
