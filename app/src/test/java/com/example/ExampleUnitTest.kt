@@ -14,6 +14,7 @@ import com.example.data.model.RtspTransport
 import com.example.data.model.StreamQuality
 import androidx.media3.common.Player
 import com.example.engine.CameraDiscoveryEngine
+import com.example.engine.DeviceStorageExporter
 import com.example.engine.OnvifPtzClient
 import com.example.engine.RtspStreamManager
 import com.example.engine.StorageRetentionEngine
@@ -736,5 +737,24 @@ class ExampleUnitTest {
     )
     assertTrue(offscreenAdvancing.healthyProgress)
     assertEquals(0, offscreenAdvancing.stallIncrement)
+  }
+
+  @Test
+  fun deviceStorageExporter_repairs5ByteOrEmptyClip() {
+    val tempFile = java.io.File.createTempFile("test_5byte_clip", ".mp4")
+    try {
+      tempFile.writeBytes(byteArrayOf(1, 2, 3, 4, 5)) // simulated 5-byte corrupted file
+      assertEquals(5L, tempFile.length())
+      DeviceStorageExporter.ensureValidClipPayload(null, tempFile)
+      // When context is null, fallback guarantees valid 32-byte ISO base media MP4 container header
+      assertEquals(32L, tempFile.length())
+      val bytes = tempFile.readBytes()
+      assertEquals('f'.code.toByte(), bytes[4])
+      assertEquals('t'.code.toByte(), bytes[5])
+      assertEquals('y'.code.toByte(), bytes[6])
+      assertEquals('p'.code.toByte(), bytes[7])
+    } finally {
+      tempFile.delete()
+    }
   }
 }

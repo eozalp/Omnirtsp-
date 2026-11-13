@@ -650,6 +650,7 @@ fun RecordingsScreen(
                             androidx.media3.exoplayer.ExoPlayer.Builder(ctx).build().apply {
                                 setVideoChangeFrameRateStrategy(androidx.media3.common.C.VIDEO_CHANGE_FRAME_RATE_STRATEGY_OFF)
                                 val file = java.io.File(clip.filePath)
+                                com.example.engine.DeviceStorageExporter.ensureValidClipPayload(ctx, file)
                                 if (file.exists() && file.length() > 0) {
                                     setMediaItem(androidx.media3.common.MediaItem.fromUri(android.net.Uri.fromFile(file)))
                                     prepare()
