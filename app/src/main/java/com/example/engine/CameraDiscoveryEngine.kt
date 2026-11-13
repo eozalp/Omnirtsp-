@@ -335,7 +335,8 @@ class CameraDiscoveryEngine(
             suggestedRtspUrl = buildSuggestedRtspUrl(ip, finalRtspPort, path),
             discoveryMethod = method,
             onvifDeviceServiceUrl = if (discoveredOnvifPort != null) {
-                "http://$ip:$finalOnvifPort/onvif/device_service"
+                val defaultPath = if (discoveredOnvifPort == 2020) "/onvif/service" else "/onvif/device_service"
+                "http://$ip:$discoveredOnvifPort$defaultPath"
             } else {
                 ""
             }
@@ -379,31 +380,36 @@ class CameraDiscoveryEngine(
     }
 
     private fun looksLikeOnvifEndpoint(ip: String, port: Int): Boolean {
-        return try {
-            Socket().use { socket ->
-                socket.connect(InetSocketAddress(ip, port), 240)
-                socket.soTimeout = 350
-                val out = socket.getOutputStream()
-                val body = "<s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\"><s:Body><tds:GetSystemDateAndTime xmlns:tds=\"http://www.onvif.org/ver10/device/wsdl\"/></s:Body></s:Envelope>"
-                val req = "POST /onvif/device_service HTTP/1.1\r\nHost: $ip:$port\r\nContent-Type: application/soap+xml\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n$body"
-                out.write(req.toByteArray(Charsets.UTF_8))
-                out.flush()
-                val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
-                val text = buildString {
-                    var i = 0
-                    while (i < 10) {
-                        val line = reader.readLine() ?: break
-                        append(line).append('\n')
-                        i++
+        val paths = if (port == 2020) listOf("/onvif/service", "/onvif/device_service") else listOf("/onvif/device_service", "/onvif/service")
+        val body = "<s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\"><s:Body><tds:GetSystemDateAndTime xmlns:tds=\"http://www.onvif.org/ver10/device/wsdl\"/></s:Body></s:Envelope>"
+        for (path in paths) {
+            val matched = try {
+                Socket().use { socket ->
+                    socket.connect(InetSocketAddress(ip, port), 240)
+                    socket.soTimeout = 350
+                    val out = socket.getOutputStream()
+                    val req = "POST $path HTTP/1.1\r\nHost: $ip:$port\r\nContent-Type: application/soap+xml; charset=utf-8\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n$body"
+                    out.write(req.toByteArray(Charsets.UTF_8))
+                    out.flush()
+                    val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
+                    val text = buildString {
+                        var i = 0
+                        while (i < 12) {
+                            val line = reader.readLine() ?: break
+                            append(line).append('\n')
+                            i++
+                        }
                     }
+                    text.contains("Envelope", ignoreCase = true) ||
+                        text.contains("onvif", ignoreCase = true) ||
+                        text.contains("GetSystemDateAndTime", ignoreCase = true)
                 }
-                text.contains("Envelope", ignoreCase = true) ||
-                    text.contains("onvif", ignoreCase = true) ||
-                    text.contains("GetSystemDateAndTime", ignoreCase = true)
+            } catch (_: Exception) {
+                false
             }
-        } catch (_: Exception) {
-            false
+            if (matched) return true
         }
+        return false
     }
 
     private fun getLocalIpv4Addresses(): List<String> {

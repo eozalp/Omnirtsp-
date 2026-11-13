@@ -203,6 +203,7 @@
     <string name="ptz_pan_tilt_only">Pan/Tilt Only (No Zoom)</string>
     <string name="ptz_relative_step_sent">Step %1$s sent (RelativeMove)</string>
     <string name="ptz_queried_summary">Port %1$d • %2$s • %3$s</string>
+    <string name="ptz_auth_required_error">Auth failed (%1$s) — check Camera Username &amp; Password in Camera Settings</string>
     <string name="rotation_title">Rotate Video</string>
     <string name="rotation_reset_zero">Reset 0°</string>
     <string name="rotation_free_label">Free Rotation (0°–360°)</string>

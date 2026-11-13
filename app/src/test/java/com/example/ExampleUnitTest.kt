@@ -303,8 +303,27 @@ class ExampleUnitTest {
     assertTrue(soap.startsWith("<?xml version=\"1.0\" encoding=\"utf-8\"?>"))
     assertFalse(soap.first().isWhitespace())
     assertTrue(soap.contains("<wsse:Username>admin</wsse:Username>"))
-    assertTrue(soap.contains("PasswordDigest"))
+    assertTrue(
+      soap.contains("Type=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest\"")
+    )
+    assertTrue(
+      soap.contains("EncodingType=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary\"")
+    )
+    assertFalse(soap.contains("wss-wssecurity-secext-1.0.xsd#PasswordDigest"))
+    assertFalse(soap.contains("wss-wssecurity-secext-1.0.xsd#Base64Binary"))
     assertTrue(soap.contains("<tptz:ContinuousMove>"))
+
+    val textMustUnderstandSoap = OnvifPtzClient.buildSoapEnvelope(
+      username = "admin",
+      password = "ptzPassword!",
+      bodyContent = moveBody,
+      usePasswordText = true,
+      includeMustUnderstand = true
+    )
+    assertTrue(
+      textMustUnderstandSoap.contains("Type=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordText\"")
+    )
+    assertTrue(textMustUnderstandSoap.contains("s:mustUnderstand=\"1\""))
 
     // Embedded RTSP credentials fallback when camera.username is empty
     val embeddedCam = CameraEntity(
@@ -318,6 +337,18 @@ class ExampleUnitTest {
     val ports = OnvifPtzClient.candidateOnvifPorts(80)
     assertEquals(80, ports.first())
     assertTrue(ports.contains(2020))
+    assertEquals("/onvif/service", OnvifPtzClient.devicePathsForPort(2020).first())
+    assertEquals("/onvif/device_service", OnvifPtzClient.devicePathsForPort(80).first())
+
+    val soapFaultXml = """
+      <s:Fault>
+        <s:Code><s:Value>s:Sender</s:Value><s:Subcode><s:Value>ter:NotAuthorized</s:Value></s:Subcode></s:Code>
+        <s:Reason><s:Text xml:lang="en">Sender not Authorized</s:Text></s:Reason>
+      </s:Fault>
+    """.trimIndent()
+    assertEquals("Sender not Authorized", OnvifPtzClient.extractSoapFault(soapFaultXml))
+    val subcodeOnlyXml = "<s:Fault><s:Code><s:Value>s:Sender</s:Value><s:Subcode><s:Value>ter:InvalidArgVal</s:Value></s:Subcode></s:Code></s:Fault>"
+    assertEquals("ter:InvalidArgVal", OnvifPtzClient.extractSoapFault(subcodeOnlyXml))
 
     // Prefers PTZ-enabled profile when GetProfiles returns multiple profiles
     val multiProfilesXml = """

@@ -203,6 +203,7 @@
     <string name="ptz_pan_tilt_only">Yalnızca Yatay/Dikey (Yakınlaştırma Yok)</string>
     <string name="ptz_relative_step_sent">%1$s adımı gönderildi (RelativeMove)</string>
     <string name="ptz_queried_summary">Port %1$d • %2$s • %3$s</string>
+    <string name="ptz_auth_required_error">Kimlik doğrulama hatası (%1$s) — Kamera Ayarlarından kullanıcı adı ve şifreyi kontrol edin</string>
     <string name="rotation_title">Videoyu Döndür</string>
     <string name="rotation_reset_zero">0° Sıfırla</string>
     <string name="rotation_free_label">Serbest Döndürme (0°–360°)</string>

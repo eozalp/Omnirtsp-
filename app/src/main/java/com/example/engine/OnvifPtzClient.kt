@@ -69,6 +69,7 @@ class OnvifPtzClient(private val context: Context? = null) {
     enum class SoapDialect {
         SOAP12_NO_ACTION,
         SOAP12_WITH_ACTION,
+        SOAP12_PLAIN,
         SOAP11
     }
 
@@ -116,6 +117,7 @@ class OnvifPtzClient(private val context: Context? = null) {
     private val cameraClockOffsetCache = ConcurrentHashMap<String, Long>()
     private val cameraUsesRelativeFallback = ConcurrentHashMap<String, Boolean>()
     private val cameraSupportsSpaceUriCache = ConcurrentHashMap<String, Boolean>()
+    private val cameraMustUnderstandCache = ConcurrentHashMap<String, Boolean>()
 
     private val _status = MutableStateFlow(PtzCommandState())
     val status: StateFlow<PtzCommandState> = _status.asStateFlow()
@@ -337,6 +339,17 @@ class OnvifPtzClient(private val context: Context? = null) {
                     panTiltSpaceUri = discoveredPanSpace ?: PAN_TILT_VELOCITY_SPACE,
                     zoomSpaceUri = discoveredZoomSpace ?: ZOOM_VELOCITY_SPACE,
                     includeTimeout = false
+                ),
+                buildContinuousMoveBody(
+                    profileToken = profileToken,
+                    panX = panX,
+                    tiltY = tiltY,
+                    zoomX = zoomX,
+                    includeSpaceUri = true,
+                    includeAllAxes = false,
+                    panTiltSpaceUri = discoveredPanSpace ?: PAN_TILT_VELOCITY_SPACE,
+                    zoomSpaceUri = discoveredZoomSpace ?: ZOOM_VELOCITY_SPACE,
+                    includeTimeout = true
                 )
             )
 
@@ -587,6 +600,7 @@ class OnvifPtzClient(private val context: Context? = null) {
         cameraSoapDialectCache.keys.filter { it.startsWith(prefix) }.forEach { cameraSoapDialectCache.remove(it) }
         cameraClockOffsetCache.keys.filter { it.startsWith(prefix) }.forEach { cameraClockOffsetCache.remove(it) }
         cameraSupportsSpaceUriCache.keys.filter { it.startsWith(prefix) }.forEach { cameraSupportsSpaceUriCache.remove(it) }
+        cameraMustUnderstandCache.keys.filter { it.startsWith(prefix) }.forEach { cameraMustUnderstandCache.remove(it) }
         cameraUsesRelativeFallback.remove(cameraId)
     }
 
@@ -628,16 +642,20 @@ class OnvifPtzClient(private val context: Context? = null) {
     private fun queryOnvifEndpointAndCapabilities(camera: CameraEntity, host: String): QueryResolution {
         val key = cacheKey(camera)
         val portsToTry = candidateOnvifPorts(camera.onvifPort)
-        val devicePaths = listOf("/onvif/device_service", "/onvif/service", "/onvif/device", "/onvif/devices")
+        val (resolvedUser, _) = resolveCredentials(camera)
 
         var workingPort = camera.onvifPort
+        var reachableHttpPort: Int? = null
         var workingDeviceUrl: String? = null
+        var serviceDiscoverySucceeded = false
         var ptzUrl: String? = null
         var mediaUrl: String? = null
         var deviceModel = ""
         var lastError: String? = null
+        var sawAuthHttpCode = false
 
         portLoop@ for (port in portsToTry) {
+            val devicePaths = devicePathsForPort(port)
             for (path in devicePaths) {
                 val candidateUrl = "http://$host:$port$path"
 
@@ -656,17 +674,20 @@ class OnvifPtzClient(private val context: Context? = null) {
                         cameraClockOffsetCache[key] = camUtcMs - System.currentTimeMillis()
                     }
                     workingPort = port
+                    reachableHttpPort = port
                     workingDeviceUrl = candidateUrl
                 } else {
                     val err = timeRes.exceptionOrNull()
                     if (isConnectionUnreachable(err)) {
-                        lastError = err?.message
+                        lastError = err?.message ?: lastError
                         continue@portLoop
                     }
+                    // Port is reachable over TCP/HTTP even if GetSystemDateAndTime returned 400/401/404
+                    reachableHttpPort = port
                 }
 
-                // 2) GetCapabilities (tries authenticated first, then unauthenticated pre-auth fallback)
-                val capRes = executeSoap(
+                // 2) GetCapabilities (tries authenticated first, then unauthenticated, plus bare <GetCapabilities/>)
+                var capRes = executeSoap(
                     url = candidateUrl,
                     camera = camera,
                     soapAction = SOAP_ACTION_GET_CAPABILITIES,
@@ -675,16 +696,35 @@ class OnvifPtzClient(private val context: Context? = null) {
                     allowUnauthenticatedFallback = true,
                     useProbeTimeout = true
                 )
+                if (capRes.isFailure && !isConnectionUnreachable(capRes.exceptionOrNull())) {
+                    val bareCapRes = executeSoap(
+                        url = candidateUrl,
+                        camera = camera,
+                        soapAction = SOAP_ACTION_GET_CAPABILITIES,
+                        bodyContent = "<tds:GetCapabilities/>",
+                        includeSecurityHeader = true,
+                        allowUnauthenticatedFallback = true,
+                        useProbeTimeout = true
+                    )
+                    if (bareCapRes.isSuccess) {
+                        capRes = bareCapRes
+                    }
+                }
                 if (capRes.isSuccess) {
                     val xml = capRes.getOrThrow()
                     workingPort = port
                     workingDeviceUrl = candidateUrl
                     ptzUrl = extractXAddr(xml, "PTZ")?.let { normalizeXAddrHost(it, host, port) }
                     mediaUrl = extractXAddr(xml, "Media")?.let { normalizeXAddrHost(it, host, port) }
+                    serviceDiscoverySucceeded = true
                     lastError = null
                     break@portLoop
                 } else {
-                    lastError = capRes.exceptionOrNull()?.message ?: lastError
+                    val msg = capRes.exceptionOrNull()?.message
+                    if (!msg.isNullOrBlank()) {
+                        if (msg.contains("400") || msg.contains("401")) sawAuthHttpCode = true
+                        lastError = "GetCapabilities ($port$path): $msg"
+                    }
                 }
 
                 // 3) GetServices fallback (some firmwares expose PTZ XAddr only here)
@@ -702,16 +742,30 @@ class OnvifPtzClient(private val context: Context? = null) {
                     workingPort = port
                     workingDeviceUrl = candidateUrl
                     ptzUrl = extractServiceXAddr(xml, "ptz/wsdl")?.let { normalizeXAddrHost(it, host, port) }
-                    mediaUrl = (extractServiceXAddr(xml, "ver10/media/wsdl") ?: extractServiceXAddr(xml, "media/wsdl"))
+                    mediaUrl = (extractServiceXAddr(xml, "ver10/media/wsdl")
+                        ?: extractServiceXAddr(xml, "ver20/media/wsdl")
+                        ?: extractServiceXAddr(xml, "media/wsdl"))
                         ?.let { normalizeXAddrHost(it, host, port) }
+                    serviceDiscoverySucceeded = true
                     lastError = null
                     break@portLoop
                 } else {
-                    lastError = svcRes.exceptionOrNull()?.message ?: lastError
-                    if (workingDeviceUrl != null) {
-                        break@portLoop
+                    val msg = svcRes.exceptionOrNull()?.message
+                    if (!msg.isNullOrBlank()) {
+                        if (msg.contains("400") || msg.contains("401")) sawAuthHttpCode = true
+                        lastError = "GetServices ($port$path): $msg"
                     }
                 }
+            }
+
+            // If this port responded over HTTP (e.g. GetSystemDateAndTime succeeded or HTTP 400/401),
+            // don't waste time scanning closed fallback ports before testing Media & PTZ on this port.
+            if (!serviceDiscoverySucceeded && (workingDeviceUrl != null || reachableHttpPort == port)) {
+                workingPort = port
+                if (workingDeviceUrl == null) {
+                    workingDeviceUrl = "http://$host:$port${devicePaths.first()}"
+                }
+                break@portLoop
             }
         }
 
@@ -736,12 +790,13 @@ class OnvifPtzClient(private val context: Context? = null) {
             deviceModel = extractDeviceModel(infoRes.getOrThrow())
         }
 
-        // 4) Query Media Profiles (trying discovered XAddr and common single/split service paths)
+        // 4) Query Media Profiles (Media1 + Media2 fallback across discovered & standard paths)
         val mediaCandidates = listOfNotNull(
             mediaUrl,
             workingDeviceUrl,
-            "http://$host:$workingPort/onvif/media_service",
-            "http://$host:$workingPort/onvif/service"
+            "http://$host:$workingPort/onvif/service",
+            "http://$host:$workingPort/onvif/device_service",
+            "http://$host:$workingPort/onvif/media_service"
         ).distinct()
 
         var resolvedProfiles: List<String> = emptyList()
@@ -749,15 +804,29 @@ class OnvifPtzClient(private val context: Context? = null) {
         var resolvedMediaUrl = mediaUrl ?: mediaCandidates.first()
 
         for (candidateMedia in mediaCandidates) {
-            val profRes = executeSoap(
+            var profRes = executeSoap(
                 url = candidateMedia,
                 camera = camera,
                 soapAction = SOAP_ACTION_GET_PROFILES,
                 bodyContent = "<trt:GetProfiles/>",
                 includeSecurityHeader = true,
-                allowUnauthenticatedFallback = false,
+                allowUnauthenticatedFallback = true,
                 useProbeTimeout = true
             )
+            if (profRes.isFailure && !isConnectionUnreachable(profRes.exceptionOrNull())) {
+                val media2Res = executeSoap(
+                    url = candidateMedia,
+                    camera = camera,
+                    soapAction = SOAP_ACTION_GET_PROFILES_MEDIA2,
+                    bodyContent = "<tr2:GetProfiles xmlns:tr2=\"http://www.onvif.org/ver20/media/wsdl\"><tr2:Type>All</tr2:Type></tr2:GetProfiles>",
+                    includeSecurityHeader = true,
+                    allowUnauthenticatedFallback = true,
+                    useProbeTimeout = true
+                )
+                if (media2Res.isSuccess) {
+                    profRes = media2Res
+                }
+            }
             if (profRes.isSuccess) {
                 val profXml = profRes.getOrThrow()
                 resolvedMediaUrl = candidateMedia
@@ -772,7 +841,12 @@ class OnvifPtzClient(private val context: Context? = null) {
                     break
                 }
             } else {
-                lastError = profRes.exceptionOrNull()?.message ?: lastError
+                val msg = profRes.exceptionOrNull()?.message
+                if (!msg.isNullOrBlank()) {
+                    if (msg.contains("400") || msg.contains("401")) sawAuthHttpCode = true
+                    val shortPath = runCatching { URI.create(candidateMedia).rawPath }.getOrNull() ?: ""
+                    lastError = "GetProfiles ($workingPort$shortPath): $msg"
+                }
             }
         }
 
@@ -780,8 +854,9 @@ class OnvifPtzClient(private val context: Context? = null) {
         val ptzCandidates = listOfNotNull(
             ptzUrl,
             workingDeviceUrl,
+            "http://$host:$workingPort/onvif/service",
             "http://$host:$workingPort/onvif/ptz_service",
-            "http://$host:$workingPort/onvif/service"
+            "http://$host:$workingPort/onvif/device_service"
         ).distinct()
 
         // 5) Query PTZ Nodes, Presets, and Status BEFORE action to detect working PTZ endpoint & spaces
@@ -797,7 +872,7 @@ class OnvifPtzClient(private val context: Context? = null) {
                 soapAction = SOAP_ACTION_GET_NODES,
                 bodyContent = "<tptz:GetNodes/>",
                 includeSecurityHeader = true,
-                allowUnauthenticatedFallback = false,
+                allowUnauthenticatedFallback = true,
                 useProbeTimeout = true
             )
             if (nodesRes.isSuccess) {
@@ -815,7 +890,7 @@ class OnvifPtzClient(private val context: Context? = null) {
                 soapAction = SOAP_ACTION_GET_STATUS,
                 bodyContent = "<tptz:GetStatus><tptz:ProfileToken>${escapeXml(finalProfile)}</tptz:ProfileToken></tptz:GetStatus>",
                 includeSecurityHeader = true,
-                allowUnauthenticatedFallback = false,
+                allowUnauthenticatedFallback = true,
                 useProbeTimeout = true
             )
             if (statusRes.isSuccess) {
@@ -824,7 +899,12 @@ class OnvifPtzClient(private val context: Context? = null) {
                 lastError = null
                 break
             } else {
-                lastError = nodesRes.exceptionOrNull()?.message ?: statusRes.exceptionOrNull()?.message ?: lastError
+                val errText = nodesRes.exceptionOrNull()?.message ?: statusRes.exceptionOrNull()?.message
+                if (!errText.isNullOrBlank()) {
+                    if (errText.contains("400") || errText.contains("401")) sawAuthHttpCode = true
+                    val shortPath = runCatching { URI.create(candidatePtz).rawPath }.getOrNull() ?: ""
+                    lastError = "PTZ ($workingPort$shortPath): $errText"
+                }
             }
         }
 
@@ -834,7 +914,7 @@ class OnvifPtzClient(private val context: Context? = null) {
             soapAction = SOAP_ACTION_GET_PRESETS,
             bodyContent = "<tptz:GetPresets><tptz:ProfileToken>${escapeXml(finalProfile)}</tptz:ProfileToken></tptz:GetPresets>",
             includeSecurityHeader = true,
-            allowUnauthenticatedFallback = false,
+            allowUnauthenticatedFallback = true,
             useProbeTimeout = true
         )
         if (presetsRes.isSuccess) {
@@ -859,9 +939,20 @@ class OnvifPtzClient(private val context: Context? = null) {
 
         // If device responded and we verified at least Media GetProfiles or PTZ endpoint, allow action cleanly
         val isUsable = ptzVerified || chosenProfile != null
+        val finalError = if (isUsable) {
+            null
+        } else if (resolvedUser.isBlank() && sawAuthHttpCode) {
+            msg(
+                R.string.ptz_auth_required_error,
+                "Auth failed (${lastError ?: "HTTP 400/401"}) — check Camera Username & Password in Camera Settings",
+                lastError ?: "HTTP 400/401"
+            )
+        } else {
+            lastError ?: msg(R.string.ptz_unreachable, "ONVIF unreachable")
+        }
         return QueryResolution(
             capabilities = caps,
-            error = if (isUsable) null else (lastError ?: msg(R.string.ptz_unreachable, "ONVIF unreachable"))
+            error = finalError
         )
     }
 
@@ -884,13 +975,16 @@ class OnvifPtzClient(private val context: Context? = null) {
             preferredDialect,
             SoapDialect.SOAP12_NO_ACTION,
             SoapDialect.SOAP12_WITH_ACTION,
+            SoapDialect.SOAP12_PLAIN,
             SoapDialect.SOAP11
         ).distinct()
+        val preferMustUnderstand = cameraMustUnderstandCache[key] ?: false
 
         var bestFailure: SoapCallOutcome? = null
 
         if (includeSecurityHeader) {
             for (dialect in orderedDialects) {
+                val effectiveOffset = cameraClockOffsetCache[key] ?: clockOffsetMs
                 val outcome = sendSoapRequest(
                     httpClient = httpClient,
                     url = url,
@@ -899,14 +993,21 @@ class OnvifPtzClient(private val context: Context? = null) {
                     soapAction = soapAction,
                     bodyContent = bodyContent,
                     dialect = dialect,
-                    clockOffsetMs = clockOffsetMs,
+                    clockOffsetMs = effectiveOffset,
                     includeSecurityHeader = true,
                     usePasswordText = false,
+                    includeMustUnderstand = preferMustUnderstand,
                     authHeader = null
                 )
                 if (outcome.isSuccess) {
                     cameraSoapDialectCache[key] = dialect
                     return outcome.toKotlinResult()
+                }
+                if (outcome.serverDateMs != null && cameraClockOffsetCache[key] == null) {
+                    val serverDiff = outcome.serverDateMs - System.currentTimeMillis()
+                    if (abs(serverDiff) > 15_000L) {
+                        cameraClockOffsetCache[key] = serverDiff
+                    }
                 }
                 bestFailure = pickMoreInformativeFailure(bestFailure, outcome)
 
@@ -930,9 +1031,10 @@ class OnvifPtzClient(private val context: Context? = null) {
                             soapAction = soapAction,
                             bodyContent = bodyContent,
                             dialect = dialect,
-                            clockOffsetMs = clockOffsetMs,
+                            clockOffsetMs = cameraClockOffsetCache[key] ?: effectiveOffset,
                             includeSecurityHeader = true,
                             usePasswordText = false,
+                            includeMustUnderstand = preferMustUnderstand,
                             authHeader = digestHeader
                         )
                         if (digestAttempt.isSuccess) {
@@ -940,6 +1042,27 @@ class OnvifPtzClient(private val context: Context? = null) {
                             return digestAttempt.toKotlinResult()
                         }
                         bestFailure = pickMoreInformativeFailure(bestFailure, digestAttempt)
+
+                        // Some firmwares accept HTTP Digest ONLY when WS-Security XML header is omitted
+                        val digestNoWsse = sendSoapRequest(
+                            httpClient = httpClient,
+                            url = url,
+                            username = "",
+                            password = "",
+                            soapAction = soapAction,
+                            bodyContent = bodyContent,
+                            dialect = dialect,
+                            clockOffsetMs = effectiveOffset,
+                            includeSecurityHeader = false,
+                            usePasswordText = false,
+                            includeMustUnderstand = false,
+                            authHeader = digestHeader
+                        )
+                        if (digestNoWsse.isSuccess) {
+                            cameraSoapDialectCache[key] = dialect
+                            return digestNoWsse.toKotlinResult()
+                        }
+                        bestFailure = pickMoreInformativeFailure(bestFailure, digestNoWsse)
                     }
 
                     val basicAttempt = sendSoapRequest(
@@ -950,9 +1073,10 @@ class OnvifPtzClient(private val context: Context? = null) {
                         soapAction = soapAction,
                         bodyContent = bodyContent,
                         dialect = dialect,
-                        clockOffsetMs = clockOffsetMs,
+                        clockOffsetMs = effectiveOffset,
                         includeSecurityHeader = true,
                         usePasswordText = false,
+                        includeMustUnderstand = preferMustUnderstand,
                         authHeader = buildBasicAuthHeader(user, pass)
                     )
                     if (basicAttempt.isSuccess) {
@@ -962,14 +1086,49 @@ class OnvifPtzClient(private val context: Context? = null) {
                     bestFailure = pickMoreInformativeFailure(bestFailure, basicAttempt)
                 }
 
-                // If 400 wasn't a schema/Content-Type mismatch, stop probing dialects needlessly unless 400/415/500
+                // If HTTP error wasn't a schema/Content-Type/auth mismatch, stop probing dialects
                 if (outcome.httpCode !in listOf(400, 401, 415, 500)) {
                     break
                 }
             }
 
-            // Fallback: some cameras expect WS-Security PasswordText or reject Digest due to custom auth rules
-            if (user.isNotBlank() && (bestFailure?.httpCode == 400 || bestFailure?.httpCode == 401)) {
+            // Try opposite mustUnderstand attribute + WS-Security PasswordText fallbacks when 400/401/500 occurs
+            if (user.isNotBlank() && bestFailure?.httpCode in listOf(400, 401, 500)) {
+                val effectiveOffset = cameraClockOffsetCache[key] ?: clockOffsetMs
+                val altMustUnderstand = !preferMustUnderstand
+                val fallbackDialects = listOfNotNull(
+                    preferredDialect,
+                    SoapDialect.SOAP12_NO_ACTION,
+                    SoapDialect.SOAP12_WITH_ACTION,
+                    SoapDialect.SOAP11
+                ).distinct()
+
+                for (dialect in fallbackDialects) {
+                    val mustUnderstandAttempt = sendSoapRequest(
+                        httpClient = httpClient,
+                        url = url,
+                        username = user,
+                        password = pass,
+                        soapAction = soapAction,
+                        bodyContent = bodyContent,
+                        dialect = dialect,
+                        clockOffsetMs = effectiveOffset,
+                        includeSecurityHeader = true,
+                        usePasswordText = false,
+                        includeMustUnderstand = altMustUnderstand,
+                        authHeader = null
+                    )
+                    if (mustUnderstandAttempt.isSuccess) {
+                        cameraSoapDialectCache[key] = dialect
+                        cameraMustUnderstandCache[key] = altMustUnderstand
+                        return mustUnderstandAttempt.toKotlinResult()
+                    }
+                    bestFailure = pickMoreInformativeFailure(bestFailure, mustUnderstandAttempt)
+                    if (isConnectionUnreachable(mustUnderstandAttempt.error)) {
+                        return mustUnderstandAttempt.toKotlinResult()
+                    }
+                }
+
                 val textOutcome = sendSoapRequest(
                     httpClient = httpClient,
                     url = url,
@@ -978,9 +1137,10 @@ class OnvifPtzClient(private val context: Context? = null) {
                     soapAction = soapAction,
                     bodyContent = bodyContent,
                     dialect = preferredDialect ?: SoapDialect.SOAP12_NO_ACTION,
-                    clockOffsetMs = clockOffsetMs,
+                    clockOffsetMs = effectiveOffset,
                     includeSecurityHeader = true,
                     usePasswordText = true,
+                    includeMustUnderstand = preferMustUnderstand,
                     authHeader = null
                 )
                 if (textOutcome.isSuccess) {
@@ -990,7 +1150,7 @@ class OnvifPtzClient(private val context: Context? = null) {
             }
         }
 
-        // Pre-auth ONVIF calls (GetSystemDateAndTime, GetCapabilities, GetServices)
+        // Pre-auth / unauthenticated ONVIF calls (GetSystemDateAndTime, GetCapabilities, or cameras with auth off)
         if (!includeSecurityHeader || allowUnauthenticatedFallback) {
             for (dialect in orderedDialects) {
                 val noSec = sendSoapRequest(
@@ -1001,9 +1161,10 @@ class OnvifPtzClient(private val context: Context? = null) {
                     soapAction = soapAction,
                     bodyContent = bodyContent,
                     dialect = dialect,
-                    clockOffsetMs = clockOffsetMs,
+                    clockOffsetMs = cameraClockOffsetCache[key] ?: clockOffsetMs,
                     includeSecurityHeader = false,
                     usePasswordText = false,
+                    includeMustUnderstand = false,
                     authHeader = null
                 )
                 if (noSec.isSuccess) {
@@ -1012,6 +1173,9 @@ class OnvifPtzClient(private val context: Context? = null) {
                 }
                 bestFailure = pickMoreInformativeFailure(bestFailure, noSec)
                 if (isConnectionUnreachable(noSec.error)) {
+                    break
+                }
+                if (noSec.httpCode !in listOf(400, 401, 415, 500)) {
                     break
                 }
             }
@@ -1024,6 +1188,7 @@ class OnvifPtzClient(private val context: Context? = null) {
         val body: String? = null,
         val httpCode: Int = -1,
         val wwwAuthenticate: String? = null,
+        val serverDateMs: Long? = null,
         val error: Throwable? = null
     ) {
         val isSuccess: Boolean get() = error == null && body != null
@@ -1038,6 +1203,7 @@ class OnvifPtzClient(private val context: Context? = null) {
             next.httpCode == 401 && prev.httpCode != 401 -> next
             !nextMsg.startsWith("HTTP ") && prevMsg.startsWith("HTTP ") -> next
             next.httpCode > 0 && prev.httpCode <= 0 -> next
+            next.httpCode == prev.httpCode && nextMsg.length > prevMsg.length -> next
             else -> prev
         }
     }
@@ -1068,6 +1234,7 @@ class OnvifPtzClient(private val context: Context? = null) {
         clockOffsetMs: Long,
         includeSecurityHeader: Boolean,
         usePasswordText: Boolean,
+        includeMustUnderstand: Boolean,
         authHeader: String?
     ): SoapCallOutcome {
         return try {
@@ -1078,19 +1245,28 @@ class OnvifPtzClient(private val context: Context? = null) {
                 bodyContent = bodyContent,
                 useSoap11 = useSoap11,
                 clockOffsetMs = clockOffsetMs,
-                usePasswordText = usePasswordText
+                usePasswordText = usePasswordText,
+                includeMustUnderstand = includeMustUnderstand
             )
 
-            val contentTypeString = when (dialect) {
-                SoapDialect.SOAP11 -> "text/xml; charset=utf-8"
-                SoapDialect.SOAP12_WITH_ACTION -> "application/soap+xml; charset=utf-8; action=\"$soapAction\""
-                SoapDialect.SOAP12_NO_ACTION -> "application/soap+xml; charset=utf-8"
-            }
-            val mediaType = contentTypeString.toMediaType()
             val builder = Request.Builder()
                 .url(url)
+                .header("Accept", "application/soap+xml, text/xml, */*")
                 .header("Connection", "close")
-                .post(envelope.toRequestBody(mediaType))
+
+            if (dialect == SoapDialect.SOAP12_PLAIN) {
+                val bytes = envelope.toByteArray(Charsets.UTF_8)
+                builder.header("Content-Type", "application/soap+xml")
+                builder.post(bytes.toRequestBody(null))
+            } else {
+                val contentTypeString = when (dialect) {
+                    SoapDialect.SOAP11 -> "text/xml; charset=utf-8"
+                    SoapDialect.SOAP12_WITH_ACTION -> "application/soap+xml; charset=utf-8; action=\"$soapAction\""
+                    SoapDialect.SOAP12_NO_ACTION,
+                    SoapDialect.SOAP12_PLAIN -> "application/soap+xml; charset=utf-8"
+                }
+                builder.post(envelope.toRequestBody(contentTypeString.toMediaType()))
+            }
 
             if (useSoap11) {
                 builder.header("SOAPAction", "\"$soapAction\"")
@@ -1101,25 +1277,23 @@ class OnvifPtzClient(private val context: Context? = null) {
 
             httpClient.newCall(builder.build()).execute().use { resp ->
                 val text = resp.body?.string().orEmpty()
-                resp.header("Date")?.let { dateHeader ->
-                    parseHttpDateMillis(dateHeader)?.let { serverMs ->
-                        // Used only if GetSystemDateAndTime didn't already provide exact UTC
-                        val diff = serverMs - System.currentTimeMillis()
-                        if (abs(diff) > 30_000L && clockOffsetMs == 0L) {
-                            // Best-effort hint handled naturally when needed
-                        }
-                    }
-                }
+                val serverDateMs = resp.header("Date")?.let { parseHttpDateMillis(it) }
                 if (!resp.isSuccessful) {
                     val fault = extractSoapFault(text)
-                    val detail = fault ?: "HTTP ${resp.code} ${resp.message}".trim()
+                    val httpLine = "HTTP ${resp.code} ${resp.message}".trim()
+                    val detail = when {
+                        !fault.isNullOrBlank() && !fault.equals(httpLine, ignoreCase = true) ->
+                            "HTTP ${resp.code}: $fault"
+                        else -> httpLine
+                    }
                     SoapCallOutcome(
                         httpCode = resp.code,
                         wwwAuthenticate = resp.header("WWW-Authenticate"),
+                        serverDateMs = serverDateMs,
                         error = IllegalStateException(detail)
                     )
                 } else {
-                    SoapCallOutcome(body = text, httpCode = resp.code)
+                    SoapCallOutcome(body = text, httpCode = resp.code, serverDateMs = serverDateMs)
                 }
             }
         } catch (t: Throwable) {
@@ -1133,6 +1307,7 @@ class OnvifPtzClient(private val context: Context? = null) {
         private const val SOAP_ACTION_GET_CAPABILITIES = "http://www.onvif.org/ver10/device/wsdl/GetCapabilities"
         private const val SOAP_ACTION_GET_SERVICES = "http://www.onvif.org/ver10/device/wsdl/GetServices"
         private const val SOAP_ACTION_GET_PROFILES = "http://www.onvif.org/ver10/media/wsdl/GetProfiles"
+        private const val SOAP_ACTION_GET_PROFILES_MEDIA2 = "http://www.onvif.org/ver20/media/wsdl/GetProfiles"
         private const val SOAP_ACTION_GET_STREAM_URI = "http://www.onvif.org/ver10/media/wsdl/GetStreamUri"
         private const val SOAP_ACTION_GET_NODES = "http://www.onvif.org/ver20/ptz/wsdl/GetNodes"
         private const val SOAP_ACTION_GET_PRESETS = "http://www.onvif.org/ver20/ptz/wsdl/GetPresets"
@@ -1143,11 +1318,23 @@ class OnvifPtzClient(private val context: Context? = null) {
         private const val SOAP_ACTION_GOTO_HOME = "http://www.onvif.org/ver20/ptz/wsdl/GotoHomePosition"
         private const val SOAP_ACTION_GOTO_PRESET = "http://www.onvif.org/ver20/ptz/wsdl/GotoPreset"
 
+        const val WSSE_NS = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
+        const val WSU_NS = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd"
+        const val PASSWORD_DIGEST_TYPE = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest"
+        const val PASSWORD_TEXT_TYPE = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordText"
+        const val NONCE_ENCODING_TYPE = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary"
+
         private const val PAN_TILT_VELOCITY_SPACE = "http://www.onvif.org/ver10/tptz/PanTiltSpaces/VelocityGenericSpace"
         private const val ZOOM_VELOCITY_SPACE = "http://www.onvif.org/ver10/tptz/ZoomSpaces/VelocityGenericSpace"
 
         fun defaultPtzUrl(host: String, onvifPort: Int): String =
             "http://$host:$onvifPort/onvif/ptz_service"
+
+        fun devicePathsForPort(port: Int): List<String> = if (port == 2020) {
+            listOf("/onvif/service", "/onvif/device_service", "/onvif/device", "/onvif/devices")
+        } else {
+            listOf("/onvif/device_service", "/onvif/service", "/onvif/device", "/onvif/devices")
+        }
 
         fun candidateOnvifPorts(configuredPort: Int): List<Int> =
             listOf(configuredPort.coerceIn(1, 65535), 2020, 80, 8000, 8080, 8899).distinct()
@@ -1249,7 +1436,8 @@ class OnvifPtzClient(private val context: Context? = null) {
             bodyContent: String,
             useSoap11: Boolean = false,
             clockOffsetMs: Long = 0L,
-            usePasswordText: Boolean = false
+            usePasswordText: Boolean = false,
+            includeMustUnderstand: Boolean = false
         ): String {
             val envelopeNs = if (useSoap11) {
                 "http://schemas.xmlsoap.org/soap/envelope/"
@@ -1268,21 +1456,22 @@ class OnvifPtzClient(private val context: Context? = null) {
                 val passwordType: String
                 val passwordValue: String
                 if (usePasswordText) {
-                    passwordType = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd#PasswordText"
+                    passwordType = PASSWORD_TEXT_TYPE
                     passwordValue = escapeXml(password)
                 } else {
-                    passwordType = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd#PasswordDigest"
+                    passwordType = PASSWORD_DIGEST_TYPE
                     val digestInput = nonceBytes + created.toByteArray(Charsets.UTF_8) + password.toByteArray(Charsets.UTF_8)
                     passwordValue = MessageDigest.getInstance("SHA-1").digest(digestInput).toByteString().base64()
                 }
+                val mustUnderstandAttr = if (includeMustUnderstand) " s:mustUnderstand=\"1\"" else ""
 
                 "<s:Header>" +
-                    "<wsse:Security xmlns:wsse=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd\" " +
-                    "xmlns:wsu=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd\">" +
+                    "<wsse:Security$mustUnderstandAttr xmlns:wsse=\"$WSSE_NS\" " +
+                    "xmlns:wsu=\"$WSU_NS\">" +
                     "<wsse:UsernameToken>" +
                     "<wsse:Username>${escapeXml(username)}</wsse:Username>" +
                     "<wsse:Password Type=\"$passwordType\">$passwordValue</wsse:Password>" +
-                    "<wsse:Nonce EncodingType=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd#Base64Binary\">$nonceB64</wsse:Nonce>" +
+                    "<wsse:Nonce EncodingType=\"$NONCE_ENCODING_TYPE\">$nonceB64</wsse:Nonce>" +
                     "<wsu:Created>$created</wsu:Created>" +
                     "</wsse:UsernameToken>" +
                     "</wsse:Security>" +
@@ -1522,10 +1711,18 @@ class OnvifPtzClient(private val context: Context? = null) {
             return uriRegex.find(xml)?.groupValues?.getOrNull(1)?.trim()?.replace("&amp;", "&")
         }
 
-        private fun extractSoapFault(xml: String): String? {
+        fun extractSoapFault(xml: String): String? {
+            if (xml.isBlank()) return null
             val reasonRegex = Regex("<(?:[a-zA-Z0-9]+:)?Text[^>]*>([^<]+)</(?:[a-zA-Z0-9]+:)?Text>")
-            return reasonRegex.find(xml)?.groupValues?.getOrNull(1)?.trim()
-                ?: Regex("<faultstring>([^<]+)</faultstring>").find(xml)?.groupValues?.getOrNull(1)?.trim()
+            reasonRegex.find(xml)?.groupValues?.getOrNull(1)?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
+            Regex("<faultstring>([^<]+)</faultstring>").find(xml)?.groupValues?.getOrNull(1)?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
+            val subcode = Regex("<(?:[a-zA-Z0-9]+:)?Value[^>]*>([^<]+)</(?:[a-zA-Z0-9]+:)?Value>")
+                .findAll(xml)
+                .mapNotNull { it.groupValues.getOrNull(1)?.trim() }
+                .lastOrNull { it.isNotEmpty() }
+            if (!subcode.isNullOrBlank()) return subcode
+            val plain = xml.replace(Regex("<[^>]+>"), " ").replace(Regex("\\s+"), " ").trim()
+            return plain.takeIf { it.isNotEmpty() }?.take(120)
         }
 
         private fun escapeXml(input: String): String = input
