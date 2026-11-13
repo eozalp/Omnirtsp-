@@ -99,7 +99,9 @@ fun FullScreenPlayerScreen(
     val cameras by viewModel.cameras.collectAsState()
     val liveCamera = cameras.find { it.id == camera.id } ?: camera
 
-    val player = remember(camera.id) { viewModel.streamManager.getOrCreatePlayer(camera) }
+    val initialPlayer = remember(camera.id) { viewModel.streamManager.getOrCreatePlayer(camera) }
+    val reactivePlayer by viewModel.streamManager.getPlayerFlow(camera.id).collectAsState()
+    val player = reactivePlayer ?: initialPlayer
     val telemetry by viewModel.streamManager.getTelemetryFlow(camera.id).collectAsState()
     val recordingCameras by viewModel.recordingSchedulerEngine.currentlyRecordingCameras.collectAsState()
     val showTechnicalDetails by viewModel.showTechnicalDetails.collectAsState()

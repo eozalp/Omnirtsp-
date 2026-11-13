@@ -91,6 +91,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -639,10 +640,13 @@ fun LiveMultiCamScreen(
                             }
                         }
                     ) { camera ->
-                        val player = remember(camera.id) { viewModel.streamManager.getOrCreatePlayer(camera) }
+                        val initialPlayer = remember(camera.id) { viewModel.streamManager.getOrCreatePlayer(camera) }
+                        val reactivePlayer by viewModel.streamManager.getPlayerFlow(camera.id).collectAsState()
+                        val player = reactivePlayer ?: initialPlayer
                         val telemetry by viewModel.streamManager.getTelemetryFlow(camera.id).collectAsState()
                         val isRecording = recordingCameras.contains(camera.id)
                         val isFloating = floatingIds.contains(camera.id)
+                        val isInAppFloatingActive = isFloating && !isSystemOverlayActive
                         val sizeScale = feedSizeScales[camera.id] ?: 1.0f
                         var menuExpanded by remember { mutableStateOf(false) }
 
@@ -664,16 +668,46 @@ fun LiveMultiCamScreen(
                                         .fillMaxWidth()
                                         .aspectRatio(dynamicAspectRatio)
                                 ) {
-                                    RtspVideoPlayer(
-                                        camera = camera,
-                                        player = player,
-                                        telemetry = telemetry,
-                                        showTechnicalDetails = showTechnicalDetails,
-                                        isTvFocused = isTvMode,
-                                        onRetry = { viewModel.streamManager.retryPlayer(camera) },
-                                        onClick = { onSelectCamera(camera) },
-                                        modifier = Modifier.fillMaxSize()
-                                    )
+                                    if (isInAppFloatingActive) {
+                                        // Avoid competing for the single ExoPlayer video surface while in-app FloatingCameraWindow is active
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxSize()
+                                                .background(SurveillanceDarkBg)
+                                                .clickable { viewModel.bringFloatingToFront(camera.id) }
+                                                .padding(12.dp),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Column(
+                                                horizontalAlignment = Alignment.CenterHorizontally,
+                                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                                            ) {
+                                                Icon(
+                                                    Icons.Default.PictureInPictureAlt,
+                                                    contentDescription = null,
+                                                    tint = NeonCyan,
+                                                    modifier = Modifier.size(26.dp)
+                                                )
+                                                Text(
+                                                    text = stringResource(R.string.live_floating_active_hint),
+                                                    color = Color.White.copy(alpha = 0.8f),
+                                                    fontSize = 11.sp,
+                                                    textAlign = TextAlign.Center
+                                                )
+                                            }
+                                        }
+                                    } else {
+                                        RtspVideoPlayer(
+                                            camera = camera,
+                                            player = player,
+                                            telemetry = telemetry,
+                                            showTechnicalDetails = showTechnicalDetails,
+                                            isTvFocused = isTvMode,
+                                            onRetry = { viewModel.streamManager.retryPlayer(camera) },
+                                            onClick = { onSelectCamera(camera) },
+                                            modifier = Modifier.fillMaxSize()
+                                        )
+                                    }
 
                                     // Corner drag-to-resize grip for individual feed cards
                                     Box(

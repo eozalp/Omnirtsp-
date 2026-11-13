@@ -136,6 +136,9 @@
     <string name="player_rec_badge">KAYIT</string>
     <string name="player_motion_badge">HAREKET</string>
     <string name="player_live_badge">CANLI</string>
+    <string name="player_reconnecting">Yeniden bağlanıyor…</string>
+    <string name="player_reconnecting_badge">BAĞLANIYOR</string>
+    <string name="live_floating_active_hint">Yüzer pencerede aktif\nÖne getirmek için dokunun</string>
     <string name="player_motion_detected_desc">Hareket Algılandı</string>
     <string name="floating_fullscreen">Tam Ekran</string>
     <string name="floating_close_window">Pencereyi Kapat</string>

@@ -12,8 +12,10 @@ import com.example.data.model.RecordingMode
 import com.example.data.model.RecordingScheduleEntity
 import com.example.data.model.RtspTransport
 import com.example.data.model.StreamQuality
+import androidx.media3.common.Player
 import com.example.engine.CameraDiscoveryEngine
 import com.example.engine.OnvifPtzClient
+import com.example.engine.RtspStreamManager
 import com.example.engine.StorageRetentionEngine
 import com.example.i18n.AppLocaleManager
 import com.example.service.FloatingOverlayStateHolder
@@ -467,5 +469,87 @@ class ExampleUnitTest {
     val maxClamped = defaultCfg.copy(chunkDurationHours = 48, chunkDurationMinutes = 30)
     assertEquals(24L * 60L * 60L * 1000L, maxClamped.totalChunkMillis())
     assertEquals("24h", maxClamped.formatChunkWindow())
+  }
+
+  @Test
+  fun rtspWatchdog_sanitizesEndOfSourceBufferAndDetectsFrozenFrames() {
+    // Regression check for screenshot telemetry bug: 9223372036821781ms at ~33s TIME_END_OF_SOURCE
+    assertEquals(0L, RtspStreamManager.sanitizeBufferedLatencyMs(9_223_372_036_821_781L))
+    assertEquals(0L, RtspStreamManager.sanitizeBufferedLatencyMs(-500L))
+    assertEquals(420L, RtspStreamManager.sanitizeBufferedLatencyMs(420L))
+
+    assertTrue(RtspStreamManager.isAbnormalBufferSentinel(9_223_372_036_821_781L, isLiveRtsp = true))
+    assertFalse(RtspStreamManager.isAbnormalBufferSentinel(850L, isLiveRtsp = true))
+    assertFalse(RtspStreamManager.isAbnormalBufferSentinel(9_223_372_036_821_781L, isLiveRtsp = false))
+
+    // Normal advancing rendered frames keep stream LIVE with zero stall increment
+    val healthy = RtspStreamManager.evaluateLiveVideoHealth(
+      isLiveRtsp = true,
+      isPlaying = true,
+      playbackState = Player.STATE_READY,
+      hasError = false,
+      hasSelectedVideoTrack = true,
+      rawBufferedMs = 320L,
+      currentRenderedFrames = 900,
+      previousRenderedFrames = 870,
+      currentPositionMs = 30_000L,
+      previousPositionMs = 29_000L
+    )
+    assertTrue(healthy.healthyProgress)
+    assertEquals(0, healthy.stallIncrement)
+    assertTrue(healthy.isLive)
+    assertFalse(healthy.isReconnecting)
+
+    // Frozen video frames (renderedOutputBufferCount stops increasing) while isPlaying stays true
+    val frozenFrames = RtspStreamManager.evaluateLiveVideoHealth(
+      isLiveRtsp = true,
+      isPlaying = true,
+      playbackState = Player.STATE_READY,
+      hasError = false,
+      hasSelectedVideoTrack = true,
+      rawBufferedMs = 200L,
+      currentRenderedFrames = 990,
+      previousRenderedFrames = 990,
+      currentPositionMs = 33_000L,
+      previousPositionMs = 33_000L
+    )
+    assertFalse(frozenFrames.healthyProgress)
+    assertEquals(1, frozenFrames.stallIncrement)
+    assertFalse(frozenFrames.isLive)
+
+    // TIME_END_OF_SOURCE buffer overflow while isPlaying=true triggers immediate fast reconnect weight
+    val eosOverflow = RtspStreamManager.evaluateLiveVideoHealth(
+      isLiveRtsp = true,
+      isPlaying = true,
+      playbackState = Player.STATE_READY,
+      hasError = false,
+      hasSelectedVideoTrack = false,
+      rawBufferedMs = 9_223_372_036_821_781L,
+      currentRenderedFrames = 990,
+      previousRenderedFrames = 990,
+      currentPositionMs = 32_994L,
+      previousPositionMs = 32_994L
+    )
+    assertFalse(eosOverflow.healthyProgress)
+    assertEquals(3, eosOverflow.stallIncrement)
+    assertFalse(eosOverflow.isLive)
+    assertTrue(eosOverflow.isReconnecting)
+
+    // Live RTSP reaching STATE_ENDED is treated as dead stream needing immediate reconnect
+    val rtspEnded = RtspStreamManager.evaluateLiveVideoHealth(
+      isLiveRtsp = true,
+      isPlaying = false,
+      playbackState = Player.STATE_ENDED,
+      hasError = false,
+      hasSelectedVideoTrack = false,
+      rawBufferedMs = 0L,
+      currentRenderedFrames = 990,
+      previousRenderedFrames = 990,
+      currentPositionMs = 33_000L,
+      previousPositionMs = 32_994L
+    )
+    assertFalse(rtspEnded.healthyProgress)
+    assertEquals(3, rtspEnded.stallIncrement)
+    assertTrue(rtspEnded.isReconnecting)
   }
 }

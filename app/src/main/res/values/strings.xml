@@ -136,6 +136,9 @@
     <string name="player_rec_badge">REC</string>
     <string name="player_motion_badge">MOTION</string>
     <string name="player_live_badge">LIVE</string>
+    <string name="player_reconnecting">Reconnecting…</string>
+    <string name="player_reconnecting_badge">SYNC</string>
+    <string name="live_floating_active_hint">Active in floating window\nTap to focus</string>
     <string name="player_motion_detected_desc">Motion Detected</string>
     <string name="floating_fullscreen">Fullscreen</string>
     <string name="floating_close_window">Close Window</string>

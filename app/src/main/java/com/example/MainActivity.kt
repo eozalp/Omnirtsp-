@@ -118,9 +118,11 @@ class MainActivity : ComponentActivity() {
 
                     if (pipCameras.size == 1) {
                         val targetCamera = pipCameras.first()
-                        val player = remember(targetCamera.id) {
+                        val initialPlayer = remember(targetCamera.id) {
                             viewModel.streamManager.getOrCreatePlayer(targetCamera)
                         }
+                        val reactivePlayer by viewModel.streamManager.getPlayerFlow(targetCamera.id).collectAsState()
+                        val player = reactivePlayer ?: initialPlayer
                         val telemetry by viewModel.streamManager.getTelemetryFlow(targetCamera.id).collectAsState()
                         RtspVideoPlayer(
                             camera = targetCamera,
@@ -146,9 +148,11 @@ class MainActivity : ComponentActivity() {
                                 ) {
                                     rowCams.forEach { cam ->
                                         key(cam.id) {
-                                            val player = remember(cam.id) {
+                                            val initialPlayer = remember(cam.id) {
                                                 viewModel.streamManager.getOrCreatePlayer(cam)
                                             }
+                                            val reactivePlayer by viewModel.streamManager.getPlayerFlow(cam.id).collectAsState()
+                                            val player = reactivePlayer ?: initialPlayer
                                             val telemetry by viewModel.streamManager.getTelemetryFlow(cam.id).collectAsState()
                                             Box(
                                                 modifier = Modifier
@@ -438,7 +442,9 @@ fun OmniViewApp(viewModel: CameraViewModel) {
                 val cam = cameras.find { it.id == winState.cameraId }
                 if (cam != null) {
                     key(cam.id) {
-                        val player = remember(cam.id) { viewModel.streamManager.getOrCreatePlayer(cam) }
+                        val initialPlayer = remember(cam.id) { viewModel.streamManager.getOrCreatePlayer(cam) }
+                        val reactivePlayer by viewModel.streamManager.getPlayerFlow(cam.id).collectAsState()
+                        val player = reactivePlayer ?: initialPlayer
                         val telemetry by viewModel.streamManager.getTelemetryFlow(cam.id).collectAsState()
 
                         FloatingCameraWindow(

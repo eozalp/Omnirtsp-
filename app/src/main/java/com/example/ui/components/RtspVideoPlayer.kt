@@ -29,10 +29,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.MotionPhotosOn
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -60,6 +62,10 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
@@ -98,6 +104,45 @@ fun RtspVideoPlayer(
     var currentTimeString by remember { mutableStateOf("") }
     var hasFocus by remember { mutableStateOf(false) }
     var viewportSize by remember { mutableStateOf(IntSize.Zero) }
+    var playerViewRef by remember { mutableStateOf<PlayerView?>(null) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    // Re-attach video surface cleanly when returning from background, screen lock, or another route
+    DisposableEffect(lifecycleOwner, player) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                playerViewRef?.let { pv ->
+                    if (player != null) {
+                        if (pv.player !== player) {
+                            pv.player = player
+                        }
+                        pv.onResume()
+                        if (player.playWhenReady &&
+                            (player.playbackState == Player.STATE_IDLE || player.playbackState == Player.STATE_ENDED)
+                        ) {
+                            onRetry?.invoke()
+                        }
+                    }
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    LaunchedEffect(camera.id, player) {
+        delay(60)
+        playerViewRef?.let { pv ->
+            if (player != null) {
+                if (pv.player !== player) {
+                    pv.player = player
+                }
+                pv.onResume()
+            }
+        }
+    }
 
     // Live clock ticker only runs when technical details are visible
     LaunchedEffect(showTechnicalDetails) {
@@ -213,11 +258,14 @@ fun RtspVideoPlayer(
                             useController = false
                             useArtwork = false
                             keepScreenOn = true
+                            playerViewRef = this
                         }
                     },
                     update = { playerView ->
+                        playerViewRef = playerView
                         if (playerView.player !== player) {
                             playerView.player = player
+                            playerView.onResume()
                         }
                         if (playerView.resizeMode != AspectRatioFrameLayout.RESIZE_MODE_ZOOM) {
                             playerView.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
@@ -225,7 +273,11 @@ fun RtspVideoPlayer(
                         playerView.keepScreenOn = true
                     },
                     onRelease = { playerView ->
+                        if (playerViewRef === playerView) {
+                            playerViewRef = null
+                        }
                         try {
+                            playerView.onPause()
                             playerView.player = null
                         } catch (ignored: Exception) {}
                     },
@@ -235,6 +287,38 @@ fun RtspVideoPlayer(
                             alpha = if (telemetry.hasError) 0f else 1f
                         }
                 )
+            }
+        }
+
+        // Subtle Reconnecting Status Pill (shown when stream stalled/EOS and watchdog is re-syncing)
+        if (telemetry.isReconnecting && !telemetry.hasError) {
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .padding(8.dp)
+                    .testTag("player_reconnecting_pill_${camera.id}"),
+                shape = RoundedCornerShape(8.dp),
+                color = Color.Black.copy(alpha = 0.72f)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    CircularProgressIndicator(
+                        color = NeonAmber,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(if (compactMode) 12.dp else 14.dp)
+                    )
+                    Text(
+                        text = stringResource(R.string.player_reconnecting),
+                        color = NeonAmber,
+                        fontSize = if (compactMode) 10.sp else 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
             }
         }
 
@@ -454,23 +538,28 @@ fun RtspVideoPlayer(
                         }
 
                         if (showTechnicalDetails) {
+                            val liveBadgeColor = if (telemetry.isLive) NeonGreen else NeonAmber
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(4.dp))
-                                    .background(NeonGreen.copy(alpha = 0.2f))
+                                    .background(liveBadgeColor.copy(alpha = 0.2f))
                                     .padding(horizontal = 6.dp, vertical = 2.dp)
                             ) {
                                 Box(
                                     modifier = Modifier
                                         .size(6.dp)
                                         .clip(CircleShape)
-                                        .background(NeonGreen)
+                                        .background(liveBadgeColor)
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text(
-                                    text = stringResource(R.string.player_live_badge),
-                                    color = NeonGreen,
+                                    text = if (telemetry.isLive) {
+                                        stringResource(R.string.player_live_badge)
+                                    } else {
+                                        stringResource(R.string.player_reconnecting_badge)
+                                    },
+                                    color = liveBadgeColor,
                                     fontSize = 10.sp,
                                     fontWeight = FontWeight.Bold
                                 )

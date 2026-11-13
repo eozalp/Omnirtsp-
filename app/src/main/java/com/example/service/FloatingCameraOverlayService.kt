@@ -507,7 +507,9 @@ private fun SystemOverlayCameraCard(
     onOpenApp: () -> Unit,
     onClose: () -> Unit
 ) {
-    val player = remember(camera.id) { streamManager.getOrCreatePlayer(camera) }
+    val initialPlayer = remember(camera.id) { streamManager.getOrCreatePlayer(camera) }
+    val reactivePlayer by streamManager.getPlayerFlow(camera.id).collectAsState()
+    val player = reactivePlayer ?: initialPlayer
     val telemetry by streamManager.getTelemetryFlow(camera.id).collectAsState()
     val isGlobalMuted by FloatingOverlayStateHolder.isGlobalMuted.collectAsState()
     val overlayContext = LocalContext.current

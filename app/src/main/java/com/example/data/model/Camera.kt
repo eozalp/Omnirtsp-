@@ -41,6 +41,7 @@ data class StreamTelemetry(
     val codec: String = "H.264 / AAC",
     val latencyMs: Long = 120,
     val isLive: Boolean = true,
+    val isReconnecting: Boolean = false,
     val isRecording: Boolean = false,
     val isMotionDetected: Boolean = false,
     val hasError: Boolean = false,
