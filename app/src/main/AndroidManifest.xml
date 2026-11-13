@@ -50,6 +50,11 @@
             android:name=".service.FloatingCameraOverlayService"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
+
+        <service
+            android:name=".service.SurveillanceKeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
     </application>
 
 </manifest>

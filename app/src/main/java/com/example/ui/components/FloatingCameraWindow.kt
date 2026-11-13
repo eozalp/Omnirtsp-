@@ -20,6 +20,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Fullscreen
@@ -79,6 +81,8 @@ fun FloatingCameraWindow(
     onExpandToFullscreen: () -> Unit,
     onRetry: () -> Unit,
     onClose: () -> Unit,
+    isMuted: Boolean = false,
+    onToggleMute: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val density = LocalDensity.current
@@ -358,6 +362,30 @@ fun FloatingCameraWindow(
                                     tint = NeonCyan,
                                     modifier = Modifier.size(14.dp)
                                 )
+                            }
+
+                            if (onToggleMute != null) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(22.dp)
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(if (isMuted) Color(0xFF442222) else Color.Transparent)
+                                        .focusable()
+                                        .clickable { onToggleMute() }
+                                        .testTag("floating_mute_btn_${camera.id}"),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = if (isMuted) {
+                                            Icons.AutoMirrored.Filled.VolumeOff
+                                        } else {
+                                            Icons.AutoMirrored.Filled.VolumeUp
+                                        },
+                                        contentDescription = stringResource(R.string.fullscreen_audio_toggle),
+                                        tint = if (isMuted) Color.LightGray else NeonCyan,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                }
                             }
                         }
                     }

@@ -209,16 +209,20 @@ fun RtspVideoPlayer(
                             this.player = player
                             resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
                             setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
+                            setKeepContentOnPlayerReset(true)
                             useController = false
+                            useArtwork = false
+                            keepScreenOn = true
                         }
                     },
                     update = { playerView ->
-                        if (playerView.player != player) {
+                        if (playerView.player !== player) {
                             playerView.player = player
                         }
                         if (playerView.resizeMode != AspectRatioFrameLayout.RESIZE_MODE_ZOOM) {
                             playerView.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
                         }
+                        playerView.keepScreenOn = true
                     },
                     onRelease = { playerView ->
                         try {
@@ -228,7 +232,7 @@ fun RtspVideoPlayer(
                     modifier = Modifier
                         .fillMaxSize()
                         .graphicsLayer {
-                            alpha = if (telemetry.hasError || !telemetry.isLive) 0f else 1f
+                            alpha = if (telemetry.hasError) 0f else 1f
                         }
                 )
             }

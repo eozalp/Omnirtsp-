@@ -436,4 +436,36 @@ class ExampleUnitTest {
     assertEquals("tr", AppLocaleManager.resolveEffectiveLanguage("tr", "en"))
     assertEquals("en", AppLocaleManager.resolveEffectiveLanguage("en", "tr"))
   }
+
+  @Test
+  fun resilientChunking_calculatesUserDefinedIntervalsSafely() {
+    val defaultCfg = CloudConfigEntity()
+    assertEquals(0, defaultCfg.chunkDurationHours)
+    assertEquals(5, defaultCfg.chunkDurationMinutes)
+    assertTrue(defaultCfg.keepAppAlive)
+    assertEquals(5L * 60L * 1000L, defaultCfg.totalChunkMillis())
+    assertEquals("5m", defaultCfg.formatChunkWindow())
+
+    val oneHourCfg = defaultCfg.copy(chunkDurationHours = 1, chunkDurationMinutes = 0)
+    assertEquals(60L * 60L * 1000L, oneHourCfg.totalChunkMillis())
+    assertEquals("1h", oneHourCfg.formatChunkWindow())
+
+    val threeHoursCfg = defaultCfg.copy(chunkDurationHours = 3, chunkDurationMinutes = 0)
+    assertEquals(3L * 60L * 60L * 1000L, threeHoursCfg.totalChunkMillis())
+    assertEquals("3h", threeHoursCfg.formatChunkWindow())
+
+    val mixedCfg = defaultCfg.copy(chunkDurationHours = 1, chunkDurationMinutes = 30)
+    assertEquals(90L * 60L * 1000L, mixedCfg.totalChunkMillis())
+    assertEquals("1h 30m", mixedCfg.formatChunkWindow())
+
+    // Zero minutes safely clamps to minimum 1 minute so segments are always valid
+    val zeroClamped = defaultCfg.copy(chunkDurationHours = 0, chunkDurationMinutes = 0)
+    assertEquals(60_000L, zeroClamped.totalChunkMillis())
+    assertEquals("1m", zeroClamped.formatChunkWindow())
+
+    // Exceeding 24h safely clamps to 24h
+    val maxClamped = defaultCfg.copy(chunkDurationHours = 48, chunkDurationMinutes = 30)
+    assertEquals(24L * 60L * 60L * 1000L, maxClamped.totalChunkMillis())
+    assertEquals("24h", maxClamped.formatChunkWindow())
+  }
 }

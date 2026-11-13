@@ -390,4 +390,34 @@
     <string name="cloud_auth_progress">%1$s ile kimlik doğrulanıyor…</string>
     <string name="cloud_handshake_ok">El Sıkışma Başarılı: HTTP %1$d %2$s (%3$dms) [%4$s]</string>
     <string name="cloud_conn_failed">Bağlantı Başarısız (%1$dms): %2$s</string>
+
+    <!-- Dayanıklı Video Parçalama, Genel Ses ve Arka Plan Koruması -->
+    <string name="sound_muted_short">Sessiz</string>
+    <string name="sound_on_short">Ses</string>
+    <string name="sound_global_title">Tüm Kamera Seslerini Kapat</string>
+    <string name="sound_global_sub">Canlı görünüm, tam ekran ve yüzen pencerelerde senkron çalışır</string>
+    <string name="sound_muted_status">Tüm kamera sesleri kapatıldı (her yerde senkron)</string>
+    <string name="sound_unmuted_status">Kamera sesi açıldı</string>
+    <string name="chunk_title">Dayanıklı Video Parça Süresi</string>
+    <string name="chunk_subtitle">Çökme veya güç kesintisine karşı planlı ve manuel kayıtları güvenli parçalara böler</string>
+    <string name="chunk_active_window">ETKİN PARÇA SÜRESİ: %1$s</string>
+    <string name="chunk_presets_label">Hızlı parça aralıkları:</string>
+    <string name="chunk_apply_btn">Parça Süresini Uygula</string>
+    <string name="chunk_resilience_note">Tamamlanan her parça hemen diske yazılır; böylece olası bir kesintide yalnızca aktif son parça risk altına girer.</string>
+    <string name="status_chunk_updated">Kayıt parça süresi %1$s olarak ayarlandı</string>
+    <string name="keepalive_title">Arka Plan Koruması ve Ses</string>
+    <string name="keepalive_subtitle">Android\'in canlı yayınları veya parçalı kayıtları otomatik kapatmasını önler</string>
+    <string name="keepalive_switch_title">Uygulamayı Arka Planda Açık Tut</string>
+    <string name="keepalive_switch_sub">Kesintisiz izleme için işlemci ve Wi-Fi uyanıklık kilidini tutar</string>
+    <string name="keepalive_battery_title">Pil Optimizasyonu Durumu</string>
+    <string name="keepalive_battery_unrestricted">Kısıtlamasız (Sistem tarafından kapatılmaya karşı korumalı)</string>
+    <string name="keepalive_battery_optimized">Pil kısıtlaması algılandı — Pil Ayarlarından OmniView için Kısıtlamasız seçin</string>
+    <string name="keepalive_battery_btn">Pil Ayarları</string>
+    <string name="status_keepalive_enabled">Arka plan koruma hizmeti etkinleştirildi</string>
+    <string name="status_keepalive_disabled">Arka plan koruma hizmeti duraklatıldı</string>
+    <string name="keepalive_channel_name">OmniView Arka Plan Koruması</string>
+    <string name="keepalive_channel_desc">Kamera yayınlarını ve parçalı video kayıtlarını kesintisiz çalıştırır</string>
+    <string name="keepalive_notif_title">OmniView İzleme Etkin</string>
+    <string name="keepalive_notif_text">Yayın koruyucu ve parçalı video kaydı çalışıyor</string>
+    <string name="keepalive_notif_stop">Duraklat</string>
 </resources>

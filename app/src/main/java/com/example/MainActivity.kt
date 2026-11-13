@@ -200,6 +200,7 @@ fun OmniViewApp(viewModel: CameraViewModel) {
     val showTechnicalDetails by viewModel.showTechnicalDetails.collectAsState()
     val unreadAlertCount by viewModel.unreadAlertCount.collectAsState()
     val isTvMode by viewModel.isTvMode.collectAsState()
+    val isGlobalMuted by viewModel.isGlobalMuted.collectAsState()
 
     BoxWithConstraints(
         modifier = Modifier
@@ -460,7 +461,9 @@ fun OmniViewApp(viewModel: CameraViewModel) {
                                 viewModel.closeFloatingCamera(cam.id)
                             },
                             onRetry = { viewModel.streamManager.retryPlayer(cam) },
-                            onClose = { viewModel.closeFloatingCamera(cam.id) }
+                            onClose = { viewModel.closeFloatingCamera(cam.id) },
+                            isMuted = isGlobalMuted,
+                            onToggleMute = { viewModel.toggleGlobalMute() }
                         )
                     }
                 }

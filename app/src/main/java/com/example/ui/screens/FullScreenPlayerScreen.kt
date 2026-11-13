@@ -27,7 +27,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
-import androidx.compose.material.icons.automirrored.filled.VolumeMute
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Camera
 import androidx.compose.material.icons.filled.Delete
@@ -112,7 +112,7 @@ fun FullScreenPlayerScreen(
 
     var isPtzVisible by remember(camera.id, initialPtzOpen) { mutableStateOf(initialPtzOpen) }
     var isRotationVisible by remember { mutableStateOf(false) }
-    var isMuted by remember { mutableStateOf(false) }
+    val isMuted by viewModel.isGlobalMuted.collectAsState()
     var showSensitivitySlider by remember { mutableStateOf(false) }
     var localSensitivity by remember { mutableFloatStateOf(camera.motionSensitivity.toFloat()) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
@@ -481,20 +481,17 @@ fun FullScreenPlayerScreen(
                     Icon(Icons.Default.Tune, contentDescription = stringResource(R.string.fullscreen_motion_sensitivity))
                 }
 
-                // Audio Mute/Unmute
+                // Global Audio Mute/Unmute (synced across live view & floating windows)
                 FilledIconButton(
-                    onClick = {
-                        isMuted = !isMuted
-                        player.volume = if (isMuted) 0f else 1f
-                    },
+                    onClick = { viewModel.toggleGlobalMute() },
                     modifier = Modifier.size(44.dp).testTag("fullscreen_audio_toggle"),
                     colors = IconButtonDefaults.filledIconButtonColors(
-                        containerColor = Color(0xFF26334D),
-                        contentColor = if (isMuted) Color.Gray else NeonCyan
+                        containerColor = if (isMuted) Color(0xFF442222) else Color(0xFF26334D),
+                        contentColor = if (isMuted) Color.LightGray else NeonCyan
                     )
                 ) {
                     Icon(
-                        if (isMuted) Icons.AutoMirrored.Filled.VolumeMute else Icons.AutoMirrored.Filled.VolumeUp,
+                        if (isMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
                         contentDescription = stringResource(R.string.fullscreen_audio_toggle)
                     )
                 }

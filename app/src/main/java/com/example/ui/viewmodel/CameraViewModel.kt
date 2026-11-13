@@ -33,6 +33,7 @@ import com.example.engine.StorageRetentionEngine
 import com.example.i18n.AppLocaleManager
 import com.example.service.FloatingCameraOverlayService
 import com.example.service.FloatingOverlayStateHolder
+import com.example.service.SurveillanceKeepAliveService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -148,9 +149,10 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     val retentionStatus: StateFlow<RetentionStatus> = storageRetentionEngine.status
     val selectedLanguageTag: StateFlow<String> = AppLocaleManager.selectedLanguageTag
 
-    // Multi-camera floating windows (synced with FloatingOverlayStateHolder for over-other-apps mode)
+    // Multi-camera floating windows & global audio state (synced across live grid, fullscreen, & overlays)
     val floatingWindows: StateFlow<List<FloatingWindowState>> = FloatingOverlayStateHolder.floatingWindows
     val isSystemOverlayActive: StateFlow<Boolean> = FloatingOverlayStateHolder.isSystemOverlayActive
+    val isGlobalMuted: StateFlow<Boolean> = FloatingOverlayStateHolder.isGlobalMuted
 
     // Hidden by default: show only clean video & camera name unless user requests technical details
     val showTechnicalDetails: StateFlow<Boolean> = FloatingOverlayStateHolder.showTechnicalDetails
@@ -171,9 +173,29 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     init {
         AppLocaleManager.init(application)
+        FloatingOverlayStateHolder.initAudioSettings(application)
         seedInitialSurveillanceData()
         observeFloatingRotationPersistence()
+        observeKeepAliveService()
         scanForNetworkCameras()
+    }
+
+    private fun observeKeepAliveService() {
+        viewModelScope.launch {
+            combine(
+                database.cloudConfigDao().getCloudConfig(),
+                recordingSchedulerEngine.currentlyRecordingCameras
+            ) { cfg, activeRecs ->
+                (cfg?.keepAppAlive != false) || activeRecs.isNotEmpty()
+            }.collect { shouldKeepAlive ->
+                val app = getApplication<Application>()
+                if (shouldKeepAlive) {
+                    SurveillanceKeepAliveService.start(app)
+                } else {
+                    SurveillanceKeepAliveService.stop(app)
+                }
+            }
+        }
     }
 
     private fun observeFloatingRotationPersistence() {
@@ -645,6 +667,76 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 AppLocaleManager.getString(app, R.string.status_all_within_limit, label)
             }
         }
+    }
+
+    fun toggleGlobalMute() {
+        val app = getApplication<Application>()
+        val nowMuted = FloatingOverlayStateHolder.toggleGlobalMuted(app)
+        _localExportStatus.value = AppLocaleManager.getString(
+            app,
+            if (nowMuted) R.string.sound_muted_status else R.string.sound_unmuted_status
+        )
+    }
+
+    fun setGlobalMuted(muted: Boolean) {
+        val app = getApplication<Application>()
+        FloatingOverlayStateHolder.setGlobalMuted(app, muted)
+    }
+
+    fun updateChunkDuration(hours: Int, minutes: Int) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val app = getApplication<Application>()
+            val totalMins = (hours.coerceIn(0, 24) * 60 + minutes.coerceIn(0, 59)).coerceIn(1, 24 * 60)
+            val normalizedHours = totalMins / 60
+            val normalizedMinutes = totalMins % 60
+            val current = database.cloudConfigDao().getCloudConfigSync() ?: CloudConfigEntity()
+            val updated = current.copy(
+                chunkDurationHours = normalizedHours,
+                chunkDurationMinutes = normalizedMinutes
+            )
+            database.cloudConfigDao().insertOrUpdateConfig(updated)
+            val label = formatLocalizedChunkWindow(updated)
+            _localExportStatus.value = AppLocaleManager.getString(app, R.string.status_chunk_updated, label)
+        }
+    }
+
+    fun setKeepAppAlive(enabled: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val app = getApplication<Application>()
+            val current = database.cloudConfigDao().getCloudConfigSync() ?: CloudConfigEntity()
+            database.cloudConfigDao().insertOrUpdateConfig(current.copy(keepAppAlive = enabled))
+            if (enabled) {
+                SurveillanceKeepAliveService.start(app)
+                _localExportStatus.value = AppLocaleManager.getString(app, R.string.status_keepalive_enabled)
+            } else {
+                SurveillanceKeepAliveService.stop(app)
+                _localExportStatus.value = AppLocaleManager.getString(app, R.string.status_keepalive_disabled)
+            }
+        }
+    }
+
+    fun isBatteryOptimizationIgnored(): Boolean {
+        return SurveillanceKeepAliveService.isBatteryOptimizationIgnored(getApplication())
+    }
+
+    fun openBatteryOptimizationSettings() {
+        val app = getApplication<Application>()
+        try {
+            app.startActivity(SurveillanceKeepAliveService.createBatteryOptimizationSettingsIntent(app))
+        } catch (_: Exception) {}
+    }
+
+    private fun formatLocalizedChunkWindow(config: CloudConfigEntity): String {
+        val app = getApplication<Application>()
+        val totalMins = (config.totalChunkMillis() / 60_000L).toInt()
+        val h = totalMins / 60
+        val m = totalMins % 60
+        val hourU = AppLocaleManager.getString(app, R.string.retention_unit_hour_short)
+        val minU = AppLocaleManager.getString(app, R.string.retention_unit_min_short)
+        return buildList {
+            if (h > 0) add("$h$hourU")
+            if (m > 0 || h == 0) add("$m$minU")
+        }.joinToString(" ")
     }
 
     private fun formatLocalizedRetention(config: CloudConfigEntity): String {

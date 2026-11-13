@@ -390,4 +390,34 @@
     <string name="cloud_auth_progress">Authenticating with %1$s…</string>
     <string name="cloud_handshake_ok">Handshake OK: HTTP %1$d %2$s (%3$dms) [%4$s]</string>
     <string name="cloud_conn_failed">Connection Failed (%1$dms): %2$s</string>
+
+    <!-- Resilient Video Chunking, Global Sound & Keep-Alive -->
+    <string name="sound_muted_short">Muted</string>
+    <string name="sound_on_short">Sound</string>
+    <string name="sound_global_title">Mute All Camera Audio</string>
+    <string name="sound_global_sub">Synced across live grid, fullscreen, and floating overlay windows</string>
+    <string name="sound_muted_status">All camera audio muted (synced everywhere)</string>
+    <string name="sound_unmuted_status">Camera audio enabled</string>
+    <string name="chunk_title">Resilient Video Chunk Size</string>
+    <string name="chunk_subtitle">Splits scheduled and manual recordings into safe segments against crashes or power loss</string>
+    <string name="chunk_active_window">ACTIVE CHUNK LENGTH: %1$s</string>
+    <string name="chunk_presets_label">Quick chunk intervals:</string>
+    <string name="chunk_apply_btn">Apply Chunk Size</string>
+    <string name="chunk_resilience_note">Each completed chunk is flushed to storage right away so at most only the in-progress segment is ever at risk.</string>
+    <string name="status_chunk_updated">Recording chunk interval set to %1$s</string>
+    <string name="keepalive_title">Background Protection &amp; Audio</string>
+    <string name="keepalive_subtitle">Prevents Android from closing live streams or chunked recordings automatically</string>
+    <string name="keepalive_switch_title">Keep App Alive in Background</string>
+    <string name="keepalive_switch_sub">Holds wake and Wi-Fi locks for uninterrupted surveillance</string>
+    <string name="keepalive_battery_title">Battery Optimization Status</string>
+    <string name="keepalive_battery_unrestricted">Unrestricted (Protected against OS auto-close)</string>
+    <string name="keepalive_battery_optimized">Restricted mode active — set OmniView to Unrestricted in Battery Settings</string>
+    <string name="keepalive_battery_btn">Battery Settings</string>
+    <string name="status_keepalive_enabled">Background keep-alive protection active</string>
+    <string name="status_keepalive_disabled">Background keep-alive protection paused</string>
+    <string name="keepalive_channel_name">OmniView Background Protection</string>
+    <string name="keepalive_channel_desc">Keeps camera streams and chunked video saves running smoothly</string>
+    <string name="keepalive_notif_title">OmniView Monitoring Active</string>
+    <string name="keepalive_notif_text">Stream watchdog and resilient chunk recording active</string>
+    <string name="keepalive_notif_stop">Pause</string>
 </resources>

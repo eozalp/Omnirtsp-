@@ -11,6 +11,7 @@ import android.content.pm.ServiceInfo
 import android.graphics.PixelFormat
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.provider.Settings
 import android.util.DisplayMetrics
 import android.view.Gravity
@@ -31,6 +32,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.OpenInFull
@@ -101,6 +104,7 @@ class FloatingCameraOverlayService : Service() {
     private lateinit var windowManager: WindowManager
     private lateinit var streamManager: RtspStreamManager
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var wakeLock: PowerManager.WakeLock? = null
 
     private data class AttachedOverlay(
         val view: ComposeView,
@@ -116,11 +120,34 @@ class FloatingCameraOverlayService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        FloatingOverlayStateHolder.initAudioSettings(applicationContext)
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         streamManager = RtspStreamManager(applicationContext)
         FloatingOverlayStateHolder.setSystemOverlayActive(true)
+        acquireWakeLock()
         startForegroundNotification()
         observeFloatingWindows()
+    }
+
+    private fun acquireWakeLock() {
+        try {
+            if (wakeLock == null) {
+                val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "OmniView::OverlayWakeLock").apply {
+                    setReferenceCounted(false)
+                }
+            }
+            if (wakeLock?.isHeld == false) {
+                wakeLock?.acquire()
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun releaseWakeLock() {
+        try {
+            if (wakeLock?.isHeld == true) wakeLock?.release()
+        } catch (_: Exception) {}
+        wakeLock = null
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -438,6 +465,7 @@ class FloatingCameraOverlayService : Service() {
     }
 
     override fun onDestroy() {
+        releaseWakeLock()
         removeAllOverlays()
         FloatingOverlayStateHolder.setSystemOverlayActive(false)
         streamManager.releaseAll()
@@ -481,6 +509,8 @@ private fun SystemOverlayCameraCard(
 ) {
     val player = remember(camera.id) { streamManager.getOrCreatePlayer(camera) }
     val telemetry by streamManager.getTelemetryFlow(camera.id).collectAsState()
+    val isGlobalMuted by FloatingOverlayStateHolder.isGlobalMuted.collectAsState()
+    val overlayContext = LocalContext.current
     var controlsVisible by remember { mutableStateOf(true) }
     var isRotateMode by remember { mutableStateOf(false) }
 
@@ -635,6 +665,25 @@ private fun SystemOverlayCameraCard(
                                 contentAlignment = Alignment.Center
                             ) {
                                 Icon(Icons.Default.RotateRight, contentDescription = stringResource(R.string.live_rotate_video), tint = NeonCyan, modifier = Modifier.size(13.dp))
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .size(22.dp)
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(if (isGlobalMuted) Color(0xFF442222) else Color.Transparent)
+                                    .clickable { FloatingOverlayStateHolder.toggleGlobalMuted(overlayContext) },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = if (isGlobalMuted) {
+                                        Icons.AutoMirrored.Filled.VolumeOff
+                                    } else {
+                                        Icons.AutoMirrored.Filled.VolumeUp
+                                    },
+                                    contentDescription = stringResource(R.string.fullscreen_audio_toggle),
+                                    tint = if (isGlobalMuted) Color.LightGray else NeonCyan,
+                                    modifier = Modifier.size(13.dp)
+                                )
                             }
                         }
                     }

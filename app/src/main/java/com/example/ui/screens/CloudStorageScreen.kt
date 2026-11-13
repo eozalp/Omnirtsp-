@@ -23,6 +23,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.CloudDone
@@ -35,9 +38,11 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Smartphone
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Wifi
@@ -101,6 +106,7 @@ fun CloudStorageScreen(
     val localExportStatus by viewModel.localExportStatus.collectAsState()
     val retentionStatus by viewModel.retentionStatus.collectAsState()
     val selectedLanguageTag by viewModel.selectedLanguageTag.collectAsState()
+    val isGlobalMuted by viewModel.isGlobalMuted.collectAsState()
     val isTesting by viewModel.cloudStorageManager.isTestingConnection.collectAsState()
     val testResult by viewModel.cloudStorageManager.lastConnectionTestResult.collectAsState()
 
@@ -108,6 +114,11 @@ fun CloudStorageScreen(
     var retentionDaysText by remember(cloudConfig) { mutableStateOf(cloudConfig.retentionDays.toString()) }
     var retentionHoursText by remember(cloudConfig) { mutableStateOf(cloudConfig.retentionHours.toString()) }
     var retentionMinutesText by remember(cloudConfig) { mutableStateOf(cloudConfig.retentionMinutes.toString()) }
+
+    var chunkHoursText by remember(cloudConfig) { mutableStateOf(cloudConfig.chunkDurationHours.toString()) }
+    var chunkMinutesText by remember(cloudConfig) { mutableStateOf(cloudConfig.chunkDurationMinutes.toString()) }
+    var keepAliveEnabled by remember(cloudConfig) { mutableStateOf(cloudConfig.keepAppAlive) }
+    var isBatteryUnrestricted by remember { mutableStateOf(viewModel.isBatteryOptimizationIgnored()) }
 
     var pickerErrorMessage by remember { mutableStateOf<String?>(null) }
     val openFolderLauncher = rememberLauncherForActivityResult(
@@ -449,6 +460,292 @@ fun CloudStorageScreen(
                                 fontWeight = FontWeight.Medium,
                                 modifier = Modifier.padding(10.dp)
                             )
+                        }
+                    }
+                }
+            }
+
+            // Disaster-Resilient Video Chunk Size Card
+            Card(
+                colors = CardDefaults.cardColors(containerColor = SurveillanceCardBg),
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.fillMaxWidth().testTag("chunk_duration_card")
+            ) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Timer, contentDescription = null, tint = NeonCyan, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = stringResource(R.string.chunk_title),
+                                color = Color.White,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = stringResource(R.string.chunk_subtitle),
+                                color = Color.Gray,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+
+                    val chunkHourU = stringResource(R.string.retention_unit_hour_short)
+                    val chunkMinU = stringResource(R.string.retention_unit_min_short)
+                    val activeTotalMins = (cloudConfig.totalChunkMillis() / 60_000L).toInt()
+                    val activeH = activeTotalMins / 60
+                    val activeM = activeTotalMins % 60
+                    val localizedChunkLabel = buildList {
+                        if (activeH > 0) add("$activeH$chunkHourU")
+                        if (activeM > 0 || activeH == 0) add("$activeM$chunkMinU")
+                    }.joinToString(" ")
+
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = SurveillanceSurface,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                text = stringResource(R.string.chunk_active_window, localizedChunkLabel.uppercase()),
+                                color = NeonCyan,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = stringResource(R.string.chunk_resilience_note),
+                                color = Color.White.copy(alpha = 0.85f),
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+
+                    Text(
+                        text = stringResource(R.string.chunk_presets_label),
+                        color = Color.White.copy(alpha = 0.85f),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+
+                    val chunkPresets = listOf(
+                        (0 to 1) to ("1m" to "1$chunkMinU"),
+                        (0 to 5) to ("5m" to "5$chunkMinU"),
+                        (0 to 15) to ("15m" to "15$chunkMinU"),
+                        (0 to 30) to ("30m" to "30$chunkMinU"),
+                        (1 to 0) to ("1h" to "1$chunkHourU"),
+                        (3 to 0) to ("3h" to "3$chunkHourU")
+                    )
+                    val curChunkH = chunkHoursText.toIntOrNull() ?: 0
+                    val curChunkM = chunkMinutesText.toIntOrNull() ?: 0
+
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        chunkPresets.forEach { (hm, keyAndLabel) ->
+                            val (presetKey, label) = keyAndLabel
+                            val isSelected = curChunkH == hm.first && curChunkM == hm.second
+                            FilterChip(
+                                selected = isSelected,
+                                onClick = {
+                                    chunkHoursText = hm.first.toString()
+                                    chunkMinutesText = hm.second.toString()
+                                    viewModel.updateChunkDuration(hm.first, hm.second)
+                                },
+                                label = { Text(label, fontSize = 11.sp, maxLines = 1, softWrap = false) },
+                                modifier = Modifier.testTag("chunk_preset_$presetKey")
+                            )
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = chunkHoursText,
+                            onValueChange = { input ->
+                                chunkHoursText = input.filter { it.isDigit() }.take(2)
+                            },
+                            label = { Text(stringResource(R.string.retention_hours_label), maxLines = 1, softWrap = false) },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            modifier = Modifier.weight(1f).testTag("chunk_hours_input")
+                        )
+                        OutlinedTextField(
+                            value = chunkMinutesText,
+                            onValueChange = { input ->
+                                chunkMinutesText = input.filter { it.isDigit() }.take(2)
+                            },
+                            label = { Text(stringResource(R.string.retention_mins_label), maxLines = 1, softWrap = false) },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            modifier = Modifier.weight(1f).testTag("chunk_minutes_input")
+                        )
+                    }
+
+                    Button(
+                        onClick = {
+                            val h = (chunkHoursText.toIntOrNull() ?: 0).coerceIn(0, 24)
+                            val m = (chunkMinutesText.toIntOrNull() ?: 0).coerceIn(0, 59)
+                            val totalM = (h * 60 + m).coerceIn(1, 24 * 60)
+                            val normH = totalM / 60
+                            val normM = totalM % 60
+                            chunkHoursText = normH.toString()
+                            chunkMinutesText = normM.toString()
+                            viewModel.updateChunkDuration(normH, normM)
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = Color.Black),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+                        modifier = Modifier.testTag("save_chunk_duration_btn")
+                    ) {
+                        Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(stringResource(R.string.chunk_apply_btn), fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
+                    }
+                }
+            }
+
+            // Background Anti-Shutdown Protection & Global Audio Sync Card
+            Card(
+                colors = CardDefaults.cardColors(containerColor = SurveillanceCardBg),
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.fillMaxWidth().testTag("keep_alive_protection_card")
+            ) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Shield, contentDescription = null, tint = NeonGreen, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = stringResource(R.string.keepalive_title),
+                                color = Color.White,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = stringResource(R.string.keepalive_subtitle),
+                                color = Color.Gray,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+
+                    // Global Audio Mute Switch
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            modifier = Modifier.weight(1f).padding(end = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = if (isGlobalMuted) {
+                                    Icons.AutoMirrored.Filled.VolumeOff
+                                } else {
+                                    Icons.AutoMirrored.Filled.VolumeUp
+                                },
+                                contentDescription = null,
+                                tint = if (isGlobalMuted) NeonRed else NeonCyan,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text(stringResource(R.string.sound_global_title), color = Color.White, fontSize = 13.sp)
+                                Text(stringResource(R.string.sound_global_sub), color = Color.Gray, fontSize = 11.sp)
+                            }
+                        }
+                        Switch(
+                            checked = isGlobalMuted,
+                            onCheckedChange = { muted -> viewModel.setGlobalMuted(muted) },
+                            colors = SwitchDefaults.colors(checkedThumbColor = NeonRed),
+                            modifier = Modifier.testTag("global_sound_switch")
+                        )
+                    }
+
+                    // Foreground Keep-Alive Switch
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                            Text(stringResource(R.string.keepalive_switch_title), color = Color.White, fontSize = 13.sp)
+                            Text(stringResource(R.string.keepalive_switch_sub), color = Color.Gray, fontSize = 11.sp)
+                        }
+                        Switch(
+                            checked = keepAliveEnabled,
+                            onCheckedChange = { enabled ->
+                                keepAliveEnabled = enabled
+                                viewModel.setKeepAppAlive(enabled)
+                            },
+                            colors = SwitchDefaults.colors(checkedThumbColor = NeonGreen),
+                            modifier = Modifier.testTag("keep_alive_switch")
+                        )
+                    }
+
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = SurveillanceSurface,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                modifier = Modifier.weight(1f).padding(end = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    Icons.Default.BatteryChargingFull,
+                                    contentDescription = null,
+                                    tint = if (isBatteryUnrestricted) NeonGreen else NeonAmber,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column {
+                                    Text(
+                                        text = stringResource(R.string.keepalive_battery_title),
+                                        color = Color.White,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    Text(
+                                        text = if (isBatteryUnrestricted) {
+                                            stringResource(R.string.keepalive_battery_unrestricted)
+                                        } else {
+                                            stringResource(R.string.keepalive_battery_optimized)
+                                        },
+                                        color = if (isBatteryUnrestricted) NeonGreen else NeonAmber,
+                                        fontSize = 10.sp
+                                    )
+                                }
+                            }
+
+                            OutlinedButton(
+                                onClick = {
+                                    viewModel.openBatteryOptimizationSettings()
+                                    isBatteryUnrestricted = viewModel.isBatteryOptimizationIgnored()
+                                },
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                modifier = Modifier.testTag("battery_optimization_btn")
+                            ) {
+                                Text(
+                                    text = stringResource(R.string.keepalive_battery_btn),
+                                    fontSize = 11.sp,
+                                    color = NeonCyan,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
                         }
                     }
                 }

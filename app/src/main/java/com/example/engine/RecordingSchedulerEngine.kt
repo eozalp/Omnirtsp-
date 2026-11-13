@@ -30,7 +30,8 @@ data class ActiveRecordingSession(
     val startTimestamp: Long,
     val triggerType: ClipTriggerType,
     val filePath: String,
-    val scheduleId: String? = null
+    val scheduleId: String? = null,
+    val cameraSnapshot: CameraEntity? = null
 )
 
 class RecordingSchedulerEngine(
@@ -123,7 +124,8 @@ class RecordingSchedulerEngine(
             cameraName = camera.name,
             startTimestamp = System.currentTimeMillis(),
             triggerType = triggerType,
-            filePath = clipFile.absolutePath
+            filePath = clipFile.absolutePath,
+            cameraSnapshot = camera
         )
 
         activeSessions[camera.id] = session
@@ -138,14 +140,20 @@ class RecordingSchedulerEngine(
 
         val file = File(session.filePath)
         if (!file.exists() || file.length() == 0L) {
-            // Write standard valid ISO base media file (MP4 container) header bytes
+            // Write standard valid ISO base media file (MP4 container) header bytes and fsync
             val mp4Header = byteArrayOf(
                 0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70, // ftyp
                 0x69, 0x73, 0x6F, 0x6D, 0x00, 0x00, 0x02, 0x00, // isom
                 0x69, 0x73, 0x6F, 0x6D, 0x69, 0x73, 0x6F, 0x32,
                 0x61, 0x76, 0x63, 0x31, 0x6D, 0x70, 0x34, 0x31
             )
-            file.writeBytes(mp4Header)
+            file.outputStream().use { out ->
+                out.write(mp4Header)
+                out.flush()
+                try {
+                    out.fd.sync()
+                } catch (_: Exception) {}
+            }
         }
 
         val endTimestamp = System.currentTimeMillis()
@@ -203,19 +211,15 @@ class RecordingSchedulerEngine(
                 val schedules = database.scheduleDao().getActiveSchedules()
                 val activeList = mutableListOf<RecordingScheduleEntity>()
                 val config = database.cloudConfigDao().getCloudConfigSync()
-                val retentionMs = config?.totalRetentionMillis() ?: 0L
-                val segmentDurationMs = if (retentionMs in 1L..(10L * 60L * 1000L)) {
-                    (retentionMs / 2L).coerceAtLeast(30_000L)
-                } else {
-                    5L * 60L * 1000L
-                }
+                val segmentDurationMs = config?.totalChunkMillis() ?: (5L * 60L * 1000L)
+                val enabledCameras = database.cameraDao().getEnabledCameras()
+                val camerasById = enabledCameras.associateBy { it.id }
 
                 val continuousTargetCameraIds = mutableSetOf<String>()
                 for (schedule in schedules) {
                     if (isScheduleCurrentlyActive(schedule)) {
                         activeList.add(schedule)
                         if (schedule.mode == RecordingMode.CONTINUOUS) {
-                            val enabledCameras = database.cameraDao().getEnabledCameras()
                             for (camera in enabledCameras) {
                                 if (isCameraTargetedBySchedule(camera.id, schedule)) {
                                     continuousTargetCameraIds.add(camera.id)
@@ -235,24 +239,45 @@ class RecordingSchedulerEngine(
                     }
                 }
 
-                // Finalize any scheduled continuous sessions whose schedule ended or exceeded segment length
-                for ((camId, session) in activeSessions) {
-                    if (session.triggerType == ClipTriggerType.SCHEDULED) {
-                        val duration = System.currentTimeMillis() - session.startTimestamp
-                        if (!continuousTargetCameraIds.contains(camId) || duration >= segmentDurationMs) {
-                            activeSessions.remove(camId)
-                            finishRecordingSession(session)
+                // Finalize scheduled continuous sessions when schedule ends, and rotate chunked manual/scheduled recordings
+                val now = System.currentTimeMillis()
+                for ((camId, session) in activeSessions.entries.toList()) {
+                    val elapsed = now - session.startTimestamp
+                    when (session.triggerType) {
+                        ClipTriggerType.SCHEDULED -> {
+                            if (!continuousTargetCameraIds.contains(camId)) {
+                                activeSessions.remove(camId)
+                                finishRecordingSession(session)
+                            } else if (elapsed >= segmentDurationMs) {
+                                activeSessions.remove(camId)
+                                finishRecordingSession(session)
+                                val cam = camerasById[camId] ?: session.cameraSnapshot
+                                if (cam != null) {
+                                    startRecordingSession(cam, ClipTriggerType.SCHEDULED, null)
+                                }
+                            }
                         }
+                        ClipTriggerType.MANUAL -> {
+                            if (elapsed >= segmentDurationMs) {
+                                activeSessions.remove(camId)
+                                finishRecordingSession(session)
+                                val cam = camerasById[camId] ?: session.cameraSnapshot
+                                if (cam != null) {
+                                    startRecordingSession(cam, ClipTriggerType.MANUAL, null)
+                                }
+                            }
+                        }
+                        ClipTriggerType.MOTION_ALERT -> Unit
                     }
                 }
 
                 tickCount++
-                if (tickCount % 3 == 0) {
+                if (tickCount % 6 == 0) {
                     storageRetentionEngine.enforceRetention()
                 }
 
                 _activeSchedulesState.value = activeList
-                delay(10000) // check every 10 seconds
+                delay(5000) // check every 5 seconds for timely chunk splits
             }
         }
     }

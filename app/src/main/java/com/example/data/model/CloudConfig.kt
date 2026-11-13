@@ -52,6 +52,10 @@ data class CloudConfigEntity(
     val retentionDays: Int = 3,
     val retentionHours: Int = 0,
     val retentionMinutes: Int = 0,
+    // User-defined recording chunk length & background resilience
+    val chunkDurationHours: Int = 0,
+    val chunkDurationMinutes: Int = 5,
+    val keepAppAlive: Boolean = true,
     val lastSyncTimestamp: Long = 0L,
     val isConnected: Boolean = true
 ) {
@@ -73,6 +77,23 @@ data class CloudConfigEntity(
             if (d > 0) add("${d}d")
             if (h > 0) add("${h}h")
             if (m > 0) add("${m}m")
+        }.joinToString(" ")
+    }
+
+    fun totalChunkMillis(): Long {
+        val hours = chunkDurationHours.coerceIn(0, 24).toLong()
+        val mins = chunkDurationMinutes.coerceIn(0, 59).toLong()
+        val total = (hours * 60L + mins) * 60L * 1000L
+        return total.coerceIn(60_000L, 24L * 60L * 60L * 1000L)
+    }
+
+    fun formatChunkWindow(): String {
+        val totalMins = (totalChunkMillis() / 60_000L).toInt()
+        val h = totalMins / 60
+        val m = totalMins % 60
+        return buildList {
+            if (h > 0) add("${h}h")
+            if (m > 0 || h == 0) add("${m}m")
         }.joinToString(" ")
     }
 }

@@ -12,6 +12,8 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -32,6 +34,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
@@ -109,7 +113,7 @@ import com.example.ui.theme.SurveillanceDarkBg
 import com.example.ui.theme.SurveillanceSurface
 import com.example.ui.viewmodel.CameraViewModel
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun LiveMultiCamScreen(
     viewModel: CameraViewModel,
@@ -130,6 +134,7 @@ fun LiveMultiCamScreen(
     val recordingCameras by viewModel.recordingSchedulerEngine.currentlyRecordingCameras.collectAsState()
     val discoveryState by viewModel.discoveryState.collectAsState()
     val selectedLanguageTag by viewModel.selectedLanguageTag.collectAsState()
+    val isGlobalMuted by viewModel.isGlobalMuted.collectAsState()
 
     var showCameraDialog by remember { mutableStateOf(false) }
     var cameraToEdit by remember { mutableStateOf<CameraEntity?>(null) }
@@ -175,51 +180,57 @@ fun LiveMultiCamScreen(
             .testTag("live_multicam_screen")
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // Simple, clean Header Bar
-            Row(
+            // Clean Responsive Two-Row Header Bar (prevents crowding on compact phones)
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                    Text(
-                        text = stringResource(R.string.live_title),
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.Black,
-                        color = NeonCyan,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    val recText = if (recordingCameras.isNotEmpty()) {
-                        stringResource(R.string.live_rec_suffix, recordingCameras.size)
-                    } else {
-                        ""
-                    }
-                    val floatText = if (floatingWindows.isNotEmpty()) {
-                        stringResource(R.string.live_float_suffix, floatingWindows.size)
-                    } else {
-                        ""
-                    }
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text(
+                            text = stringResource(R.string.live_title),
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Black,
+                            color = NeonCyan,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        val recText = if (recordingCameras.isNotEmpty()) {
+                            stringResource(R.string.live_rec_suffix, recordingCameras.size)
+                        } else {
+                            ""
+                        }
+                        val floatText = if (floatingWindows.isNotEmpty()) {
+                            stringResource(R.string.live_float_suffix, floatingWindows.size)
+                        } else {
+                            ""
+                        }
                         Text(
                             text = "${stringResource(R.string.live_cams_count, cameras.size)}$recText$floatText",
                             fontSize = 12.sp,
                             color = Color.White.copy(alpha = 0.7f),
                             maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f, fill = false)
+                            overflow = TextOverflow.Ellipsis
                         )
+                    }
+
+                    // Quick Language & Global Audio Mute Toggles
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         Surface(
-                            shape = RoundedCornerShape(6.dp),
+                            shape = RoundedCornerShape(8.dp),
                             color = SurveillanceSurface,
                             border = androidx.compose.foundation.BorderStroke(1.dp, NeonCyan.copy(alpha = 0.55f)),
                             modifier = Modifier
-                                .clip(RoundedCornerShape(6.dp))
+                                .clip(RoundedCornerShape(8.dp))
                                 .clickable {
                                     viewModel.setAppLanguage(
                                         if (isTurkishActive) AppLocaleManager.LANG_ENGLISH else AppLocaleManager.LANG_TURKISH
@@ -234,20 +245,63 @@ fun LiveMultiCamScreen(
                                     stringResource(R.string.language_quick_badge_en)
                                 },
                                 color = NeonCyan,
-                                fontSize = 10.sp,
+                                fontSize = 11.sp,
                                 fontWeight = FontWeight.Black,
                                 maxLines = 1,
                                 softWrap = false,
-                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
                             )
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (isGlobalMuted) Color(0xFF442222) else SurveillanceSurface,
+                            border = androidx.compose.foundation.BorderStroke(
+                                1.dp,
+                                if (isGlobalMuted) NeonRed.copy(alpha = 0.7f) else NeonCyan.copy(alpha = 0.55f)
+                            ),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable { viewModel.toggleGlobalMute() }
+                                .testTag("global_mute_toggle_btn")
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
+                            ) {
+                                Icon(
+                                    imageVector = if (isGlobalMuted) {
+                                        Icons.AutoMirrored.Filled.VolumeOff
+                                    } else {
+                                        Icons.AutoMirrored.Filled.VolumeUp
+                                    },
+                                    contentDescription = stringResource(R.string.fullscreen_audio_toggle),
+                                    tint = if (isGlobalMuted) NeonRed else NeonCyan,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = if (isGlobalMuted) {
+                                        stringResource(R.string.sound_muted_short)
+                                    } else {
+                                        stringResource(R.string.sound_on_short)
+                                    },
+                                    color = if (isGlobalMuted) Color.White else NeonCyan,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
                         }
                     }
                 }
 
-                // Clean Action Controls
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                // Action Controls Toolbar
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     // Auto-Discover Network Cameras
                     val unaddedFoundCount = discoveryState.results.count { !it.alreadyAdded }

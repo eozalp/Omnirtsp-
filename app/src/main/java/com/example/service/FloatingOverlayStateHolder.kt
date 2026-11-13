@@ -1,5 +1,6 @@
 package com.example.service
 
+import android.content.Context
 import com.example.data.model.CameraEntity
 import com.example.ui.components.normalizeRotationDegrees
 import com.example.ui.viewmodel.CornerPosition
@@ -13,10 +14,16 @@ import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * Shared state holder connecting CameraViewModel (in-app UI) and FloatingCameraOverlayService
- * (system-wide "show over other apps" windows), ensuring window sizes, positions, rotations, and
- * closed cameras remain synchronized even when OmniView is backgrounded behind YouTube or other apps.
+ * (system-wide "show over other apps" windows), ensuring window sizes, positions, rotations, global audio,
+ * and closed cameras remain synchronized even when OmniView is backgrounded behind other apps.
  */
 object FloatingOverlayStateHolder {
+
+    private const val AUDIO_PREFS_NAME = "omniview_global_audio"
+    private const val KEY_GLOBAL_MUTED = "global_muted"
+
+    @Volatile
+    private var audioPrefsLoaded = false
 
     private val _cameras = MutableStateFlow<List<CameraEntity>>(emptyList())
     val cameras: StateFlow<List<CameraEntity>> = _cameras.asStateFlow()
@@ -36,7 +43,38 @@ object FloatingOverlayStateHolder {
     private val _isSystemOverlayActive = MutableStateFlow(false)
     val isSystemOverlayActive: StateFlow<Boolean> = _isSystemOverlayActive.asStateFlow()
 
+    private val _isGlobalMuted = MutableStateFlow(false)
+    val isGlobalMuted: StateFlow<Boolean> = _isGlobalMuted.asStateFlow()
+
     private var nextZIndex = 10f
+
+    fun initAudioSettings(context: Context) {
+        if (audioPrefsLoaded) return
+        synchronized(this) {
+            if (!audioPrefsLoaded) {
+                val prefs = context.applicationContext.getSharedPreferences(AUDIO_PREFS_NAME, Context.MODE_PRIVATE)
+                _isGlobalMuted.value = prefs.getBoolean(KEY_GLOBAL_MUTED, false)
+                audioPrefsLoaded = true
+            }
+        }
+    }
+
+    fun setGlobalMuted(context: Context, muted: Boolean) {
+        audioPrefsLoaded = true
+        _isGlobalMuted.value = muted
+        context.applicationContext
+            .getSharedPreferences(AUDIO_PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_GLOBAL_MUTED, muted)
+            .apply()
+    }
+
+    fun toggleGlobalMuted(context: Context): Boolean {
+        initAudioSettings(context)
+        val next = !_isGlobalMuted.value
+        setGlobalMuted(context, next)
+        return next
+    }
 
     fun updateCameras(list: List<CameraEntity>) {
         val validIds = list.map { it.id }.toSet()
