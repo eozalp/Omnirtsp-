@@ -342,10 +342,20 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         _selectedFullscreenCamera.value = camera
     }
 
-    fun probeCameraPtz(camera: CameraEntity) {
+    fun probeCameraPtz(camera: CameraEntity, forceRefresh: Boolean = true) {
         viewModelScope.launch {
-            val state = onvifPtzClient.probeCamera(camera)
+            val state = onvifPtzClient.probeCamera(camera, forceRefresh = forceRefresh)
             persistDiscoveredPtzMetadata(camera, state)
+        }
+    }
+
+    fun selectCameraPtzProfile(camera: CameraEntity, profileToken: String) {
+        viewModelScope.launch {
+            onvifPtzClient.clearCache(camera.id)
+            val updated = camera.copy(ptzProfileToken = profileToken.trim())
+            database.cameraDao().insertCamera(updated)
+            val state = onvifPtzClient.probeCamera(updated, forceRefresh = true)
+            persistDiscoveredPtzMetadata(updated, state)
         }
     }
 
@@ -391,12 +401,14 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     fun gotoCameraPtzHome(camera: CameraEntity) {
         viewModelScope.launch {
             onvifPtzClient.gotoHome(camera)
+            persistDiscoveredPtzMetadata(camera, onvifPtzClient.status.value)
         }
     }
 
     fun gotoCameraPtzPreset(camera: CameraEntity, presetToken: String) {
         viewModelScope.launch {
             onvifPtzClient.gotoPreset(camera, presetToken)
+            persistDiscoveredPtzMetadata(camera, onvifPtzClient.status.value)
         }
     }
 
@@ -405,7 +417,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             onvifPtzClient.clearCache(camera.id)
             val updated = camera.copy(onvifPort = onvifPort.coerceIn(1, 65535))
             database.cameraDao().insertCamera(updated)
-            onvifPtzClient.probeCamera(updated)
+            val state = onvifPtzClient.probeCamera(updated, forceRefresh = true)
+            persistDiscoveredPtzMetadata(updated, state)
         }
     }
 

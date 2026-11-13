@@ -302,7 +302,7 @@ class ExampleUnitTest {
     // Regression check: XML declaration must start at byte 0 (no leading spaces -> avoids HTTP 400)
     assertTrue(soap.startsWith("<?xml version=\"1.0\" encoding=\"utf-8\"?>"))
     assertFalse(soap.first().isWhitespace())
-    assertTrue(soap.contains("<Username>admin</Username>"))
+    assertTrue(soap.contains("<wsse:Username>admin</wsse:Username>"))
     assertTrue(soap.contains("PasswordDigest"))
     assertTrue(soap.contains("<tptz:ContinuousMove>"))
 
@@ -327,6 +327,72 @@ class ExampleUnitTest {
       </trt:GetProfilesResponse>
     """.trimIndent()
     assertEquals("profile_1", OnvifPtzClient.extractFirstProfileToken(multiProfilesXml))
+    assertEquals(listOf("snapshot_only", "profile_1"), OnvifPtzClient.extractAllProfileTokens(multiProfilesXml))
+
+    // Parses GetSystemDateAndTime UTC clock for WS-Security PasswordDigest sync
+    val sysTimeXml = """
+      <tds:GetSystemDateAndTimeResponse>
+        <tds:SystemDateAndTime>
+          <tt:UTCDateTime>
+            <tt:Time><tt:Hour>12</tt:Hour><tt:Minute>30</tt:Minute><tt:Second>45</tt:Second></tt:Time>
+            <tt:Date><tt:Year>2026</tt:Year><tt:Month>11</tt:Month><tt:Day>13</tt:Day></tt:Date>
+          </tt:UTCDateTime>
+        </tds:SystemDateAndTime>
+      </tds:GetSystemDateAndTimeResponse>
+    """.trimIndent()
+    assertNotNull(OnvifPtzClient.parseSystemDateAndTimeUtcMs(sysTimeXml))
+
+    // Parses GetNodes capabilities (PanTilt-only without Zoom, plus exact Continuous velocity space URI)
+    val nodesXml = """
+      <tptz:GetNodesResponse>
+        <tptz:PTZNode token="PTZNode">
+          <tt:SupportedPTZSpaces>
+            <tt:ContinuousPanTiltVelocitySpace>
+              <tt:URI>http://www.onvif.org/ver10/tptz/PanTiltSpaces/VelocityGenericSpace</tt:URI>
+            </tt:ContinuousPanTiltVelocitySpace>
+            <tt:RelativePanTiltTranslationSpace>
+              <tt:URI>http://www.onvif.org/ver10/tptz/PanTiltSpaces/TranslationGenericSpace</tt:URI>
+            </tt:RelativePanTiltTranslationSpace>
+          </tt:SupportedPTZSpaces>
+        </tptz:PTZNode>
+      </tptz:GetNodesResponse>
+    """.trimIndent()
+    val parsedCaps = OnvifPtzClient.parseNodeCapabilities(nodesXml)
+    assertTrue(parsedCaps.supportsPanTilt)
+    assertFalse(parsedCaps.supportsZoom)
+    assertTrue(parsedCaps.supportsContinuousMove)
+    assertTrue(parsedCaps.supportsRelativeMove)
+    assertEquals(
+      "http://www.onvif.org/ver10/tptz/PanTiltSpaces/VelocityGenericSpace",
+      parsedCaps.continuousPanTiltSpaceUri
+    )
+
+    // Parses GetPresets & builds RelativeMove fallback + HTTP Digest header
+    val presetsXml = """
+      <tptz:GetPresetsResponse>
+        <tptz:Preset token="preset_1"><tt:Name>Gate</tt:Name></tptz:Preset>
+        <tptz:Preset token="preset_2"><tt:Name>Yard</tt:Name></tptz:Preset>
+      </tptz:GetPresetsResponse>
+    """.trimIndent()
+    val presets = OnvifPtzClient.extractPresets(presetsXml)
+    assertEquals(2, presets.size)
+    assertEquals("Gate", presets[0].name)
+
+    val relBody = OnvifPtzClient.buildRelativeMoveBody("profile_1", 0.12f, -0.05f, 0f)
+    assertTrue(relBody.contains("<tptz:RelativeMove>"))
+    assertTrue(relBody.contains("<tt:PanTilt"))
+    assertFalse(relBody.contains("<tt:Zoom"))
+
+    val digest = OnvifPtzClient.buildDigestAuthHeader(
+      wwwAuthenticate = "Digest realm=\"TP-LINK IP Camera\", nonce=\"abc123\", qop=\"auth\"",
+      url = "http://192.168.1.148:2020/onvif/service",
+      method = "POST",
+      username = "admin",
+      password = "secret"
+    )
+    assertNotNull(digest)
+    assertTrue(digest!!.startsWith("Digest username=\"admin\""))
+    assertTrue(digest.contains("uri=\"/onvif/service\""))
   }
 
   @Test

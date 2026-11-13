@@ -123,7 +123,7 @@ fun FullScreenPlayerScreen(
 
     LaunchedEffect(isPtzVisible, liveCamera.id, liveCamera.onvifPort) {
         if (isPtzVisible) {
-            viewModel.probeCameraPtz(liveCamera)
+            viewModel.probeCameraPtz(liveCamera, forceRefresh = false)
         }
     }
 
@@ -285,8 +285,9 @@ fun FullScreenPlayerScreen(
                             onStopMove = { viewModel.stopCameraPtz(liveCamera) },
                             onGotoHome = { viewModel.gotoCameraPtzHome(liveCamera) },
                             onGotoPreset = { token -> viewModel.gotoCameraPtzPreset(liveCamera, token) },
-                            onProbe = { viewModel.probeCameraPtz(liveCamera) },
+                            onProbe = { viewModel.probeCameraPtz(liveCamera, forceRefresh = true) },
                             onChangeOnvifPort = { port -> viewModel.updateCameraOnvifPort(liveCamera, port) },
+                            onSelectProfile = { token -> viewModel.selectCameraPtzProfile(liveCamera, token) },
                             onClose = { isPtzVisible = false },
                             isVerticalDock = verticalDock,
                             modifier = dockMod

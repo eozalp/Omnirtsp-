@@ -196,6 +196,13 @@
     <string name="ptz_home_failed">Home failed</string>
     <string name="ptz_moving_preset">Moving to Preset %1$s…</string>
     <string name="ptz_preset_active">Preset %1$s active</string>
+    <string name="ptz_query_button">Query ONVIF</string>
+    <string name="ptz_query_required_hint">Query ONVIF to detect port, profile &amp; capabilities before moving</string>
+    <string name="ptz_querying_ports">Querying ONVIF (%1$s:%2$d)…</string>
+    <string name="ptz_profile_label">Profile:</string>
+    <string name="ptz_pan_tilt_only">Pan/Tilt Only (No Zoom)</string>
+    <string name="ptz_relative_step_sent">Step %1$s sent (RelativeMove)</string>
+    <string name="ptz_queried_summary">Port %1$d • %2$s • %3$s</string>
     <string name="rotation_title">Rotate Video</string>
     <string name="rotation_reset_zero">Reset 0°</string>
     <string name="rotation_free_label">Free Rotation (0°–360°)</string>
