@@ -7,6 +7,7 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import android.view.TextureView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -284,6 +285,11 @@ fun RtspVideoPlayer(
                             useArtwork = false
                             keepScreenOn = true
                             playerViewRef = this
+                            val tv = (this.videoSurfaceView as? TextureView)
+                                ?: (0 until this.childCount).mapNotNull { this.getChildAt(it) as? TextureView }.firstOrNull()
+                            if (tv != null) {
+                                sharedStreamManager.registerTextureView(camera.id, tv)
+                            }
                         }
                     },
                     update = { playerView ->
@@ -296,8 +302,18 @@ fun RtspVideoPlayer(
                             playerView.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
                         }
                         playerView.keepScreenOn = true
+                        val tv = (playerView.videoSurfaceView as? TextureView)
+                            ?: (0 until playerView.childCount).mapNotNull { playerView.getChildAt(it) as? TextureView }.firstOrNull()
+                        if (tv != null) {
+                            sharedStreamManager.registerTextureView(camera.id, tv)
+                        }
                     },
                     onRelease = { playerView ->
+                        val tv = (playerView.videoSurfaceView as? TextureView)
+                            ?: (0 until playerView.childCount).mapNotNull { playerView.getChildAt(it) as? TextureView }.firstOrNull()
+                        if (tv != null) {
+                            sharedStreamManager.unregisterTextureView(camera.id, tv)
+                        }
                         if (playerViewRef === playerView) {
                             playerViewRef = null
                         }

@@ -300,6 +300,23 @@
     <string name="recordings_delete_clip_desc">Delete Clip</string>
     <string name="recordings_playback_title">Playback: %1$s</string>
     <string name="recordings_sync_to_cloud">Sync To Cloud</string>
+    <string name="recordings_tab_timeline">Timeline</string>
+    <string name="recordings_tab_clips">Clips List</string>
+    <string name="recordings_watch_timeline">Watch Timeline</string>
+    <string name="recordings_filter_all_cameras">All Cameras</string>
+    <string name="recordings_filter_all_dates">All Dates</string>
+    <string name="recordings_timeline_chunk_counter">Chunk %1$d / %2$d</string>
+    <string name="recordings_timeline_now_playing">PLAYING</string>
+    <string name="recordings_timeline_gap_badge">Gap %1$s</string>
+    <string name="recordings_timeline_empty">No playable timeline segments for this filter</string>
+    <string name="recordings_timeline_prev_chunk">Previous Chunk</string>
+    <string name="recordings_timeline_next_chunk">Next Chunk</string>
+    <string name="recordings_timeline_rewind">Rewind 10 seconds</string>
+    <string name="recordings_timeline_forward">Forward 10 seconds</string>
+    <string name="recordings_timeline_play_pause">Play or Pause</string>
+    <string name="recordings_timeline_speed">Playback Speed %1$s</string>
+    <string name="recordings_timeline_mute_toggle">Toggle Audio</string>
+    <string name="recordings_timeline_seamless_hint">Gapless auto-advance across saved chunks</string>
 
     <!-- Cloud & Device Storage Screen -->
     <string name="storage_title">Device &amp; Cloud Storage</string>
@@ -431,4 +448,51 @@
     <string name="keepalive_notif_title">OmniView Monitoring Active</string>
     <string name="keepalive_notif_text">Stream watchdog and resilient chunk recording active</string>
     <string name="keepalive_notif_stop">Pause</string>
+
+    <!-- Clips Section Compact & Filter Strings -->
+    <string name="recordings_more_actions">More clip actions</string>
+    <string name="recordings_storage_compact">Save: %1$s • Keep: %2$s</string>
+    <string name="recordings_manage_storage">Manage</string>
+    <string name="recordings_filter_all_types">All</string>
+    <string name="recordings_filter_motion">Motion</string>
+    <string name="recordings_filter_scheduled">Scheduled</string>
+    <string name="recordings_filter_manual">Manual</string>
+    <string name="recordings_open_timeline_item">Watch in Timeline</string>
+    <string name="recordings_play_clip_item">Quick Preview</string>
+    <string name="recordings_device_saved_tag">Device ✓</string>
+
+    <!-- Spare-Device Remote Hub Server -->
+    <string name="hub_title">Remote Camera Hub Server</string>
+    <string name="hub_subtitle">Repurpose this device as a secure NVR hub via Tailscale VPN or LAN IP</string>
+    <string name="hub_status_online">ONLINE • Port %1$d • %2$d active</string>
+    <string name="hub_status_offline">OFFLINE</string>
+    <string name="hub_switch_title">Enable Remote Hub Server</string>
+    <string name="hub_switch_sub">Streams live feeds, PTZ, recording &amp; timeline playback over HTTP</string>
+    <string name="hub_endpoints_title">REMOTE ACCESS URLS</string>
+    <string name="hub_kind_tailscale">TAILSCALE VPN</string>
+    <string name="hub_kind_lan">LOCAL WI-FI / LAN</string>
+    <string name="hub_kind_other">NETWORK</string>
+    <string name="hub_no_tailscale_hint">Tailscale IP (100.64.x.x) not detected yet. Install &amp; connect Tailscale for encrypted anywhere access.</string>
+    <string name="hub_no_ip_detected">No active LAN or Tailscale IP found — connect Wi-Fi or Tailscale VPN.</string>
+    <string name="hub_port_label">Server Port (1024–65535)</string>
+    <string name="hub_token_label">Access Token / PIN</string>
+    <string name="hub_apply_settings_btn">Apply Port &amp; Token</string>
+    <string name="hub_regen_token_btn">New Token</string>
+    <string name="hub_copy_url">Copy URL</string>
+    <string name="hub_copy_token">Copy Token</string>
+    <string name="hub_copied_status">Copied to clipboard: %1$s</string>
+    <string name="hub_remote_control_title">Allow Remote PTZ &amp; Recording Control</string>
+    <string name="hub_remote_control_sub">Turn off to restrict remote browsers to view-only playback</string>
+    <string name="hub_power_telemetry">Power: %1$d%% (%2$s) • Free: %3$d MB</string>
+    <string name="hub_power_plugged">Plugged In (24/7 Hub Ready)</string>
+    <string name="hub_power_battery">On Battery (Plug in charger for 24/7 hub)</string>
+    <string name="hub_last_client">Last request: %1$s</string>
+    <string name="hub_pill_on">HUB ON</string>
+    <string name="hub_pill_off">HUB OFF</string>
+    <string name="hub_quick_dialog_title">Remote Camera Hub</string>
+    <string name="hub_open_full_settings">Hub Settings &amp; Security</string>
+    <string name="hub_started_status">Remote Hub listening on port %1$d</string>
+    <string name="hub_stopped_status">Remote Hub server stopped</string>
+    <string name="hub_settings_saved">Hub settings applied (Port %1$d)</string>
+    <string name="hub_error_prefix">Hub error: %1$s</string>
 </resources>

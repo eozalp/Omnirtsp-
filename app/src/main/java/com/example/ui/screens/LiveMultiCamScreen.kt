@@ -1,5 +1,8 @@
 package com.example.ui.screens
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
@@ -38,6 +41,7 @@ import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.Fullscreen
@@ -55,7 +59,9 @@ import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.ViewAgenda
+import androidx.compose.material.icons.filled.VpnLock
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -72,6 +78,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -99,6 +107,7 @@ import androidx.compose.ui.window.Dialog
 import com.example.R
 import com.example.data.model.CameraEntity
 import com.example.engine.DiscoveredCamera
+import com.example.engine.EndpointKind
 import com.example.i18n.AppLocaleManager
 import com.example.ui.components.RtspVideoPlayer
 import com.example.ui.components.VideoRotationDialog
@@ -136,11 +145,14 @@ fun LiveMultiCamScreen(
     val discoveryState by viewModel.discoveryState.collectAsState()
     val selectedLanguageTag by viewModel.selectedLanguageTag.collectAsState()
     val isGlobalMuted by viewModel.isGlobalMuted.collectAsState()
+    val hubState by viewModel.hubServerState.collectAsState()
 
     var showCameraDialog by remember { mutableStateOf(false) }
     var cameraToEdit by remember { mutableStateOf<CameraEntity?>(null) }
     var suggestedCameraPrefill by remember { mutableStateOf<DiscoveredCamera?>(null) }
     var showDiscoveryDialog by remember { mutableStateOf(false) }
+    var showQuickHubDialog by remember { mutableStateOf(false) }
+    var quickHubCopyNotice by remember { mutableStateOf<String?>(null) }
     var cameraToDelete by remember { mutableStateOf<CameraEntity?>(null) }
     var cameraToRotateId by remember { mutableStateOf<String?>(null) }
     var showOverlayPermissionDialog by remember { mutableStateOf(false) }
@@ -221,11 +233,53 @@ fun LiveMultiCamScreen(
                         )
                     }
 
-                    // Quick Language & Global Audio Mute Toggles
+                    // Quick Hub Status, Language & Global Audio Mute Toggles
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (hubState.isRunning) Color(0xFF143426) else SurveillanceSurface,
+                            border = androidx.compose.foundation.BorderStroke(
+                                1.dp,
+                                if (hubState.isRunning) NeonGreen.copy(alpha = 0.75f) else NeonCyan.copy(alpha = 0.4f)
+                            ),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable {
+                                    quickHubCopyNotice = null
+                                    viewModel.refreshHubNetworkEndpoints()
+                                    showQuickHubDialog = true
+                                }
+                                .testTag("quick_hub_status_btn")
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
+                            ) {
+                                Icon(
+                                    imageVector = if (hubState.tailscaleEndpoint != null) Icons.Default.VpnLock else Icons.Default.Router,
+                                    contentDescription = stringResource(R.string.hub_quick_dialog_title),
+                                    tint = if (hubState.isRunning) NeonGreen else Color.Gray,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = if (hubState.isRunning) {
+                                        stringResource(R.string.hub_pill_on)
+                                    } else {
+                                        stringResource(R.string.hub_pill_off)
+                                    },
+                                    color = if (hubState.isRunning) NeonGreen else Color.White.copy(alpha = 0.8f),
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Black,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
+                        }
+
                         Surface(
                             shape = RoundedCornerShape(8.dp),
                             color = SurveillanceSurface,
@@ -968,6 +1022,136 @@ fun LiveMultiCamScreen(
                 },
                 containerColor = SurveillanceCardBg,
                 shape = RoundedCornerShape(16.dp)
+            )
+        }
+
+        // Quick Remote Hub Dialog (for Tailscale / LAN access right from Live view)
+        if (showQuickHubDialog) {
+            val copyQuickText: (String, String) -> Unit = { label, value ->
+                try {
+                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    cm.setPrimaryClip(ClipData.newPlainText(label, value))
+                    quickHubCopyNotice = AppLocaleManager.getString(context, R.string.hub_copied_status, value)
+                } catch (_: Exception) {}
+            }
+            AlertDialog(
+                onDismissRequest = { showQuickHubDialog = false },
+                containerColor = SurveillanceCardBg,
+                shape = RoundedCornerShape(16.dp),
+                title = {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Router, contentDescription = null, tint = NeonCyan)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = stringResource(R.string.hub_quick_dialog_title),
+                                color = Color.White,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 16.sp
+                            )
+                        }
+                        Switch(
+                            checked = hubState.isEnabled,
+                            onCheckedChange = { viewModel.toggleHubServer(it) },
+                            colors = SwitchDefaults.colors(checkedThumbColor = NeonGreen),
+                            modifier = Modifier.testTag("quick_hub_dialog_switch")
+                        )
+                    }
+                },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(
+                            text = if (hubState.isRunning) {
+                                stringResource(R.string.hub_status_online, hubState.port, hubState.activeConnections)
+                            } else {
+                                stringResource(R.string.hub_status_offline)
+                            },
+                            color = if (hubState.isRunning) NeonGreen else Color.Gray,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        if (hubState.endpoints.isEmpty()) {
+                            Text(
+                                text = stringResource(R.string.hub_no_ip_detected),
+                                color = NeonAmber,
+                                fontSize = 12.sp
+                            )
+                        } else {
+                            hubState.endpoints.take(3).forEach { ep ->
+                                val color = if (ep.kind == EndpointKind.TAILSCALE) NeonCyan else NeonGreen
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = SurveillanceSurface,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { copyQuickText("Hub URL", ep.url) }
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(10.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f).padding(end = 6.dp)) {
+                                            Text(
+                                                text = if (ep.kind == EndpointKind.TAILSCALE) {
+                                                    stringResource(R.string.hub_kind_tailscale)
+                                                } else {
+                                                    stringResource(R.string.hub_kind_lan)
+                                                },
+                                                color = color,
+                                                fontSize = 9.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                            Text(
+                                                text = ep.url,
+                                                color = Color.White,
+                                                fontSize = 12.sp,
+                                                fontFamily = FontFamily.Monospace,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                        Icon(Icons.Default.ContentCopy, contentDescription = stringResource(R.string.hub_copy_url), tint = color, modifier = Modifier.size(16.dp))
+                                    }
+                                }
+                            }
+                        }
+
+                        OutlinedButton(
+                            onClick = { copyQuickText("Hub Token", hubState.accessToken) },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(stringResource(R.string.hub_copy_token), fontSize = 12.sp)
+                        }
+
+                        quickHubCopyNotice?.let { notice ->
+                            Text(text = notice, color = NeonGreen, fontSize = 11.sp)
+                        }
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            showQuickHubDialog = false
+                            viewModel.navigateTo("cloud")
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = Color.Black)
+                    ) {
+                        Text(stringResource(R.string.hub_open_full_settings), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showQuickHubDialog = false }) {
+                        Text(stringResource(R.string.common_close), color = Color.Gray)
+                    }
+                }
             )
         }
 

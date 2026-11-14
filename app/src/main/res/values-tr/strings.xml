@@ -300,6 +300,23 @@
     <string name="recordings_delete_clip_desc">Kaydı Sil</string>
     <string name="recordings_playback_title">Oynatma: %1$s</string>
     <string name="recordings_sync_to_cloud">Buluta Eşitle</string>
+    <string name="recordings_tab_timeline">Zaman Tüneli</string>
+    <string name="recordings_tab_clips">Klip Listesi</string>
+    <string name="recordings_watch_timeline">Zaman Tüneli İzle</string>
+    <string name="recordings_filter_all_cameras">Tüm Kameralar</string>
+    <string name="recordings_filter_all_dates">Tüm Tarihler</string>
+    <string name="recordings_timeline_chunk_counter">Parça %1$d / %2$d</string>
+    <string name="recordings_timeline_now_playing">OYNATILIYOR</string>
+    <string name="recordings_timeline_gap_badge">Boşluk %1$s</string>
+    <string name="recordings_timeline_empty">Bu filtre için oynatılabilir zaman tüneli kaydı yok</string>
+    <string name="recordings_timeline_prev_chunk">Önceki Parça</string>
+    <string name="recordings_timeline_next_chunk">Sonraki Parça</string>
+    <string name="recordings_timeline_rewind">10 saniye geri sar</string>
+    <string name="recordings_timeline_forward">10 saniye ileri sar</string>
+    <string name="recordings_timeline_play_pause">Oynat veya Duraklat</string>
+    <string name="recordings_timeline_speed">Oynatma Hızı %1$s</string>
+    <string name="recordings_timeline_mute_toggle">Sesi Aç/Kapat</string>
+    <string name="recordings_timeline_seamless_hint">Kaydedilen parçalar arasında kesintisiz otomatik geçiş</string>
 
     <!-- Cihaz ve Bulut Depolama Ekranı -->
     <string name="storage_title">Cihaz ve Bulut Depolama</string>
@@ -431,4 +448,51 @@
     <string name="keepalive_notif_title">OmniView İzleme Etkin</string>
     <string name="keepalive_notif_text">Yayın koruyucu ve parçalı video kaydı çalışıyor</string>
     <string name="keepalive_notif_stop">Duraklat</string>
+
+    <!-- Klip Bölümü Kompakt ve Filtre Metinleri -->
+    <string name="recordings_more_actions">Diğer klip işlemleri</string>
+    <string name="recordings_storage_compact">Kayıt: %1$s • Tut: %2$s</string>
+    <string name="recordings_manage_storage">Yönet</string>
+    <string name="recordings_filter_all_types">Tümü</string>
+    <string name="recordings_filter_motion">Hareket</string>
+    <string name="recordings_filter_scheduled">Zamanlı</string>
+    <string name="recordings_filter_manual">Manuel</string>
+    <string name="recordings_open_timeline_item">Zaman Tünelinde İzle</string>
+    <string name="recordings_play_clip_item">Hızlı Önizleme</string>
+    <string name="recordings_device_saved_tag">Cihaz ✓</string>
+
+    <!-- Yedek Cihaz Uzak Merkez Sunucusu (Hub) -->
+    <string name="hub_title">Uzak Kamera Merkez Sunucusu</string>
+    <string name="hub_subtitle">Bu cihazı Tailscale VPN veya LAN IP üzerinden güvenli NVR merkezine dönüştürün</string>
+    <string name="hub_status_online">ÇEVRİMİÇİ • Port %1$d • %2$d bağlantı</string>
+    <string name="hub_status_offline">ÇEVRİMDIŞI</string>
+    <string name="hub_switch_title">Uzak Merkez Sunucusunu Aç</string>
+    <string name="hub_switch_sub">HTTP üzerinden canlı yayın, PTZ, kayıt ve zaman tüneli izleme sunar</string>
+    <string name="hub_endpoints_title">UZAK ERİŞİM ADRESLERİ</string>
+    <string name="hub_kind_tailscale">TAILSCALE VPN</string>
+    <string name="hub_kind_lan">YEREL WI-FI / LAN</string>
+    <string name="hub_kind_other">AĞ</string>
+    <string name="hub_no_tailscale_hint">Tailscale IP (100.64.x.x) henüz algılanmadı. Şifreli uzaktan erişim için Tailscale kurup bağlanın.</string>
+    <string name="hub_no_ip_detected">Aktif LAN veya Tailscale IP bulunamadı — Wi-Fi veya Tailscale VPN\'e bağlanın.</string>
+    <string name="hub_port_label">Sunucu Portu (1024–65535)</string>
+    <string name="hub_token_label">Erişim Belirteci / PIN</string>
+    <string name="hub_apply_settings_btn">Port ve Belirteci Uygula</string>
+    <string name="hub_regen_token_btn">Yeni Belirteç</string>
+    <string name="hub_copy_url">Adresi Kopyala</string>
+    <string name="hub_copy_token">Belirteci Kopyala</string>
+    <string name="hub_copied_status">Panoya kopyalandı: %1$s</string>
+    <string name="hub_remote_control_title">Uzaktan PTZ ve Kayıt Kontrolüne İzin Ver</string>
+    <string name="hub_remote_control_sub">Uzak tarayıcıları yalnızca izleme moduyla sınırlamak için kapatın</string>
+    <string name="hub_power_telemetry">Pil: %%%1$d (%2$s) • Boş: %3$d MB</string>
+    <string name="hub_power_plugged">Şarja Bağlı (7/24 Merkez Hazır)</string>
+    <string name="hub_power_battery">Pil Gücünde (7/24 kullanım için şarja takın)</string>
+    <string name="hub_last_client">Son istek: %1$s</string>
+    <string name="hub_pill_on">HUB AÇIK</string>
+    <string name="hub_pill_off">HUB KAPALI</string>
+    <string name="hub_quick_dialog_title">Uzak Kamera Merkezi</string>
+    <string name="hub_open_full_settings">Merkez Ayarları ve Güvenlik</string>
+    <string name="hub_started_status">Uzak Merkez %1$d portunda dinliyor</string>
+    <string name="hub_stopped_status">Uzak Merkez sunucusu durduruldu</string>
+    <string name="hub_settings_saved">Merkez ayarları uygulandı (Port %1$d)</string>
+    <string name="hub_error_prefix">Merkez hatası: %1$s</string>
 </resources>

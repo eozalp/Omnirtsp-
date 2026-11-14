@@ -21,6 +21,9 @@ import com.example.data.model.CameraEntity
 import com.example.data.model.RtspTransport
 import com.example.data.model.StreamTelemetry
 import com.example.service.FloatingOverlayStateHolder
+import android.graphics.Bitmap
+import android.view.TextureView
+import java.lang.ref.WeakReference
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -397,7 +400,41 @@ class RtspStreamManager(private val context: Context) {
         return rawUrl
     }
 
-    private fun isLiveRtspCamera(camera: CameraEntity): Boolean {
+    private val activeTextureViews = ConcurrentHashMap<String, WeakReference<TextureView>>()
+
+    fun registerTextureView(cameraId: String, textureView: TextureView) {
+        activeTextureViews[cameraId] = WeakReference(textureView)
+    }
+
+    fun unregisterTextureView(cameraId: String, textureView: TextureView) {
+        val current = activeTextureViews[cameraId]?.get()
+        if (current == null || current === textureView) {
+            activeTextureViews.remove(cameraId)
+        }
+    }
+
+    fun captureFrame(cameraId: String, width: Int = 640, height: Int = 360): Bitmap? {
+        val tv = activeTextureViews[cameraId]?.get() ?: return null
+        return try {
+            if (tv.isAvailable && tv.width > 0 && tv.height > 0) {
+                tv.getBitmap(width, height)
+            } else {
+                null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun isDemoCamera(camera: CameraEntity): Boolean {
+        val rawUrl = camera.rtspUrl.lowercase()
+        return rawUrl.contains("surveillance_feed") ||
+                rawUrl.contains("commondatastorage.googleapis.com") ||
+                rawUrl.contains("wowzaec2demo") ||
+                rawUrl.startsWith("android.resource")
+    }
+
+    fun isLiveRtspCamera(camera: CameraEntity): Boolean {
         val rawUrl = resolveEffectiveUrl(camera)
         return Uri.parse(rawUrl).scheme.equals("rtsp", ignoreCase = true)
     }

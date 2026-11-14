@@ -22,6 +22,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
@@ -29,6 +32,7 @@ import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.CloudDone
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.ElectricalServices
 import androidx.compose.material.icons.filled.FolderOpen
@@ -36,7 +40,9 @@ import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.RestartAlt
+import androidx.compose.material.icons.filled.Router
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Smartphone
@@ -45,6 +51,7 @@ import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material.icons.filled.VpnLock
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -52,6 +59,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -85,6 +93,7 @@ import com.example.R
 import com.example.data.model.CloudConfigEntity
 import com.example.data.model.CloudProviderType
 import com.example.data.model.LocalSaveDestination
+import com.example.engine.EndpointKind
 import com.example.i18n.AppLocaleManager
 import com.example.ui.theme.NeonAmber
 import com.example.ui.theme.NeonCyan
@@ -109,6 +118,20 @@ fun CloudStorageScreen(
     val isGlobalMuted by viewModel.isGlobalMuted.collectAsState()
     val isTesting by viewModel.cloudStorageManager.isTestingConnection.collectAsState()
     val testResult by viewModel.cloudStorageManager.lastConnectionTestResult.collectAsState()
+    val hubState by viewModel.hubServerState.collectAsState()
+
+    var hubPortText by remember(hubState.port) { mutableStateOf(hubState.port.toString()) }
+    var hubTokenText by remember(hubState.accessToken) { mutableStateOf(hubState.accessToken) }
+    var isHubTokenVisible by remember { mutableStateOf(false) }
+    var hubCopyMessage by remember { mutableStateOf<String?>(null) }
+
+    val copyToClipboard: (String, String) -> Unit = { label, text ->
+        try {
+            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            cm.setPrimaryClip(ClipData.newPlainText(label, text))
+            hubCopyMessage = AppLocaleManager.getString(context, R.string.hub_copied_status, text)
+        } catch (_: Exception) {}
+    }
 
     var retentionEnabled by remember(cloudConfig) { mutableStateOf(cloudConfig.retentionEnabled) }
     var retentionDaysText by remember(cloudConfig) { mutableStateOf(cloudConfig.retentionDays.toString()) }
@@ -281,6 +304,330 @@ fun CloudStorageScreen(
                             onClick = { viewModel.setAppLanguage(AppLocaleManager.LANG_TURKISH) },
                             label = { Text(stringResource(R.string.language_turkish), fontSize = 11.sp, maxLines = 1, softWrap = false) },
                             modifier = Modifier.testTag("chip_lang_tr")
+                        )
+                    }
+                }
+            }
+
+            // Spare-Device Remote Hub Server Card (Tailscale / LAN IP)
+            Card(
+                colors = CardDefaults.cardColors(containerColor = SurveillanceCardBg),
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.fillMaxWidth().testTag("remote_hub_server_card")
+            ) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            modifier = Modifier.weight(1f).padding(end = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Default.Router, contentDescription = null, tint = NeonCyan, modifier = Modifier.size(20.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text(
+                                    text = stringResource(R.string.hub_title),
+                                    color = Color.White,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = stringResource(R.string.hub_subtitle),
+                                    color = Color.Gray,
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = if (hubState.isRunning) NeonGreen.copy(alpha = 0.16f) else Color.White.copy(alpha = 0.08f)
+                        ) {
+                            Text(
+                                text = if (hubState.isRunning) {
+                                    stringResource(R.string.hub_status_online, hubState.port, hubState.activeConnections)
+                                } else {
+                                    stringResource(R.string.hub_status_offline)
+                                },
+                                color = if (hubState.isRunning) NeonGreen else Color.Gray,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                softWrap = false,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                            Text(stringResource(R.string.hub_switch_title), color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            Text(stringResource(R.string.hub_switch_sub), color = Color.Gray, fontSize = 11.sp)
+                        }
+                        Switch(
+                            checked = hubState.isEnabled,
+                            onCheckedChange = { viewModel.toggleHubServer(it) },
+                            colors = SwitchDefaults.colors(checkedThumbColor = NeonCyan),
+                            modifier = Modifier.testTag("hub_server_switch")
+                        )
+                    }
+
+                    // Power & Storage Eco-Hub Telemetry
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = SurveillanceSurface,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                modifier = Modifier.weight(1f).padding(end = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    Icons.Default.BatteryChargingFull,
+                                    contentDescription = null,
+                                    tint = if (hubState.isPluggedIn) NeonGreen else NeonAmber,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = stringResource(
+                                        R.string.hub_power_telemetry,
+                                        hubState.batteryPercent,
+                                        if (hubState.isPluggedIn) {
+                                            stringResource(R.string.hub_power_plugged)
+                                        } else {
+                                            stringResource(R.string.hub_power_battery)
+                                        },
+                                        hubState.freeStorageMb
+                                    ),
+                                    color = Color.White.copy(alpha = 0.85f),
+                                    fontSize = 11.sp
+                                )
+                            }
+                            IconButton(
+                                onClick = { viewModel.refreshHubNetworkEndpoints() },
+                                modifier = Modifier.size(32.dp).testTag("hub_refresh_ips_btn")
+                            ) {
+                                Icon(Icons.Default.Refresh, contentDescription = null, tint = NeonCyan, modifier = Modifier.size(17.dp))
+                            }
+                        }
+                    }
+
+                    // Detected Tailscale & LAN URLs
+                    Text(
+                        text = stringResource(R.string.hub_endpoints_title),
+                        color = NeonCyan,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    if (hubState.endpoints.isEmpty()) {
+                        Text(
+                            text = stringResource(R.string.hub_no_ip_detected),
+                            color = NeonAmber,
+                            fontSize = 11.sp
+                        )
+                    } else {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            hubState.endpoints.forEach { ep ->
+                                val badgeColor = when (ep.kind) {
+                                    EndpointKind.TAILSCALE -> NeonCyan
+                                    EndpointKind.WIFI_LAN -> NeonGreen
+                                    EndpointKind.OTHER -> Color.LightGray
+                                }
+                                val kindLabel = when (ep.kind) {
+                                    EndpointKind.TAILSCALE -> stringResource(R.string.hub_kind_tailscale)
+                                    EndpointKind.WIFI_LAN -> stringResource(R.string.hub_kind_lan)
+                                    EndpointKind.OTHER -> stringResource(R.string.hub_kind_other)
+                                }
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = SurveillanceSurface,
+                                    border = androidx.compose.foundation.BorderStroke(1.dp, badgeColor.copy(alpha = 0.35f)),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.weight(1f).padding(end = 8.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Icon(
+                                                imageVector = if (ep.kind == EndpointKind.TAILSCALE) Icons.Default.VpnLock else Icons.Default.Wifi,
+                                                contentDescription = null,
+                                                tint = badgeColor,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Column {
+                                                Text(
+                                                    text = "$kindLabel (${ep.interfaceName})",
+                                                    color = badgeColor,
+                                                    fontSize = 9.sp,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                                Text(
+                                                    text = ep.url,
+                                                    color = Color.White,
+                                                    fontSize = 12.sp,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
+                                        }
+
+                                        OutlinedButton(
+                                            onClick = { copyToClipboard("OmniView Hub URL", ep.url) },
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                            modifier = Modifier.testTag("copy_hub_url_${ep.kind.name}")
+                                        ) {
+                                            Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(13.dp))
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text(stringResource(R.string.hub_copy_url), fontSize = 11.sp, maxLines = 1, softWrap = false)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (hubState.tailscaleEndpoint == null) {
+                        Text(
+                            text = stringResource(R.string.hub_no_tailscale_hint),
+                            color = Color.Gray,
+                            fontSize = 11.sp
+                        )
+                    }
+
+                    HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = hubPortText,
+                            onValueChange = { hubPortText = it.filter { ch -> ch.isDigit() }.take(5) },
+                            label = { Text(stringResource(R.string.hub_port_label), maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            modifier = Modifier.weight(0.9f).testTag("hub_port_input")
+                        )
+
+                        OutlinedTextField(
+                            value = hubTokenText,
+                            onValueChange = { hubTokenText = it.take(48) },
+                            label = { Text(stringResource(R.string.hub_token_label), maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                            singleLine = true,
+                            trailingIcon = {
+                                IconButton(onClick = { isHubTokenVisible = !isHubTokenVisible }) {
+                                    Icon(
+                                        imageVector = if (isHubTokenVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                                        contentDescription = stringResource(R.string.cloud_show_secret),
+                                        tint = Color.White.copy(alpha = 0.7f)
+                                    )
+                                }
+                            },
+                            visualTransformation = if (isHubTokenVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                            modifier = Modifier.weight(1.3f).testTag("hub_token_input")
+                        )
+                    }
+
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Button(
+                            onClick = {
+                                val portVal = hubPortText.toIntOrNull() ?: com.example.engine.RemoteHubServer.DEFAULT_PORT
+                                val safePort = com.example.engine.RemoteHubServer.normalizePort(portVal)
+                                hubPortText = safePort.toString()
+                                viewModel.updateHubServerConfig(safePort, hubTokenText, hubState.allowRemoteControl)
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = Color.Black),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                            modifier = Modifier.testTag("hub_apply_config_btn")
+                        ) {
+                            Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(stringResource(R.string.hub_apply_settings_btn), fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
+                        }
+
+                        OutlinedButton(
+                            onClick = { copyToClipboard("OmniView Hub Token", hubState.accessToken) },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                            modifier = Modifier.testTag("hub_copy_token_btn")
+                        ) {
+                            Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(stringResource(R.string.hub_copy_token), fontSize = 11.sp, maxLines = 1, softWrap = false)
+                        }
+
+                        OutlinedButton(
+                            onClick = { viewModel.regenerateHubToken() },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                            modifier = Modifier.testTag("hub_regen_token_btn")
+                        ) {
+                            Icon(Icons.Default.Key, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(stringResource(R.string.hub_regen_token_btn), fontSize = 11.sp, maxLines = 1, softWrap = false)
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                            Text(stringResource(R.string.hub_remote_control_title), color = Color.White, fontSize = 13.sp)
+                            Text(stringResource(R.string.hub_remote_control_sub), color = Color.Gray, fontSize = 11.sp)
+                        }
+                        Switch(
+                            checked = hubState.allowRemoteControl,
+                            onCheckedChange = { viewModel.setRemoteHubControlEnabled(it) },
+                            colors = SwitchDefaults.colors(checkedThumbColor = NeonCyan),
+                            modifier = Modifier.testTag("hub_allow_control_switch")
+                        )
+                    }
+
+                    if (hubState.lastRequestSummary.isNotBlank()) {
+                        Text(
+                            text = stringResource(R.string.hub_last_client, hubState.lastRequestSummary),
+                            color = Color.White.copy(alpha = 0.65f),
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+
+                    hubCopyMessage?.let { msg ->
+                        Text(text = msg, color = NeonGreen, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                    }
+
+                    hubState.lastError?.let { err ->
+                        Text(
+                            text = stringResource(R.string.hub_error_prefix, err),
+                            color = NeonRed,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium
                         )
                     }
                 }

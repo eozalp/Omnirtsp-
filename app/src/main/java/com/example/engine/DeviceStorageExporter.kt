@@ -193,32 +193,15 @@ object DeviceStorageExporter {
     }
 
     fun ensureValidClipPayload(context: Context? = null, file: File) {
-        if (!file.exists() || file.length() < 100 * 1024L) {
+        if (!file.exists() || file.length() < 32L) {
             file.parentFile?.mkdirs()
-            var populated = false
-            if (context != null) {
-                try {
-                    context.resources.openRawResource(com.example.R.raw.surveillance_feed).use { input ->
-                        file.outputStream().use { out ->
-                            input.copyTo(out)
-                            out.flush()
-                            try {
-                                out.fd.sync()
-                            } catch (_: Exception) {}
-                        }
-                    }
-                    populated = true
-                } catch (_: Exception) {}
-            }
-            if (!populated && (!file.exists() || file.length() < 32L)) {
-                val mp4Header = byteArrayOf(
-                    0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70,
-                    0x69, 0x73, 0x6F, 0x6D, 0x00, 0x00, 0x02, 0x00,
-                    0x69, 0x73, 0x6F, 0x6D, 0x69, 0x73, 0x6F, 0x32,
-                    0x61, 0x76, 0x63, 0x31, 0x6D, 0x70, 0x34, 0x31
-                )
-                file.writeBytes(mp4Header)
-            }
+            val mp4Header = byteArrayOf(
+                0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70,
+                0x69, 0x73, 0x6F, 0x6D, 0x00, 0x00, 0x02, 0x00,
+                0x69, 0x73, 0x6F, 0x6D, 0x69, 0x73, 0x6F, 0x32,
+                0x61, 0x76, 0x63, 0x31, 0x6D, 0x70, 0x34, 0x31
+            )
+            file.writeBytes(mp4Header)
         }
     }
 

@@ -2,6 +2,8 @@ package com.example.ui.screens
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -13,7 +15,6 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -22,8 +23,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
@@ -32,19 +33,26 @@ import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.FiberManualRecord
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.Timeline
 import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -73,6 +81,7 @@ import com.example.data.model.CloudSyncStatus
 import com.example.data.model.LocalSaveDestination
 import com.example.data.model.RecordedClipEntity
 import com.example.i18n.AppLocaleManager
+import com.example.ui.components.StorageTimelinePlayer
 import com.example.ui.theme.NeonAmber
 import com.example.ui.theme.NeonCyan
 import com.example.ui.theme.NeonGreen
@@ -99,10 +108,17 @@ fun RecordingsScreen(
     val selectedLanguageTag by viewModel.selectedLanguageTag.collectAsState()
 
     var clipToPlay by remember { mutableStateOf<RecordedClipEntity?>(null) }
+    var isTimelineMode by remember { mutableStateOf(false) }
+    var timelineInitialClipId by remember { mutableStateOf<String?>(null) }
     var pendingSaveAsClip by remember { mutableStateOf<RecordedClipEntity?>(null) }
     var fileManagerUnavailableMsg by remember { mutableStateOf<String?>(null) }
+    var storageControlsExpanded by remember { mutableStateOf(false) }
+    var selectedTriggerFilter by remember { mutableStateOf<ClipTriggerType?>(null) }
     val dateFormatter = remember(selectedLanguageTag) {
         SimpleDateFormat("MMM dd • HH:mm:ss", AppLocaleManager.getEffectiveLocale(context))
+    }
+    val filteredClips = remember(clips, selectedTriggerFilter) {
+        if (selectedTriggerFilter == null) clips else clips.filter { it.triggerType == selectedTriggerFilter }
     }
 
     val pickFolderLauncher = rememberLauncherForActivityResult(
@@ -200,194 +216,312 @@ fun RecordingsScreen(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // Active Local / Remote Save Folder Bar
-            val activeFolderText = when (cloudConfig.localSaveDestination) {
-                LocalSaveDestination.CUSTOM_SAF_FOLDER ->
-                    cloudConfig.safFolderDisplayName.ifBlank { stringResource(R.string.recordings_selected_folder) }
-                LocalSaveDestination.PUBLIC_MOVIES -> stringResource(R.string.recordings_public_movies)
-                LocalSaveDestination.APP_INTERNAL -> stringResource(R.string.recordings_app_private)
-            }
-
-            Card(
-                colors = CardDefaults.cardColors(containerColor = SurveillanceCardBg),
-                shape = RoundedCornerShape(10.dp),
-                modifier = Modifier.fillMaxWidth().testTag("recordings_save_destination_card")
-            ) {
+            // Mode Switcher: Seamless Timeline Watching vs Clips List
+            if (clips.isNotEmpty()) {
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Row(
-                        modifier = Modifier.weight(1f).padding(end = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            Icons.Default.FolderOpen,
-                            contentDescription = null,
-                            tint = NeonCyan,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Column {
-                            Text(
-                                text = stringResource(R.string.recordings_save_to_label),
-                                color = Color.Gray,
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1
-                            )
-                            Text(
-                                text = activeFolderText,
-                                color = Color.White,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                    }
-
-                    OutlinedButton(
-                        onClick = launchFolderPicker,
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                        modifier = Modifier.testTag("recordings_choose_folder_btn")
-                    ) {
-                        Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(14.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(stringResource(R.string.recordings_choose_folder), fontSize = 11.sp, maxLines = 1, softWrap = false)
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Rolling Storage Limit Strip
-            val dayUnit = stringResource(R.string.retention_unit_day_short)
-            val hourUnit = stringResource(R.string.retention_unit_hour_short)
-            val minUnit = stringResource(R.string.retention_unit_min_short)
-            val localizedWindowLabel = buildList {
-                if (cloudConfig.retentionDays > 0) add("${cloudConfig.retentionDays}$dayUnit")
-                if (cloudConfig.retentionHours > 0) add("${cloudConfig.retentionHours}$hourUnit")
-                if (cloudConfig.retentionMinutes > 0) add("${cloudConfig.retentionMinutes}$minUnit")
-            }.joinToString(" ").ifBlank { stringResource(R.string.retention_unlimited_label) }
-            val effectiveRetentionOn = cloudConfig.retentionEnabled && cloudConfig.totalRetentionMillis() > 0L
-
-            Card(
-                colors = CardDefaults.cardColors(containerColor = SurveillanceCardBg),
-                shape = RoundedCornerShape(10.dp),
-                modifier = Modifier.fillMaxWidth().testTag("recordings_retention_card")
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                        Text(
-                            text = if (effectiveRetentionOn) {
-                                stringResource(R.string.recordings_auto_replace_last, localizedWindowLabel.uppercase())
-                            } else {
-                                stringResource(R.string.recordings_auto_replace_off)
-                            },
-                            color = if (effectiveRetentionOn) NeonCyan else NeonAmber,
-                            fontSize = 9.sp,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1
-                        )
-                        val prunedInfo = if (retentionStatus.totalPrunedSession > 0) {
-                            stringResource(R.string.recordings_replaced_suffix, retentionStatus.totalPrunedSession)
-                        } else {
-                            ""
-                        }
-                        Text(
-                            text = "${stringResource(R.string.recordings_usage_summary, retentionStatus.totalClipsKept, retentionStatus.totalUsedMb)}$prunedInfo",
-                            color = Color.White,
-                            fontSize = 11.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-
-                    OutlinedButton(
-                        onClick = { viewModel.pruneExpiredStorageNow() },
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                        modifier = Modifier.testTag("recordings_prune_now_btn")
-                    ) {
-                        Text(stringResource(R.string.recordings_clean_old), fontSize = 11.sp, maxLines = 1, softWrap = false)
-                    }
-                }
-            }
-
-            // Local Export / File Manager Status Banner
-            val saveFailedPrefix = stringResource(R.string.status_save_failed, "").trimEnd()
-            val activeExportBanner = fileManagerUnavailableMsg ?: localExportStatus
-            activeExportBanner?.let { exportMsg ->
-                Spacer(modifier = Modifier.height(8.dp))
-                val isErr = fileManagerUnavailableMsg != null ||
-                    exportMsg.startsWith("Save failed") ||
-                    exportMsg.startsWith(saveFailedPrefix)
-                val bannerColor = if (isErr) NeonAmber else NeonGreen
-                Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = bannerColor.copy(alpha = 0.15f),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, bannerColor),
-                    modifier = Modifier.fillMaxWidth().testTag("local_export_status_banner")
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (isTimelineMode) NeonCyan else SurveillanceCardBg,
+                        border = if (!isTimelineMode) androidx.compose.foundation.BorderStroke(1.dp, NeonCyan.copy(alpha = 0.4f)) else null,
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { isTimelineMode = true }
+                            .testTag("recordings_mode_timeline_btn")
                     ) {
                         Row(
-                            modifier = Modifier.weight(1f),
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.Center,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(Icons.Default.Save, contentDescription = null, tint = bannerColor, modifier = Modifier.size(15.dp))
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(exportMsg, color = bannerColor, fontSize = 12.sp, fontWeight = FontWeight.Medium)
-                        }
-                        IconButton(
-                            onClick = {
-                                fileManagerUnavailableMsg = null
-                                viewModel.clearLocalExportStatus()
-                            },
-                            modifier = Modifier.size(24.dp)
-                        ) {
-                            Icon(Icons.Default.Close, contentDescription = stringResource(R.string.common_close), tint = bannerColor, modifier = Modifier.size(14.dp))
+                            Icon(
+                                Icons.Default.Timeline,
+                                contentDescription = null,
+                                tint = if (isTimelineMode) Color.Black else NeonCyan,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = stringResource(R.string.recordings_tab_timeline),
+                                color = if (isTimelineMode) Color.Black else NeonCyan,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                softWrap = false
+                            )
                         }
                     }
-                }
-            }
 
-            // Cloud Sync Banner if active
-            syncProgress?.let { progressMsg ->
-                Spacer(modifier = Modifier.height(8.dp))
-                Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = NeonCyan.copy(alpha = 0.15f),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, NeonCyan),
-                    modifier = Modifier.fillMaxWidth().testTag("sync_progress_banner")
-                ) {
-                    Row(
-                        modifier = Modifier.padding(10.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (!isTimelineMode) NeonCyan else SurveillanceCardBg,
+                        border = if (isTimelineMode) androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.2f)) else null,
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable { isTimelineMode = false }
+                            .testTag("recordings_mode_clips_btn")
                     ) {
-                        Icon(Icons.Default.Sync, contentDescription = null, tint = NeonCyan, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(progressMsg, color = NeonCyan, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.VideoLibrary,
+                                contentDescription = null,
+                                tint = if (!isTimelineMode) Color.Black else Color.White,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = stringResource(R.string.recordings_tab_clips),
+                                color = if (!isTimelineMode) Color.Black else Color.White,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
                     }
                 }
+                Spacer(modifier = Modifier.height(10.dp))
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            if (!isTimelineMode) {
+                val activeFolderText = when (cloudConfig.localSaveDestination) {
+                    LocalSaveDestination.CUSTOM_SAF_FOLDER ->
+                        cloudConfig.safFolderDisplayName.ifBlank { stringResource(R.string.recordings_selected_folder) }
+                    LocalSaveDestination.PUBLIC_MOVIES -> stringResource(R.string.recordings_public_movies)
+                    LocalSaveDestination.APP_INTERNAL -> stringResource(R.string.recordings_app_private)
+                }
+                val dayUnit = stringResource(R.string.retention_unit_day_short)
+                val hourUnit = stringResource(R.string.retention_unit_hour_short)
+                val minUnit = stringResource(R.string.retention_unit_min_short)
+                val localizedWindowLabel = buildList {
+                    if (cloudConfig.retentionDays > 0) add("${cloudConfig.retentionDays}$dayUnit")
+                    if (cloudConfig.retentionHours > 0) add("${cloudConfig.retentionHours}$hourUnit")
+                    if (cloudConfig.retentionMinutes > 0) add("${cloudConfig.retentionMinutes}$minUnit")
+                }.joinToString(" ").ifBlank { stringResource(R.string.retention_unlimited_label) }
+                val effectiveRetentionOn = cloudConfig.retentionEnabled && cloudConfig.totalRetentionMillis() > 0L
 
-            // Clips List
-            if (clips.isEmpty()) {
+                // Single compact collapsible storage/retention bar so the clips list owns the screen
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = SurveillanceCardBg),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("recordings_save_destination_card")
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { storageControlsExpanded = !storageControlsExpanded },
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                modifier = Modifier.weight(1f).padding(end = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    Icons.Default.FolderOpen,
+                                    contentDescription = null,
+                                    tint = NeonCyan,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = stringResource(
+                                        R.string.recordings_storage_compact,
+                                        activeFolderText,
+                                        if (effectiveRetentionOn) localizedWindowLabel else stringResource(R.string.retention_unlimited_label)
+                                    ),
+                                    color = Color.White.copy(alpha = 0.9f),
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = stringResource(R.string.recordings_manage_storage),
+                                    color = NeonCyan,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Spacer(modifier = Modifier.width(2.dp))
+                                Icon(
+                                    imageVector = if (storageControlsExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                    contentDescription = stringResource(R.string.recordings_manage_storage),
+                                    tint = NeonCyan,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
+
+                        AnimatedVisibility(visible = storageControlsExpanded) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 10.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+                                val prunedInfo = if (retentionStatus.totalPrunedSession > 0) {
+                                    stringResource(R.string.recordings_replaced_suffix, retentionStatus.totalPrunedSession)
+                                } else {
+                                    ""
+                                }
+                                Text(
+                                    text = "${stringResource(R.string.recordings_usage_summary, retentionStatus.totalClipsKept, retentionStatus.totalUsedMb)}$prunedInfo",
+                                    color = Color.White.copy(alpha = 0.75f),
+                                    fontSize = 11.sp
+                                )
+                                FlowRow(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    OutlinedButton(
+                                        onClick = launchFolderPicker,
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                        modifier = Modifier.testTag("recordings_choose_folder_btn")
+                                    ) {
+                                        Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(14.dp))
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(stringResource(R.string.recordings_choose_folder), fontSize = 11.sp, maxLines = 1, softWrap = false)
+                                    }
+
+                                    OutlinedButton(
+                                        onClick = { viewModel.pruneExpiredStorageNow() },
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                        modifier = Modifier.testTag("recordings_prune_now_btn")
+                                    ) {
+                                        Text(stringResource(R.string.recordings_clean_old), fontSize = 11.sp, maxLines = 1, softWrap = false)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Slim Trigger Filter Chips
+                if (clips.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    LazyRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        val chipOptions = listOf(
+                            null to R.string.recordings_filter_all_types,
+                            ClipTriggerType.MOTION_ALERT to R.string.recordings_filter_motion,
+                            ClipTriggerType.SCHEDULED to R.string.recordings_filter_scheduled,
+                            ClipTriggerType.MANUAL to R.string.recordings_filter_manual
+                        )
+                        items(chipOptions) { (trigger, labelRes) ->
+                            val selected = selectedTriggerFilter == trigger
+                            FilterChip(
+                                selected = selected,
+                                onClick = { selectedTriggerFilter = trigger },
+                                label = {
+                                    Text(
+                                        text = stringResource(labelRes),
+                                        fontSize = 11.sp,
+                                        maxLines = 1,
+                                        softWrap = false
+                                    )
+                                },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = NeonCyan.copy(alpha = 0.2f),
+                                    selectedLabelColor = NeonCyan
+                                ),
+                                modifier = Modifier.height(30.dp)
+                            )
+                        }
+                    }
+                }
+
+                // Local Export / File Manager Status Banner
+                val saveFailedPrefix = stringResource(R.string.status_save_failed, "").trimEnd()
+                val activeExportBanner = fileManagerUnavailableMsg ?: localExportStatus
+                activeExportBanner?.let { exportMsg ->
+                    Spacer(modifier = Modifier.height(8.dp))
+                    val isErr = fileManagerUnavailableMsg != null ||
+                        exportMsg.startsWith("Save failed") ||
+                        exportMsg.startsWith(saveFailedPrefix)
+                    val bannerColor = if (isErr) NeonAmber else NeonGreen
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = bannerColor.copy(alpha = 0.15f),
+                        border = BorderStroke(1.dp, bannerColor),
+                        modifier = Modifier.fillMaxWidth().testTag("local_export_status_banner")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                modifier = Modifier.weight(1f),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Default.Save, contentDescription = null, tint = bannerColor, modifier = Modifier.size(14.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(exportMsg, color = bannerColor, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                            }
+                            IconButton(
+                                onClick = {
+                                    fileManagerUnavailableMsg = null
+                                    viewModel.clearLocalExportStatus()
+                                },
+                                modifier = Modifier.size(24.dp)
+                            ) {
+                                Icon(Icons.Default.Close, contentDescription = stringResource(R.string.common_close), tint = bannerColor, modifier = Modifier.size(14.dp))
+                            }
+                        }
+                    }
+                }
+
+                // Cloud Sync Banner if active
+                syncProgress?.let { progressMsg ->
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = NeonCyan.copy(alpha = 0.15f),
+                        border = BorderStroke(1.dp, NeonCyan),
+                        modifier = Modifier.fillMaxWidth().testTag("sync_progress_banner")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Default.Sync, contentDescription = null, tint = NeonCyan, modifier = Modifier.size(15.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(progressMsg, color = NeonCyan, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+
+            if (clips.isNotEmpty() && isTimelineMode) {
+                StorageTimelinePlayer(
+                    clips = clips,
+                    selectedLanguageTag = selectedLanguageTag,
+                    initialClipId = timelineInitialClipId,
+                    onSaveAsClip = launchSaveAsForClip,
+                    onUploadClip = { viewModel.uploadClipToCloud(it) },
+                    modifier = Modifier.fillMaxSize().weight(1f)
+                )
+            } else if (clips.isEmpty()) {
                 Box(
                     modifier = Modifier.fillMaxSize().weight(1f),
                     contentAlignment = Alignment.Center
@@ -412,21 +546,49 @@ fun RecordingsScreen(
                         )
                     }
                 }
+            } else if (filteredClips.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxSize().weight(1f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            Icons.Default.VideoLibrary,
+                            contentDescription = null,
+                            tint = Color.Gray,
+                            modifier = Modifier.size(48.dp)
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = stringResource(R.string.recordings_empty_title),
+                            color = Color.White.copy(alpha = 0.7f),
+                            fontSize = 14.sp
+                        )
+                        Text(
+                            text = stringResource(R.string.recordings_empty_subtitle),
+                            color = Color.Gray,
+                            fontSize = 11.sp
+                        )
+                    }
+                }
             } else {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize().weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    items(clips, key = { it.id }) { clip ->
+                    items(filteredClips, key = { it.id }) { clip ->
                         val triggerColor = when (clip.triggerType) {
                             ClipTriggerType.MOTION_ALERT -> NeonAmber
                             ClipTriggerType.SCHEDULED -> NeonCyan
                             ClipTriggerType.MANUAL -> NeonRed
                         }
+                        var menuExpanded by remember(clip.id) { mutableStateOf(false) }
 
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable { clipToPlay = clip }
                                 .testTag("clip_item_${clip.id}"),
                             colors = CardDefaults.cardColors(containerColor = SurveillanceCardBg),
                             shape = RoundedCornerShape(12.dp)
@@ -434,29 +596,29 @@ fun RecordingsScreen(
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(12.dp),
+                                    .padding(horizontal = 10.dp, vertical = 9.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                // Thumbnail / Play button
-                                Box(
-                                    modifier = Modifier
-                                        .size(56.dp)
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(SurveillanceSurface)
-                                        .clickable { clipToPlay = clip },
-                                    contentAlignment = Alignment.Center
+                                // Clean Play Thumbnail Box with subtle trigger accent border
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = SurveillanceSurface,
+                                    border = BorderStroke(1.dp, triggerColor.copy(alpha = 0.55f)),
+                                    modifier = Modifier.size(46.dp)
                                 ) {
-                                    Icon(
-                                        Icons.Default.PlayArrow,
-                                        contentDescription = stringResource(R.string.recordings_playback_title, clip.cameraName),
-                                        tint = NeonCyan,
-                                        modifier = Modifier.size(28.dp)
-                                    )
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Icon(
+                                            Icons.Default.PlayArrow,
+                                            contentDescription = stringResource(R.string.recordings_playback_title, clip.cameraName),
+                                            tint = NeonCyan,
+                                            modifier = Modifier.size(24.dp)
+                                        )
+                                    }
                                 }
 
-                                Spacer(modifier = Modifier.width(12.dp))
+                                Spacer(modifier = Modifier.width(10.dp))
 
-                                // Clip Details
+                                // Spacious Title + Concise Metadata + Compact Status Icons
                                 Column(modifier = Modifier.weight(1f)) {
                                     Row(
                                         verticalAlignment = Alignment.CenterVertically,
@@ -465,12 +627,15 @@ fun RecordingsScreen(
                                         Text(
                                             text = clip.cameraName,
                                             fontWeight = FontWeight.Bold,
-                                            fontSize = 13.sp,
-                                            color = Color.White
+                                            fontSize = 14.sp,
+                                            color = Color.White,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f, fill = false)
                                         )
                                         Surface(
                                             shape = RoundedCornerShape(4.dp),
-                                            color = triggerColor.copy(alpha = 0.2f)
+                                            color = triggerColor.copy(alpha = 0.16f)
                                         ) {
                                             Text(
                                                 text = when (clip.triggerType) {
@@ -481,146 +646,158 @@ fun RecordingsScreen(
                                                 color = triggerColor,
                                                 fontSize = 9.sp,
                                                 fontWeight = FontWeight.Bold,
-                                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                                                maxLines = 1,
+                                                softWrap = false,
+                                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
                                             )
                                         }
                                     }
 
-                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Spacer(modifier = Modifier.height(3.dp))
 
-                                    Text(
-                                        text = "${clip.durationSeconds}s • ${clip.fileSizeMb} MB • ${dateFormatter.format(Date(clip.timestamp))}",
-                                        fontSize = 11.sp,
-                                        fontFamily = FontFamily.Monospace,
-                                        color = Color.Gray
-                                    )
-
-                                    Spacer(modifier = Modifier.height(6.dp))
-
-                                    // Device Save + Save As + Cloud Sync Actions (FlowRow prevents wrapping overflow)
-                                    FlowRow(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                                     ) {
-                                        TextButton(
-                                            onClick = { viewModel.exportClipToConfiguredFolder(clip) },
-                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                                            modifier = Modifier
-                                                .defaultMinSize(minWidth = 1.dp, minHeight = 34.dp)
-                                                .testTag("save_clip_device_${clip.id}")
-                                        ) {
+                                        Text(
+                                            text = "${clip.durationSeconds}s • ${clip.fileSizeMb} MB • ${dateFormatter.format(Date(clip.timestamp))}",
+                                            fontSize = 11.sp,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = Color.Gray,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f, fill = false)
+                                        )
+                                        if (clip.localExportUri != null) {
                                             Icon(
-                                                imageVector = if (clip.localExportUri != null) Icons.Default.Check else Icons.Default.Save,
-                                                contentDescription = null,
-                                                tint = if (clip.localExportUri != null) NeonGreen else NeonCyan,
+                                                imageVector = Icons.Default.Check,
+                                                contentDescription = stringResource(R.string.recordings_saved_btn),
+                                                tint = NeonGreen,
                                                 modifier = Modifier.size(13.dp)
                                             )
-                                            Spacer(modifier = Modifier.width(4.dp))
-                                            Text(
-                                                text = if (clip.localExportUri != null) {
-                                                    stringResource(R.string.recordings_saved_btn)
-                                                } else {
-                                                    stringResource(R.string.recordings_save_btn)
-                                                },
-                                                color = if (clip.localExportUri != null) NeonGreen else NeonCyan,
-                                                fontSize = 11.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                maxLines = 1,
-                                                softWrap = false
-                                            )
                                         }
-
-                                        TextButton(
-                                            onClick = { launchSaveAsForClip(clip) },
-                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                                            modifier = Modifier
-                                                .defaultMinSize(minWidth = 1.dp, minHeight = 34.dp)
-                                                .testTag("save_as_clip_${clip.id}")
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Default.FolderOpen,
-                                                contentDescription = null,
-                                                tint = Color.White,
-                                                modifier = Modifier.size(13.dp)
-                                            )
-                                            Spacer(modifier = Modifier.width(4.dp))
-                                            Text(
-                                                text = stringResource(R.string.recordings_save_as_btn),
-                                                color = Color.White,
-                                                fontSize = 11.sp,
-                                                fontWeight = FontWeight.Medium,
-                                                maxLines = 1,
-                                                softWrap = false
-                                            )
-                                        }
-
                                         when (clip.cloudSyncStatus) {
-                                            CloudSyncStatus.SYNCED -> {
-                                                Row(
-                                                    verticalAlignment = Alignment.CenterVertically,
-                                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp)
-                                                ) {
-                                                    Icon(Icons.Default.CloudDone, contentDescription = null, tint = NeonGreen, modifier = Modifier.size(13.dp))
-                                                    Spacer(modifier = Modifier.width(4.dp))
-                                                    Text(stringResource(R.string.recordings_cloud_synced), color = NeonGreen, fontSize = 10.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
-                                                }
-                                            }
-                                            CloudSyncStatus.UPLOADING -> {
-                                                Row(
-                                                    verticalAlignment = Alignment.CenterVertically,
-                                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp)
-                                                ) {
-                                                    Icon(Icons.Default.CloudSync, contentDescription = null, tint = NeonAmber, modifier = Modifier.size(13.dp))
-                                                    Spacer(modifier = Modifier.width(4.dp))
-                                                    Text(stringResource(R.string.recordings_uploading), color = NeonAmber, fontSize = 10.sp, maxLines = 1, softWrap = false)
-                                                }
-                                            }
-                                            CloudSyncStatus.PENDING_UPLOAD -> {
-                                                Row(
-                                                    verticalAlignment = Alignment.CenterVertically,
-                                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp)
-                                                ) {
-                                                    Icon(Icons.Default.CloudUpload, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(13.dp))
-                                                    Spacer(modifier = Modifier.width(4.dp))
-                                                    Text(stringResource(R.string.recordings_pending_upload), color = Color.Gray, fontSize = 10.sp, maxLines = 1, softWrap = false)
-                                                }
-                                            }
-                                            CloudSyncStatus.LOCAL_ONLY -> {
-                                                TextButton(
-                                                    onClick = { viewModel.uploadClipToCloud(clip) },
-                                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                                                    modifier = Modifier.defaultMinSize(minWidth = 1.dp, minHeight = 34.dp)
-                                                ) {
-                                                    Text(
-                                                        text = stringResource(R.string.recordings_cloud_sync_btn),
-                                                        color = NeonCyan,
-                                                        fontSize = 11.sp,
-                                                        fontWeight = FontWeight.Bold,
-                                                        maxLines = 1,
-                                                        softWrap = false
-                                                    )
-                                                }
-                                            }
-                                            CloudSyncStatus.FAILED -> {
-                                                TextButton(
-                                                    onClick = { viewModel.uploadClipToCloud(clip) },
-                                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                                                    modifier = Modifier.defaultMinSize(minWidth = 1.dp, minHeight = 34.dp)
-                                                ) {
-                                                    Text(stringResource(R.string.recordings_retry_cloud), color = NeonRed, fontSize = 11.sp, maxLines = 1, softWrap = false)
-                                                }
-                                            }
+                                            CloudSyncStatus.SYNCED -> Icon(
+                                                imageVector = Icons.Default.CloudDone,
+                                                contentDescription = stringResource(R.string.recordings_cloud_synced),
+                                                tint = NeonGreen,
+                                                modifier = Modifier.size(13.dp)
+                                            )
+                                            CloudSyncStatus.UPLOADING, CloudSyncStatus.PENDING_UPLOAD -> Icon(
+                                                imageVector = Icons.Default.CloudSync,
+                                                contentDescription = stringResource(R.string.recordings_uploading),
+                                                tint = NeonAmber,
+                                                modifier = Modifier.size(13.dp)
+                                            )
+                                            CloudSyncStatus.FAILED -> Icon(
+                                                imageVector = Icons.Default.CloudUpload,
+                                                contentDescription = stringResource(R.string.recordings_retry_cloud),
+                                                tint = NeonRed,
+                                                modifier = Modifier.size(13.dp)
+                                            )
+                                            CloudSyncStatus.LOCAL_ONLY -> Unit
                                         }
                                     }
                                 }
 
-                                // Delete
-                                IconButton(
-                                    onClick = { viewModel.deleteClip(clip.id) },
-                                    modifier = Modifier.size(32.dp).testTag("delete_clip_${clip.id}")
-                                ) {
-                                    Icon(Icons.Default.Delete, contentDescription = stringResource(R.string.recordings_delete_clip_desc), tint = Color.Gray, modifier = Modifier.size(16.dp))
+                                // Single Overflow Menu replacing 4 noisy per-row buttons
+                                Box {
+                                    IconButton(
+                                        onClick = { menuExpanded = true },
+                                        modifier = Modifier.testTag("clip_more_btn_${clip.id}")
+                                    ) {
+                                        Icon(
+                                            Icons.Default.MoreVert,
+                                            contentDescription = stringResource(R.string.recordings_more_actions),
+                                            tint = Color.White.copy(alpha = 0.8f)
+                                        )
+                                    }
+
+                                    DropdownMenu(
+                                        expanded = menuExpanded,
+                                        onDismissRequest = { menuExpanded = false },
+                                        modifier = Modifier.background(SurveillanceSurface)
+                                    ) {
+                                        DropdownMenuItem(
+                                            text = { Text(stringResource(R.string.recordings_open_timeline_item), color = NeonCyan) },
+                                            leadingIcon = { Icon(Icons.Default.Timeline, contentDescription = null, tint = NeonCyan) },
+                                            onClick = {
+                                                menuExpanded = false
+                                                timelineInitialClipId = clip.id
+                                                isTimelineMode = true
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text(stringResource(R.string.recordings_play_clip_item), color = Color.White) },
+                                            leadingIcon = { Icon(Icons.Default.PlayArrow, contentDescription = null, tint = Color.White) },
+                                            onClick = {
+                                                menuExpanded = false
+                                                clipToPlay = clip
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = {
+                                                Text(
+                                                    text = if (clip.localExportUri != null) {
+                                                        stringResource(R.string.recordings_saved_btn)
+                                                    } else {
+                                                        stringResource(R.string.recordings_save_btn)
+                                                    },
+                                                    color = if (clip.localExportUri != null) NeonGreen else Color.White
+                                                )
+                                            },
+                                            leadingIcon = {
+                                                Icon(
+                                                    if (clip.localExportUri != null) Icons.Default.Check else Icons.Default.Save,
+                                                    contentDescription = null,
+                                                    tint = if (clip.localExportUri != null) NeonGreen else NeonCyan
+                                                )
+                                            },
+                                            onClick = {
+                                                menuExpanded = false
+                                                viewModel.exportClipToConfiguredFolder(clip)
+                                            },
+                                            modifier = Modifier.testTag("save_clip_device_${clip.id}")
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text(stringResource(R.string.recordings_save_as_btn), color = Color.White) },
+                                            leadingIcon = { Icon(Icons.Default.FolderOpen, contentDescription = null, tint = Color.White) },
+                                            onClick = {
+                                                menuExpanded = false
+                                                launchSaveAsForClip(clip)
+                                            },
+                                            modifier = Modifier.testTag("save_as_clip_${clip.id}")
+                                        )
+                                        if (clip.cloudSyncStatus != CloudSyncStatus.SYNCED) {
+                                            DropdownMenuItem(
+                                                text = {
+                                                    Text(
+                                                        text = if (clip.cloudSyncStatus == CloudSyncStatus.FAILED) {
+                                                            stringResource(R.string.recordings_retry_cloud)
+                                                        } else {
+                                                            stringResource(R.string.recordings_sync_to_cloud)
+                                                        },
+                                                        color = NeonCyan
+                                                    )
+                                                },
+                                                leadingIcon = { Icon(Icons.Default.CloudUpload, contentDescription = null, tint = NeonCyan) },
+                                                onClick = {
+                                                    menuExpanded = false
+                                                    viewModel.uploadClipToCloud(clip)
+                                                }
+                                            )
+                                        }
+                                        HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+                                        DropdownMenuItem(
+                                            text = { Text(stringResource(R.string.recordings_delete_clip_desc), color = NeonRed) },
+                                            leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = NeonRed) },
+                                            onClick = {
+                                                menuExpanded = false
+                                                viewModel.deleteClip(clip.id)
+                                            },
+                                            modifier = Modifier.testTag("delete_clip_${clip.id}")
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -690,6 +867,16 @@ fun RecordingsScreen(
                             horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
                             verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
+                            TextButton(
+                                onClick = {
+                                    timelineInitialClipId = clip.id
+                                    isTimelineMode = true
+                                    clipToPlay = null
+                                },
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                Text(stringResource(R.string.recordings_watch_timeline), color = NeonAmber, maxLines = 1, softWrap = false)
+                            }
                             TextButton(
                                 onClick = {
                                     launchSaveAsForClip(clip)

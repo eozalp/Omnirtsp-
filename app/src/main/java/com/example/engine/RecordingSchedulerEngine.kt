@@ -43,6 +43,7 @@ class RecordingSchedulerEngine(
 ) {
     private val scope = CoroutineScope(Dispatchers.IO + Job())
     private var schedulerLoopJob: Job? = null
+    private val cameraStreamRecorder = CameraStreamRecorder(context, streamManager)
 
     private val activeSessions = ConcurrentHashMap<String, ActiveRecordingSession>()
 
@@ -107,7 +108,7 @@ class RecordingSchedulerEngine(
         }
     }
 
-    private fun writeValidVideoPayload(file: File) {
+    private fun copyDemoVideoPayload(file: File) {
         try {
             file.parentFile?.mkdirs()
             if (file.exists() && file.length() >= 100 * 1024L) {
@@ -138,19 +139,14 @@ class RecordingSchedulerEngine(
     private fun repairExistingEmptyRecordings() {
         scope.launch(Dispatchers.IO) {
             try {
-                val dir = ensureRecordingsDirectory()
-                val files = dir.listFiles() ?: return@launch
-                for (file in files) {
-                    if (file.isFile && file.name.endsWith(".mp4") && file.length() < 100 * 1024L) {
-                        writeValidVideoPayload(file)
-                    }
-                }
                 val clips = database.recordedClipDao().getAllClipsSync()
                 for (clip in clips) {
                     val file = File(clip.filePath)
-                    if (file.exists() && file.length() > 0 && clip.fileSizeMb < 0.5f) {
+                    if (file.exists() && file.length() > 0) {
                         val realMb = (Math.round((file.length().toFloat() / (1024f * 1024f)) * 100f) / 100f).coerceAtLeast(0.1f)
-                        database.recordedClipDao().updateClip(clip.copy(fileSizeMb = realMb))
+                        if (clip.fileSizeMb != realMb) {
+                            database.recordedClipDao().updateClip(clip.copy(fileSizeMb = realMb))
+                        }
                     }
                 }
             } catch (_: Exception) {}
@@ -165,7 +161,13 @@ class RecordingSchedulerEngine(
         val clipId = UUID.randomUUID().toString()
         val dir = ensureRecordingsDirectory()
         val clipFile = File(dir, "clip_${camera.name.replace(" ", "_")}_${System.currentTimeMillis()}.mp4")
-        writeValidVideoPayload(clipFile)
+
+        val isDemo = streamManager.isDemoCamera(camera)
+        if (isDemo) {
+            copyDemoVideoPayload(clipFile)
+        } else {
+            cameraStreamRecorder.startRecording(clipId, camera, clipFile, scope)
+        }
 
         val session = ActiveRecordingSession(
             clipId = clipId,
@@ -188,26 +190,38 @@ class RecordingSchedulerEngine(
         streamManager.updateRecordingState(session.cameraId, false)
 
         val file = File(session.filePath)
-        writeValidVideoPayload(file)
+        val camera = session.cameraSnapshot
+        val isDemo = camera != null && streamManager.isDemoCamera(camera)
+        val detachedRecorder = if (!isDemo) {
+            cameraStreamRecorder.detachRecorder(session.cameraId, expectedClipId = session.clipId)
+        } else {
+            null
+        }
 
         val endTimestamp = System.currentTimeMillis()
         val durationSeconds = ((endTimestamp - session.startTimestamp) / 1000).toInt().coerceAtLeast(1)
-        val actualSizeMb = (file.length().toFloat() / (1024f * 1024f)).coerceAtLeast(0.1f)
-
-        val clip = RecordedClipEntity(
-            id = session.clipId,
-            cameraId = session.cameraId,
-            cameraName = session.cameraName,
-            timestamp = session.startTimestamp,
-            durationSeconds = durationSeconds,
-            fileSizeMb = (Math.round(actualSizeMb * 100f) / 100f),
-            triggerType = session.triggerType,
-            motionScore = motionScore,
-            filePath = session.filePath,
-            cloudSyncStatus = CloudSyncStatus.LOCAL_ONLY
-        )
 
         scope.launch {
+            if (detachedRecorder != null) {
+                cameraStreamRecorder.finalizeRecorder(detachedRecorder)
+            } else if (isDemo && (!file.exists() || file.length() == 0L)) {
+                copyDemoVideoPayload(file)
+            }
+
+            val actualSizeMb = (file.length().toFloat() / (1024f * 1024f)).coerceAtLeast(0.1f)
+            val clip = RecordedClipEntity(
+                id = session.clipId,
+                cameraId = session.cameraId,
+                cameraName = session.cameraName,
+                timestamp = session.startTimestamp,
+                durationSeconds = durationSeconds,
+                fileSizeMb = (Math.round(actualSizeMb * 100f) / 100f),
+                triggerType = session.triggerType,
+                motionScore = motionScore,
+                filePath = session.filePath,
+                cloudSyncStatus = CloudSyncStatus.LOCAL_ONLY
+            )
+
             val config = database.cloudConfigDao().getCloudConfigSync()
             var exportedUri: String? = null
             if (config?.autoSaveToDeviceFolder != false) {

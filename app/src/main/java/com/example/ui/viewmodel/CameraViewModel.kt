@@ -18,6 +18,7 @@ import com.example.data.model.StreamQuality
 import android.net.Uri
 import android.provider.Settings
 import com.example.data.model.LocalSaveDestination
+import com.example.engine.AndroidRemoteHubBackend
 import com.example.engine.CameraDiscoveryEngine
 import com.example.engine.CloudStorageManager
 import com.example.engine.DeviceStorageExporter
@@ -27,6 +28,9 @@ import com.example.engine.MotionDetectionEngine
 import com.example.engine.OnvifPtzClient
 import com.example.engine.PtzCommandState
 import com.example.engine.RecordingSchedulerEngine
+import com.example.engine.RemoteHubPreferences
+import com.example.engine.RemoteHubServer
+import com.example.engine.RemoteHubState
 import com.example.engine.RetentionStatus
 import com.example.engine.RtspStreamManager
 import com.example.engine.StorageRetentionEngine
@@ -169,24 +173,59 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private val _localExportStatus = MutableStateFlow<String?>(null)
     val localExportStatus: StateFlow<String?> = _localExportStatus.asStateFlow()
 
+    val remoteHubServer = RemoteHubServer(
+        backend = AndroidRemoteHubBackend(
+            context = application,
+            streamManager = streamManager,
+            onvifPtzClient = onvifPtzClient,
+            recordingSchedulerEngine = recordingSchedulerEngine,
+            motionDetectionEngine = motionDetectionEngine,
+            camerasProvider = { cameras.value },
+            clipsProvider = { clips.value },
+            alertsProvider = { alerts.value },
+            ptzActionDispatcher = { cam, action, pan, tilt, zoom, presetToken ->
+                when (action.lowercase()) {
+                    "move" -> startCameraPtzMove(cam, pan, tilt, zoom, "Remote PTZ")
+                    "home" -> gotoCameraPtzHome(cam)
+                    "preset" -> if (presetToken.isNotBlank()) gotoCameraPtzPreset(cam, presetToken)
+                    "probe" -> probeCameraPtz(cam, forceRefresh = true)
+                    else -> stopCameraPtz(cam)
+                }
+            }
+        )
+    )
+    val hubServerState: StateFlow<RemoteHubState> = remoteHubServer.state
+
     private val rotationPersistJobs = mutableMapOf<String, Job>()
 
     init {
         AppLocaleManager.init(application)
         FloatingOverlayStateHolder.initAudioSettings(application)
+        initRemoteHubServer(application)
         seedInitialSurveillanceData()
         observeFloatingRotationPersistence()
         observeKeepAliveService()
         scanForNetworkCameras()
     }
 
+    private fun initRemoteHubServer(app: Application) {
+        val cfg = RemoteHubPreferences.load(app)
+        remoteHubServer.configure(
+            enabled = cfg.enabled,
+            port = cfg.port,
+            accessToken = cfg.accessToken,
+            allowRemoteControl = cfg.allowRemoteControl
+        )
+    }
+
     private fun observeKeepAliveService() {
         viewModelScope.launch {
             combine(
                 database.cloudConfigDao().getCloudConfig(),
-                recordingSchedulerEngine.currentlyRecordingCameras
-            ) { cfg, activeRecs ->
-                (cfg?.keepAppAlive != false) || activeRecs.isNotEmpty()
+                recordingSchedulerEngine.currentlyRecordingCameras,
+                hubServerState
+            ) { cfg, activeRecs, hubState ->
+                (cfg?.keepAppAlive != false) || activeRecs.isNotEmpty() || hubState.isEnabled
             }.collect { shouldKeepAlive ->
                 val app = getApplication<Application>()
                 if (shouldKeepAlive) {
@@ -900,6 +939,71 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         cloudStorageManager.uploadClipToCloud(clip, forced = true)
     }
 
+    fun toggleHubServer(enabled: Boolean) {
+        val app = getApplication<Application>()
+        val cur = hubServerState.value
+        val nextToken = cur.accessToken.ifBlank { RemoteHubServer.generateSecureToken(12) }
+        val cfg = RemoteHubPreferences.HubConfig(
+            enabled = enabled,
+            port = cur.port,
+            accessToken = nextToken,
+            allowRemoteControl = cur.allowRemoteControl
+        )
+        RemoteHubPreferences.save(app, cfg)
+        remoteHubServer.configure(
+            enabled = cfg.enabled,
+            port = cfg.port,
+            accessToken = cfg.accessToken,
+            allowRemoteControl = cfg.allowRemoteControl
+        )
+        val after = hubServerState.value
+        _localExportStatus.value = when {
+            after.lastError != null -> AppLocaleManager.getString(app, R.string.hub_error_prefix, after.lastError)
+            enabled -> AppLocaleManager.getString(app, R.string.hub_started_status, after.port)
+            else -> AppLocaleManager.getString(app, R.string.hub_stopped_status)
+        }
+    }
+
+    fun updateHubServerConfig(port: Int, accessToken: String, allowRemoteControl: Boolean) {
+        val app = getApplication<Application>()
+        val cur = hubServerState.value
+        val safePort = RemoteHubServer.normalizePort(port)
+        val safeToken = accessToken.trim().ifBlank { RemoteHubServer.generateSecureToken(12) }
+        val cfg = RemoteHubPreferences.HubConfig(
+            enabled = cur.isEnabled,
+            port = safePort,
+            accessToken = safeToken,
+            allowRemoteControl = allowRemoteControl
+        )
+        RemoteHubPreferences.save(app, cfg)
+        remoteHubServer.configure(
+            enabled = cfg.enabled,
+            port = cfg.port,
+            accessToken = cfg.accessToken,
+            allowRemoteControl = cfg.allowRemoteControl
+        )
+        val after = hubServerState.value
+        _localExportStatus.value = if (after.lastError != null) {
+            AppLocaleManager.getString(app, R.string.hub_error_prefix, after.lastError)
+        } else {
+            AppLocaleManager.getString(app, R.string.hub_settings_saved, after.port)
+        }
+    }
+
+    fun setRemoteHubControlEnabled(allow: Boolean) {
+        val cur = hubServerState.value
+        updateHubServerConfig(cur.port, cur.accessToken, allow)
+    }
+
+    fun regenerateHubToken() {
+        val cur = hubServerState.value
+        updateHubServerConfig(cur.port, RemoteHubServer.generateSecureToken(12), cur.allowRemoteControl)
+    }
+
+    fun refreshHubNetworkEndpoints() {
+        remoteHubServer.refreshNetworkAndHealth()
+    }
+
     fun deleteClip(id: String) {
         viewModelScope.launch {
             database.recordedClipDao().deleteClipById(id)
@@ -908,6 +1012,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     override fun onCleared() {
         super.onCleared()
+        remoteHubServer.release()
         if (!FloatingOverlayStateHolder.isSystemOverlayActive.value) {
             streamManager.releaseAll()
         }

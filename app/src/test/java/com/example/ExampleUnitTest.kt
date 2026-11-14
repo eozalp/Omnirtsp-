@@ -15,10 +15,23 @@ import com.example.data.model.StreamQuality
 import androidx.media3.common.Player
 import com.example.engine.CameraDiscoveryEngine
 import com.example.engine.DeviceStorageExporter
+import com.example.engine.EndpointKind
+import com.example.engine.HubAlertSnapshot
+import com.example.engine.HubCameraSnapshot
+import com.example.engine.HubClipSnapshot
+import com.example.engine.HubSystemHealth
 import com.example.engine.OnvifPtzClient
+import com.example.engine.RemoteHubBackend
+import com.example.engine.RemoteHubServer
 import com.example.engine.RtspStreamManager
 import com.example.engine.StorageRetentionEngine
+import com.example.engine.StorageTimelineEngine
 import com.example.i18n.AppLocaleManager
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.File
 import com.example.service.FloatingOverlayStateHolder
 import com.example.ui.components.ResizeCorner
 import com.example.ui.components.baseWidthFromActualWidthDp
@@ -755,6 +768,291 @@ class ExampleUnitTest {
       assertEquals('p'.code.toByte(), bytes[7])
     } finally {
       tempFile.delete()
+    }
+  }
+
+  @Test
+  fun storageTimelineEngine_buildsChronologicalChunksAndResolvesScrubTargets() {
+    val baseTime = 1_760_000_000_000L
+    // Out-of-order DB list to verify chronological ascending stitching
+    val clips = listOf(
+      RecordedClipEntity(
+        id = "chunk_3_gap",
+        cameraId = "cam_a",
+        cameraName = "Tapo C520WS",
+        timestamp = baseTime + 660_000L, // 60s gap after chunk_2 ended
+        durationSeconds = 300,
+        fileSizeMb = 12.4f,
+        triggerType = ClipTriggerType.MOTION_ALERT,
+        filePath = "/tmp/chunk_3.mp4"
+      ),
+      RecordedClipEntity(
+        id = "chunk_2",
+        cameraId = "cam_a",
+        cameraName = "Tapo C520WS",
+        timestamp = baseTime + 300_000L, // starts cleanly right as chunk_1 (300s) ends
+        durationSeconds = 300,
+        fileSizeMb = 11.8f,
+        triggerType = ClipTriggerType.SCHEDULED,
+        filePath = "/tmp/chunk_2.mp4"
+      ),
+      RecordedClipEntity(
+        id = "chunk_other_cam",
+        cameraId = "cam_b",
+        cameraName = "Garage RTSP",
+        timestamp = baseTime + 100_000L,
+        durationSeconds = 120,
+        fileSizeMb = 5.1f,
+        triggerType = ClipTriggerType.MANUAL,
+        filePath = "/tmp/chunk_b.mp4"
+      ),
+      RecordedClipEntity(
+        id = "chunk_1",
+        cameraId = "cam_a",
+        cameraName = "Tapo C520WS",
+        timestamp = baseTime,
+        durationSeconds = 300,
+        fileSizeMb = 12.0f,
+        triggerType = ClipTriggerType.SCHEDULED,
+        filePath = "/tmp/chunk_1.mp4"
+      )
+    )
+
+    val camATimeline = StorageTimelineEngine.buildTimeline(
+      clips = clips,
+      cameraIdFilter = "cam_a",
+      requirePlayable = false
+    )
+    assertEquals(3, camATimeline.segments.size)
+    assertEquals("chunk_1", camATimeline.segments[0].clip.id)
+    assertEquals("chunk_2", camATimeline.segments[1].clip.id)
+    assertEquals("chunk_3_gap", camATimeline.segments[2].clip.id)
+
+    // Contiguous chunk_1 -> chunk_2 has 0ms gap, chunk_2 -> chunk_3 has 60s gap
+    assertEquals(0L, camATimeline.segments[1].gapBeforeMs)
+    assertEquals(60_000L, camATimeline.segments[2].gapBeforeMs)
+    assertEquals(900_000L, camATimeline.totalFootageMs)
+
+    // Scrubbing to 50% (450s of 900s) lands inside chunk_2 at 150s
+    val midTarget = StorageTimelineEngine.resolveSeekTarget(camATimeline, 0.5f)!!
+    assertEquals(1, midTarget.segmentIndex)
+    assertEquals(150_000L, midTarget.positionInClipMs)
+
+    // Overall progress inverse maps back cleanly to 0.5
+    val progress = StorageTimelineEngine.computeOverallProgress(
+      timeline = camATimeline,
+      currentIndex = midTarget.segmentIndex,
+      positionInClipMs = midTarget.positionInClipMs
+    )
+    assertEquals(0.5f, progress, 0.001f)
+
+    // Wall-clock time reflects chunk_2 start + 150s
+    assertEquals(
+      baseTime + 450_000L,
+      StorageTimelineEngine.resolveWallClockAt(camATimeline.segments[1], 150_000L)
+    )
+    assertEquals("05:00", StorageTimelineEngine.formatDurationHms(300_000L))
+    assertEquals("1:05:00", StorageTimelineEngine.formatDurationHms(3_900_000L))
+  }
+
+  @Test
+  fun remoteHubServer_tailscaleIpv4AndInterfaceClassification() {
+    // Valid Tailscale CGNAT 100.64.0.0/10 addresses (second octet 64..127)
+    assertTrue(RemoteHubServer.isTailscaleIpv4("100.64.0.1"))
+    assertTrue(RemoteHubServer.isTailscaleIpv4("100.101.42.19"))
+    assertTrue(RemoteHubServer.isTailscaleIpv4("100.127.255.254"))
+
+    // Outside 100.64.0.0/10
+    assertFalse(RemoteHubServer.isTailscaleIpv4("100.63.255.254"))
+    assertFalse(RemoteHubServer.isTailscaleIpv4("100.128.0.1"))
+    assertFalse(RemoteHubServer.isTailscaleIpv4("192.168.1.40"))
+    assertFalse(RemoteHubServer.isTailscaleIpv4("not-an-ip"))
+
+    assertEquals(
+      EndpointKind.TAILSCALE,
+      RemoteHubServer.classifyNetworkInterface("tun0", "100.88.12.3")
+    )
+    assertEquals(
+      EndpointKind.TAILSCALE,
+      RemoteHubServer.classifyNetworkInterface("tailscale0", "100.100.100.100")
+    )
+    assertEquals(
+      EndpointKind.WIFI_LAN,
+      RemoteHubServer.classifyNetworkInterface("wlan0", "192.168.1.50")
+    )
+    assertEquals(
+      EndpointKind.OTHER,
+      RemoteHubServer.classifyNetworkInterface("rmnet_data0", "172.20.1.5")
+    )
+  }
+
+  @Test
+  fun remoteHubServer_httpRangeParsing_handlesBoundsAndSuffixes() {
+    val total = 1000L
+
+    val firstHalf = RemoteHubServer.parseHttpRange("bytes=0-499", total)!!
+    assertEquals(0L, firstHalf.start)
+    assertEquals(499L, firstHalf.end)
+    assertEquals(500L, firstHalf.contentLength)
+
+    val openEnd = RemoteHubServer.parseHttpRange("bytes=750-", total)!!
+    assertEquals(750L, openEnd.start)
+    assertEquals(999L, openEnd.end)
+    assertEquals(250L, openEnd.contentLength)
+
+    val clampedEnd = RemoteHubServer.parseHttpRange("bytes=900-5000", total)!!
+    assertEquals(900L, clampedEnd.start)
+    assertEquals(999L, clampedEnd.end)
+    assertEquals(100L, clampedEnd.contentLength)
+
+    val suffix = RemoteHubServer.parseHttpRange("bytes=-128", total)!!
+    assertEquals(872L, suffix.start)
+    assertEquals(999L, suffix.end)
+    assertEquals(128L, suffix.contentLength)
+
+    // Invalid ranges return null (triggers 416)
+    assertNull(RemoteHubServer.parseHttpRange("bytes=1000-1100", total))
+    assertNull(RemoteHubServer.parseHttpRange("bytes=500-200", total))
+    assertNull(RemoteHubServer.parseHttpRange("items=0-10", total))
+  }
+
+  @Test
+  fun remoteHubServer_liveSocketAuthPtzAndRangeStreaming() {
+    val tempClip = File.createTempFile("hub_test_clip", ".mp4").apply {
+      deleteOnExit()
+      writeBytes("0123456789ABCDEF".toByteArray())
+    }
+    var lastPtzCall: String? = null
+
+    val fakeBackend = object : RemoteHubBackend {
+      override fun getSystemHealth() = HubSystemHealth("SparePixel4", batteryPercent = 96, isPluggedIn = true, freeStorageMb = 8192L)
+      override fun getCameras() = listOf(
+        HubCameraSnapshot(
+          id = "cam_1",
+          name = "Porch \"Main\"",
+          location = "Front",
+          onvifPort = 2020,
+          rotationDegrees = 0f,
+          isMotionDetectionEnabled = true,
+          isLive = true,
+          isReconnecting = false,
+          fps = 25,
+          bitrateKbps = 2048,
+          resolution = "1920x1080",
+          codec = "H264",
+          isRecording = false
+        )
+      )
+      override fun getClips(cameraId: String?) = listOf(
+        HubClipSnapshot("clip_1", "cam_1", "Porch", 1731333600000L, 15, 4.5f, "MANUAL", tempClip.absolutePath)
+      )
+      override fun getClipFile(clipId: String) = if (clipId == "clip_1") tempClip else null
+      override fun getAlerts(limit: Int) = emptyList<HubAlertSnapshot>()
+      override fun captureCameraJpeg(cameraId: String) = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xD9.toByte())
+      override fun performPtz(cameraId: String, action: String, pan: Float, tilt: Float, zoom: Float, presetToken: String): Pair<Boolean, String> {
+        lastPtzCall = "$cameraId:$action:$pan"
+        return true to "Moved"
+      }
+      override fun startRecording(cameraId: String) = true
+      override fun stopRecording(cameraId: String) = true
+      override fun triggerSnapshot(cameraId: String) = true
+    }
+
+    val server = RemoteHubServer(fakeBackend)
+    val token = "TestHubSecret42"
+    val http = OkHttpClient()
+
+    try {
+      server.start(port = 0, accessToken = token, allowRemoteControl = true)
+      val port = server.listeningPort
+      assertTrue(port > 0)
+      assertTrue(server.state.value.isRunning)
+
+      // 1. Public /health works without token
+      http.newCall(Request.Builder().url("http://127.0.0.1:$port/health").build()).execute().use { resp ->
+        assertEquals(200, resp.code)
+        val body = resp.body!!.string()
+        assertTrue(body.contains("\"status\":\"ok\""))
+      }
+
+      // 2. Protected /api/cameras rejects missing/wrong token
+      http.newCall(Request.Builder().url("http://127.0.0.1:$port/api/cameras").build()).execute().use { resp ->
+        assertEquals(401, resp.code)
+      }
+
+      // 3. Protected /api/cameras succeeds with Bearer token and escapes quotes properly
+      http.newCall(
+        Request.Builder()
+          .url("http://127.0.0.1:$port/api/cameras")
+          .addHeader("Authorization", "Bearer $token")
+          .build()
+      ).execute().use { resp ->
+        assertEquals(200, resp.code)
+        val body = resp.body!!.string()
+        assertTrue(body.contains("Porch \\\"Main\\\""))
+        assertTrue(body.contains("\"fps\":25"))
+      }
+
+      // 4. POST /api/login issues session cookie that unlocks Web Console
+      val loginBody = """{"token":"$token"}""".toRequestBody("application/json".toMediaType())
+      var sessionCookie = ""
+      http.newCall(Request.Builder().url("http://127.0.0.1:$port/api/login").post(loginBody).build()).execute().use { resp ->
+        assertEquals(200, resp.code)
+        val setCookie = resp.header("Set-Cookie") ?: ""
+        assertTrue(setCookie.contains("omniview_hub_session="))
+        sessionCookie = setCookie.substringBefore(";")
+      }
+
+      http.newCall(
+        Request.Builder()
+          .url("http://127.0.0.1:$port/")
+          .addHeader("Cookie", sessionCookie)
+          .build()
+      ).execute().use { resp ->
+        assertEquals(200, resp.code)
+        val html = resp.body!!.string()
+        assertTrue(html.contains("OmniView Remote Hub"))
+      }
+
+      // 5. HTTP 206 Partial Content byte-range streaming for /api/clips/{id}/stream
+      http.newCall(
+        Request.Builder()
+          .url("http://127.0.0.1:$port/api/clips/clip_1/stream")
+          .addHeader("Cookie", sessionCookie)
+          .addHeader("Range", "bytes=2-5")
+          .build()
+      ).execute().use { resp ->
+        assertEquals(206, resp.code)
+        assertEquals("bytes 2-5/16", resp.header("Content-Range"))
+        assertEquals("2345", resp.body!!.string())
+      }
+
+      // 6. PTZ control works when allowRemoteControl=true and returns 403 when disabled
+      val ptzPayload = """{"action":"move","pan":0.5,"tilt":0,"zoom":0}""".toRequestBody("application/json".toMediaType())
+      http.newCall(
+        Request.Builder()
+          .url("http://127.0.0.1:$port/api/cameras/cam_1/ptz")
+          .addHeader("X-Hub-Token", token)
+          .post(ptzPayload)
+          .build()
+      ).execute().use { resp ->
+        assertEquals(200, resp.code)
+        assertEquals("cam_1:move:0.5", lastPtzCall)
+      }
+
+      server.configure(enabled = true, port = port, accessToken = token, allowRemoteControl = false)
+      val ptzBlockedPayload = """{"action":"move","pan":0.5,"tilt":0,"zoom":0}""".toRequestBody("application/json".toMediaType())
+      http.newCall(
+        Request.Builder()
+          .url("http://127.0.0.1:$port/api/cameras/cam_1/ptz")
+          .addHeader("X-Hub-Token", token)
+          .post(ptzBlockedPayload)
+          .build()
+      ).execute().use { resp ->
+        assertEquals(403, resp.code)
+      }
+    } finally {
+      server.release()
     }
   }
 }

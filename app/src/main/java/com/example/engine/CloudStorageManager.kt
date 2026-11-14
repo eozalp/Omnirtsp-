@@ -74,19 +74,8 @@ class CloudStorageManager(
             )
 
             try {
-                // Ensure recording file exists with valid surveillance payload
-                if (!file.exists() || file.length() < 100 * 1024L) {
-                    file.parentFile?.mkdirs()
-                    try {
-                        context.resources.openRawResource(R.raw.surveillance_feed).use { input ->
-                            file.outputStream().use { out ->
-                                input.copyTo(out)
-                                out.flush()
-                            }
-                        }
-                    } catch (_: Exception) {
-                        file.writeBytes("OMNIVIEW_RTSP_CLIP_DATA_${clip.id}_${clip.cameraName}".toByteArray())
-                    }
+                if (!file.exists() || file.length() == 0L) {
+                    throw IllegalStateException("Recording file missing or empty: ${file.name}")
                 }
 
                 val request = buildUploadRequest(config, clip, file)
