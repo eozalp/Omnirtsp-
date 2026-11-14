@@ -312,6 +312,7 @@ class HeadlessGlFrameGrabber(
         GLES20.glDisableVertexAttribArray(aTexCoordLoc)
 
         buf.clear()
+        GLES20.glPixelStorei(GLES20.GL_PACK_ALIGNMENT, 1)
         GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buf)
         buf.rewind()
 

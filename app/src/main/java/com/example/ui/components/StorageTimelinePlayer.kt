@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -1077,10 +1078,11 @@ fun StorageTimelinePlayer(
                                 .align(Alignment.BottomCenter)
                                 .background(
                                     Brush.verticalGradient(
-                                        listOf(Color.Transparent, Color.Black.copy(alpha = 0.88f))
+                                        listOf(Color.Transparent, Color(0xD80B111A), Color(0xF00B111A))
                                     )
                                 )
-                                .padding(horizontal = 16.dp, vertical = 12.dp)
+                                .navigationBarsPadding()
+                                .padding(horizontal = 16.dp, vertical = 8.dp)
                         ) {
                             scrubPreviewFraction?.let { frac ->
                                 val previewTarget = StorageTimelineEngine.resolveSeekTarget(timeline, frac)

@@ -1,5 +1,6 @@
 package com.example.ui.components
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -128,7 +129,8 @@ fun PtzControlOverlay(
         modifier = modifier
             .clip(RoundedCornerShape(16.dp))
             .testTag("ptz_control_panel"),
-        color = SurveillanceCardBg,
+        color = Color(0xD8121B28),
+        border = BorderStroke(1.dp, NeonCyan.copy(alpha = 0.45f)),
         tonalElevation = 6.dp
     ) {
         Column(

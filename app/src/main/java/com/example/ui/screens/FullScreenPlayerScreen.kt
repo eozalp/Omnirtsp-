@@ -354,13 +354,21 @@ fun FullScreenPlayerScreen(
                     }
                 }
             } else {
-                Column(
-                    modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                Box(
+                    modifier = Modifier.fillMaxSize()
                 ) {
-                    videoViewport(Modifier.weight(1f).fillMaxWidth())
+                    videoViewport(Modifier.fillMaxSize())
                     if (hasActiveDock) {
-                        activeDockContent(false, Modifier.fillMaxWidth())
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .align(Alignment.BottomCenter)
+                                .padding(horizontal = 12.dp, vertical = 12.dp)
+                                .verticalScroll(rememberScrollState()),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            activeDockContent(false, Modifier.fillMaxWidth())
+                        }
                     }
                 }
             }

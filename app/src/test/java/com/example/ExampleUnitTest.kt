@@ -1274,4 +1274,78 @@ class ExampleUnitTest {
       ftpThread.join(2000)
     }
   }
+
+  @Test
+  fun storageTimelineEngine_filtersStubsAndRemoteHubMediaTokens() {
+    val tempDir = createTempDir("omniview_stubs")
+    tempDir.deleteOnExit()
+
+    val stubFile = File(tempDir, "stub.mp4").apply {
+      writeBytes(ByteArray(32)) // 32 bytes <= 256 bytes stub threshold
+    }
+    val validFile = File(tempDir, "valid.mp4").apply {
+      writeBytes(ByteArray(512)) // 512 bytes > 256 bytes playable
+    }
+
+    val clipStub = RecordedClipEntity(
+      id = "clip_stub",
+      cameraId = "cam_1",
+      cameraName = "Test Cam",
+      timestamp = System.currentTimeMillis(),
+      durationSeconds = 60,
+      fileSizeMb = 0.1f,
+      triggerType = ClipTriggerType.MOTION_ALERT,
+      filePath = stubFile.absolutePath
+    )
+    val clipValid = RecordedClipEntity(
+      id = "clip_valid",
+      cameraId = "cam_1",
+      cameraName = "Test Cam",
+      timestamp = System.currentTimeMillis() + 60_000L,
+      durationSeconds = 60,
+      fileSizeMb = 0.5f,
+      triggerType = ClipTriggerType.MOTION_ALERT,
+      filePath = validFile.absolutePath
+    )
+
+    // With requirePlayable=true, timeline engine filters out <=256 byte stub files
+    val timeline = StorageTimelineEngine.buildTimeline(
+      clips = listOf(clipStub, clipValid),
+      cameraIdFilter = "cam_1",
+      context = null,
+      requirePlayable = true
+    )
+    assertEquals(1, timeline.segments.size)
+    assertEquals("clip_valid", timeline.segments[0].clip.id)
+
+    // Test RemoteHubServer scoped media token access
+    val backend = object : RemoteHubBackend {
+      override fun getSystemHealth() = HubSystemHealth()
+      override fun getCameras() = emptyList<HubCameraSnapshot>()
+      override fun getClips(cameraId: String?) = emptyList<HubClipSnapshot>()
+      override fun getClipFile(clipId: String) = null
+      override fun getAlerts(limit: Int) = emptyList<HubAlertSnapshot>()
+      override fun captureCameraJpeg(cameraId: String) = byteArrayOf(1, 2, 3, 4)
+      override fun performPtz(cameraId: String, action: String, pan: Float, tilt: Float, zoom: Float, presetToken: String) = true to "OK"
+      override fun startRecording(cameraId: String) = true
+      override fun stopRecording(cameraId: String) = true
+      override fun triggerSnapshot(cameraId: String) = true
+    }
+
+    val server = RemoteHubServer(backend)
+    val http = OkHttpClient()
+    try {
+      server.startWithPassword(port = 0, username = "admin", password = "SecretPassword123!")
+      val port = server.listeningPort
+      assertTrue(port > 0)
+
+      // Unauthenticated frame request without token fails (401)
+      http.newCall(Request.Builder().url("http://127.0.0.1:$port/api/cameras/cam_1/frame.jpg").build()).execute().use { resp ->
+        assertEquals(401, resp.code)
+      }
+    } finally {
+      server.stop()
+      runCatching { tempDir.deleteRecursively() }
+    }
+  }
 }
