@@ -8,7 +8,8 @@ enum class CloudProviderType {
     AWS_S3_COMPATIBLE,
     WEBHOOK_REST_API,
     FTP_NAS_STORAGE,
-    WEBDAV
+    WEBDAV,
+    SMB_CIFS
 }
 
 enum class LocalSaveDestination {

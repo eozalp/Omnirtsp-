@@ -23,7 +23,11 @@ import com.example.engine.CameraDiscoveryEngine
 import com.example.engine.CloudStorageManager
 import com.example.engine.DeviceStorageExporter
 import com.example.engine.DiscoveredCamera
+import com.example.engine.DiscoveredStorageEndpoint
 import com.example.engine.DiscoveryScanState
+import com.example.engine.ExtendedStorageConfig
+import com.example.engine.HubAccessScope
+import com.example.engine.HubConnectionProfile
 import com.example.engine.MotionDetectionEngine
 import com.example.engine.OnvifPtzClient
 import com.example.engine.PtzCommandState
@@ -33,6 +37,7 @@ import com.example.engine.RemoteHubServer
 import com.example.engine.RemoteHubState
 import com.example.engine.RetentionStatus
 import com.example.engine.RtspStreamManager
+import com.example.engine.StorageConnectionTestResult
 import com.example.engine.StorageRetentionEngine
 import com.example.i18n.AppLocaleManager
 import com.example.service.FloatingCameraOverlayService
@@ -173,6 +178,20 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private val _localExportStatus = MutableStateFlow<String?>(null)
     val localExportStatus: StateFlow<String?> = _localExportStatus.asStateFlow()
 
+    val extendedStorageConfig: StateFlow<ExtendedStorageConfig> = cloudStorageManager.extendedConfig
+    val discoveredStorageEndpoints: StateFlow<List<DiscoveredStorageEndpoint>> = cloudStorageManager.discoveredEndpoints
+    val isScanningStorage: StateFlow<Boolean> = cloudStorageManager.isScanningStorage
+    val detailedStorageTestResult: StateFlow<StorageConnectionTestResult?> = cloudStorageManager.detailedConnectionResult
+
+    private val _hubOneTimeGeneratedPassword = MutableStateFlow<String?>(null)
+    val hubOneTimeGeneratedPassword: StateFlow<String?> = _hubOneTimeGeneratedPassword.asStateFlow()
+
+    private val _hubOneTimeApiKey = MutableStateFlow<String?>(null)
+    val hubOneTimeApiKey: StateFlow<String?> = _hubOneTimeApiKey.asStateFlow()
+
+    private val _hubSelfTestResult = MutableStateFlow<String?>(null)
+    val hubSelfTestResult: StateFlow<String?> = _hubSelfTestResult.asStateFlow()
+
     val remoteHubServer = RemoteHubServer(
         backend = AndroidRemoteHubBackend(
             context = application,
@@ -210,11 +229,22 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun initRemoteHubServer(app: Application) {
         val cfg = RemoteHubPreferences.load(app)
+        if (!cfg.firstBootGeneratedPassword.isNullOrBlank()) {
+            _hubOneTimeGeneratedPassword.value = cfg.firstBootGeneratedPassword
+        }
         remoteHubServer.configure(
             enabled = cfg.enabled,
             port = cfg.port,
-            accessToken = cfg.accessToken,
-            allowRemoteControl = cfg.allowRemoteControl
+            username = cfg.username,
+            passwordSaltHex = cfg.passwordSaltHex,
+            passwordHashHex = cfg.passwordHashHex,
+            passwordIterations = cfg.passwordIterations,
+            apiKeyEnabled = cfg.apiKeyEnabled,
+            apiKeySha256Hex = cfg.apiKeySha256Hex,
+            allowRemoteControl = cfg.allowRemoteControl,
+            accessScope = cfg.accessScope,
+            connectionProfile = cfg.connectionProfile,
+            externalUrl = cfg.externalUrl
         )
     }
 
@@ -931,8 +961,19 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         _localExportStatus.value = null
     }
 
-    fun testCloudConnection(config: CloudConfigEntity) {
-        cloudStorageManager.testCloudConnection(config)
+    fun testCloudConnection(
+        config: CloudConfigEntity,
+        extendedConfig: ExtendedStorageConfig = cloudStorageManager.extendedConfig.value
+    ) {
+        cloudStorageManager.testCloudConnection(config, extendedConfig)
+    }
+
+    fun scanNetworkStorage() {
+        cloudStorageManager.scanNetworkStorage()
+    }
+
+    fun saveExtendedStorageConfig(config: ExtendedStorageConfig) {
+        cloudStorageManager.saveExtendedConfig(config)
     }
 
     fun uploadClipToCloud(clip: RecordedClipEntity) {
@@ -942,19 +983,34 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     fun toggleHubServer(enabled: Boolean) {
         val app = getApplication<Application>()
         val cur = hubServerState.value
-        val nextToken = cur.accessToken.ifBlank { RemoteHubServer.generateSecureToken(12) }
         val cfg = RemoteHubPreferences.HubConfig(
             enabled = enabled,
             port = cur.port,
-            accessToken = nextToken,
-            allowRemoteControl = cur.allowRemoteControl
+            username = cur.username,
+            passwordSaltHex = cur.passwordSaltHex,
+            passwordHashHex = cur.passwordHashHex,
+            passwordIterations = cur.passwordIterations,
+            apiKeyEnabled = cur.apiKeyEnabled,
+            apiKeySha256Hex = cur.apiKeySha256Hex,
+            allowRemoteControl = cur.allowRemoteControl,
+            accessScope = cur.accessScope,
+            connectionProfile = cur.connectionProfile,
+            externalUrl = cur.externalUrl
         )
         RemoteHubPreferences.save(app, cfg)
         remoteHubServer.configure(
             enabled = cfg.enabled,
             port = cfg.port,
-            accessToken = cfg.accessToken,
-            allowRemoteControl = cfg.allowRemoteControl
+            username = cfg.username,
+            passwordSaltHex = cfg.passwordSaltHex,
+            passwordHashHex = cfg.passwordHashHex,
+            passwordIterations = cfg.passwordIterations,
+            apiKeyEnabled = cfg.apiKeyEnabled,
+            apiKeySha256Hex = cfg.apiKeySha256Hex,
+            allowRemoteControl = cfg.allowRemoteControl,
+            accessScope = cfg.accessScope,
+            connectionProfile = cfg.connectionProfile,
+            externalUrl = cfg.externalUrl
         )
         val after = hubServerState.value
         _localExportStatus.value = when {
@@ -964,40 +1020,207 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun updateHubServerConfig(port: Int, accessToken: String, allowRemoteControl: Boolean) {
-        val app = getApplication<Application>()
-        val cur = hubServerState.value
-        val safePort = RemoteHubServer.normalizePort(port)
-        val safeToken = accessToken.trim().ifBlank { RemoteHubServer.generateSecureToken(12) }
-        val cfg = RemoteHubPreferences.HubConfig(
-            enabled = cur.isEnabled,
-            port = safePort,
-            accessToken = safeToken,
-            allowRemoteControl = allowRemoteControl
-        )
-        RemoteHubPreferences.save(app, cfg)
-        remoteHubServer.configure(
-            enabled = cfg.enabled,
-            port = cfg.port,
-            accessToken = cfg.accessToken,
-            allowRemoteControl = cfg.allowRemoteControl
-        )
-        val after = hubServerState.value
-        _localExportStatus.value = if (after.lastError != null) {
-            AppLocaleManager.getString(app, R.string.hub_error_prefix, after.lastError)
-        } else {
-            AppLocaleManager.getString(app, R.string.hub_settings_saved, after.port)
+    fun updateHubSecurityAndConnection(
+        port: Int,
+        username: String,
+        newPassword: String,
+        allowRemoteControl: Boolean,
+        accessScope: HubAccessScope,
+        connectionProfile: HubConnectionProfile,
+        externalUrl: String
+    ) {
+        viewModelScope.launch(Dispatchers.Default) {
+            val app = getApplication<Application>()
+            val cur = hubServerState.value
+            val safePort = RemoteHubServer.normalizePort(port)
+            val safeUser = username.trim().ifBlank { "admin" }
+            val trimmedPass = newPassword.trim()
+
+            val (nextSalt, nextHash, nextIters) = if (trimmedPass.isNotEmpty()) {
+                val (s, h) = RemoteHubServer.hashPassword(trimmedPass, RemoteHubServer.DEFAULT_PBKDF2_ITERATIONS)
+                Triple(s, h, RemoteHubServer.DEFAULT_PBKDF2_ITERATIONS)
+            } else {
+                Triple(cur.passwordSaltHex, cur.passwordHashHex, cur.passwordIterations)
+            }
+
+            val cfg = RemoteHubPreferences.HubConfig(
+                enabled = cur.isEnabled,
+                port = safePort,
+                username = safeUser,
+                passwordSaltHex = nextSalt,
+                passwordHashHex = nextHash,
+                passwordIterations = nextIters,
+                apiKeyEnabled = cur.apiKeyEnabled,
+                apiKeySha256Hex = cur.apiKeySha256Hex,
+                allowRemoteControl = allowRemoteControl,
+                accessScope = accessScope,
+                connectionProfile = connectionProfile,
+                externalUrl = externalUrl.trim()
+            )
+            RemoteHubPreferences.save(app, cfg)
+            remoteHubServer.configure(
+                enabled = cfg.enabled,
+                port = cfg.port,
+                username = cfg.username,
+                passwordSaltHex = cfg.passwordSaltHex,
+                passwordHashHex = cfg.passwordHashHex,
+                passwordIterations = cfg.passwordIterations,
+                apiKeyEnabled = cfg.apiKeyEnabled,
+                apiKeySha256Hex = cfg.apiKeySha256Hex,
+                allowRemoteControl = cfg.allowRemoteControl,
+                accessScope = cfg.accessScope,
+                connectionProfile = cfg.connectionProfile,
+                externalUrl = cfg.externalUrl
+            )
+            if (trimmedPass.isNotEmpty()) {
+                _hubOneTimeGeneratedPassword.value = null
+            }
+            val after = hubServerState.value
+            _localExportStatus.value = if (after.lastError != null) {
+                AppLocaleManager.getString(app, R.string.hub_error_prefix, after.lastError)
+            } else {
+                AppLocaleManager.getString(app, R.string.hub_settings_saved, after.port)
+            }
         }
     }
 
     fun setRemoteHubControlEnabled(allow: Boolean) {
         val cur = hubServerState.value
-        updateHubServerConfig(cur.port, cur.accessToken, allow)
+        updateHubSecurityAndConnection(
+            port = cur.port,
+            username = cur.username,
+            newPassword = "",
+            allowRemoteControl = allow,
+            accessScope = cur.accessScope,
+            connectionProfile = cur.connectionProfile,
+            externalUrl = cur.externalUrl
+        )
     }
 
-    fun regenerateHubToken() {
+    fun setHubApiKeyEnabled(enabled: Boolean) {
+        val app = getApplication<Application>()
         val cur = hubServerState.value
-        updateHubServerConfig(cur.port, RemoteHubServer.generateSecureToken(12), cur.allowRemoteControl)
+        var nextHash = cur.apiKeySha256Hex
+        if (enabled && nextHash.isBlank()) {
+            val rawKey = RemoteHubServer.generateApiKey()
+            nextHash = RemoteHubServer.sha256Hex(rawKey)
+            _hubOneTimeApiKey.value = rawKey
+        } else if (!enabled) {
+            _hubOneTimeApiKey.value = null
+        }
+        val cfg = RemoteHubPreferences.HubConfig(
+            enabled = cur.isEnabled,
+            port = cur.port,
+            username = cur.username,
+            passwordSaltHex = cur.passwordSaltHex,
+            passwordHashHex = cur.passwordHashHex,
+            passwordIterations = cur.passwordIterations,
+            apiKeyEnabled = enabled,
+            apiKeySha256Hex = nextHash,
+            allowRemoteControl = cur.allowRemoteControl,
+            accessScope = cur.accessScope,
+            connectionProfile = cur.connectionProfile,
+            externalUrl = cur.externalUrl
+        )
+        RemoteHubPreferences.save(app, cfg)
+        remoteHubServer.configure(
+            enabled = cfg.enabled,
+            port = cfg.port,
+            username = cfg.username,
+            passwordSaltHex = cfg.passwordSaltHex,
+            passwordHashHex = cfg.passwordHashHex,
+            passwordIterations = cfg.passwordIterations,
+            apiKeyEnabled = cfg.apiKeyEnabled,
+            apiKeySha256Hex = cfg.apiKeySha256Hex,
+            allowRemoteControl = cfg.allowRemoteControl,
+            accessScope = cfg.accessScope,
+            connectionProfile = cfg.connectionProfile,
+            externalUrl = cfg.externalUrl
+        )
+    }
+
+    fun regenerateHubApiKey() {
+        val app = getApplication<Application>()
+        val cur = hubServerState.value
+        val rawKey = RemoteHubServer.generateApiKey()
+        val hash = RemoteHubServer.sha256Hex(rawKey)
+        _hubOneTimeApiKey.value = rawKey
+        val cfg = RemoteHubPreferences.HubConfig(
+            enabled = cur.isEnabled,
+            port = cur.port,
+            username = cur.username,
+            passwordSaltHex = cur.passwordSaltHex,
+            passwordHashHex = cur.passwordHashHex,
+            passwordIterations = cur.passwordIterations,
+            apiKeyEnabled = true,
+            apiKeySha256Hex = hash,
+            allowRemoteControl = cur.allowRemoteControl,
+            accessScope = cur.accessScope,
+            connectionProfile = cur.connectionProfile,
+            externalUrl = cur.externalUrl
+        )
+        RemoteHubPreferences.save(app, cfg)
+        remoteHubServer.configure(
+            enabled = cfg.enabled,
+            port = cfg.port,
+            username = cfg.username,
+            passwordSaltHex = cfg.passwordSaltHex,
+            passwordHashHex = cfg.passwordHashHex,
+            passwordIterations = cfg.passwordIterations,
+            apiKeyEnabled = true,
+            apiKeySha256Hex = hash,
+            allowRemoteControl = cfg.allowRemoteControl,
+            accessScope = cfg.accessScope,
+            connectionProfile = cfg.connectionProfile,
+            externalUrl = cfg.externalUrl
+        )
+        _localExportStatus.value = AppLocaleManager.getString(app, R.string.hub_apikey_rotated_status)
+    }
+
+    fun revokeAllHubSessions() {
+        val app = getApplication<Application>()
+        remoteHubServer.revokeAllSessions()
+        _localExportStatus.value = AppLocaleManager.getString(app, R.string.hub_sessions_revoked_status)
+    }
+
+    fun dismissOneTimeHubSecrets() {
+        _hubOneTimeGeneratedPassword.value = null
+        _hubOneTimeApiKey.value = null
+    }
+
+    fun testHubLocalReachability() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val app = getApplication<Application>()
+            val cur = hubServerState.value
+            if (!cur.isRunning) {
+                _hubSelfTestResult.value = AppLocaleManager.getString(app, R.string.hub_selftest_offline)
+                return@launch
+            }
+            val start = System.currentTimeMillis()
+            val resultText = try {
+                val url = java.net.URL("http://127.0.0.1:${cur.port}/health")
+                val conn = (url.openConnection() as java.net.HttpURLConnection).apply {
+                    connectTimeout = 3000
+                    readTimeout = 3000
+                    requestMethod = "GET"
+                }
+                val code = conn.responseCode
+                conn.disconnect()
+                val latency = (System.currentTimeMillis() - start).toInt().coerceAtLeast(1)
+                if (code == 200) {
+                    AppLocaleManager.getString(app, R.string.hub_selftest_ok, cur.port, latency)
+                } else {
+                    AppLocaleManager.getString(app, R.string.hub_selftest_fail, "HTTP $code")
+                }
+            } catch (e: Exception) {
+                AppLocaleManager.getString(
+                    app,
+                    R.string.hub_selftest_fail,
+                    e.localizedMessage ?: e.javaClass.simpleName
+                )
+            }
+            _hubSelfTestResult.value = resultText
+        }
     }
 
     fun refreshHubNetworkEndpoints() {

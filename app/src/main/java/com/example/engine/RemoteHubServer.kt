@@ -7,6 +7,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.media.MediaMetadataRetriever
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Handler
@@ -42,17 +43,46 @@ import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.text.SimpleDateFormat
+import java.util.Base64
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
 
 enum class EndpointKind {
     TAILSCALE,
+    WIREGUARD,
+    ZEROTIER,
+    VPN_TUNNEL,
     WIFI_LAN,
+    HOTSPOT_USB,
+    EXTERNAL_TUNNEL,
     OTHER
+}
+
+enum class HubAccessScope {
+    ALL_INTERFACES,
+    VPN_ONLY,
+    LAN_AND_VPN
+}
+
+enum class HubConnectionProfile {
+    AUTO_BEST,
+    TAILSCALE,
+    WIREGUARD_VPN,
+    LOCAL_LAN,
+    HOTSPOT_TETHER,
+    REVERSE_PROXY_TUNNEL
+}
+
+enum class PasswordStrength {
+    WEAK,
+    FAIR,
+    STRONG
 }
 
 data class NetworkEndpoint(
@@ -66,10 +96,19 @@ data class RemoteHubState(
     val isEnabled: Boolean = false,
     val isRunning: Boolean = false,
     val port: Int = RemoteHubServer.DEFAULT_PORT,
-    val accessToken: String = "",
+    val username: String = "admin",
+    val passwordSaltHex: String = "",
+    val passwordHashHex: String = "",
+    val passwordIterations: Int = RemoteHubServer.DEFAULT_PBKDF2_ITERATIONS,
+    val apiKeyEnabled: Boolean = false,
+    val apiKeySha256Hex: String = "",
     val allowRemoteControl: Boolean = true,
+    val accessScope: HubAccessScope = HubAccessScope.ALL_INTERFACES,
+    val connectionProfile: HubConnectionProfile = HubConnectionProfile.AUTO_BEST,
+    val externalUrl: String = "",
     val endpoints: List<NetworkEndpoint> = emptyList(),
     val activeConnections: Int = 0,
+    val activeSessionCount: Int = 0,
     val lastRequestSummary: String = "",
     val lastError: String? = null,
     val batteryPercent: Int = 100,
@@ -79,11 +118,26 @@ data class RemoteHubState(
     val tailscaleEndpoint: NetworkEndpoint?
         get() = endpoints.firstOrNull { it.kind == EndpointKind.TAILSCALE }
 
+    val vpnEndpoints: List<NetworkEndpoint>
+        get() = endpoints.filter {
+            it.kind == EndpointKind.TAILSCALE ||
+                it.kind == EndpointKind.WIREGUARD ||
+                it.kind == EndpointKind.ZEROTIER ||
+                it.kind == EndpointKind.VPN_TUNNEL
+        }
+
     val primaryLanEndpoint: NetworkEndpoint?
         get() = endpoints.firstOrNull { it.kind == EndpointKind.WIFI_LAN }
 
+    val externalEndpoint: NetworkEndpoint?
+        get() = endpoints.firstOrNull { it.kind == EndpointKind.EXTERNAL_TUNNEL }
+
     val bestAccessUrl: String?
-        get() = tailscaleEndpoint?.url ?: primaryLanEndpoint?.url ?: endpoints.firstOrNull()?.url
+        get() = externalEndpoint?.url
+            ?: tailscaleEndpoint?.url
+            ?: vpnEndpoints.firstOrNull()?.url
+            ?: primaryLanEndpoint?.url
+            ?: endpoints.firstOrNull()?.url
 }
 
 data class HttpByteRange(
@@ -162,7 +216,9 @@ interface RemoteHubBackend {
 
 /**
  * Lightweight, zero-dependency HTTP/1.1 Surveillance Hub Server.
- * Turns a spare Android device into a secure NVR hub reachable over Tailscale VPN or LAN IP.
+ * Supports multi-transport remote links (Tailscale, WireGuard, ZeroTier, Wi-Fi LAN, Hotspot/USB,
+ * Cloudflare/Caddy reverse proxy URLs), access scope filtering, PBKDF2-HMAC-SHA256 username/password auth,
+ * adaptive snapshot + dedicated MJPEG theater streaming, and byte-range MP4 timeline playback.
  */
 class RemoteHubServer(
     private val backend: RemoteHubBackend
@@ -190,26 +246,49 @@ class RemoteHubServer(
     fun configure(
         enabled: Boolean,
         port: Int,
-        accessToken: String,
-        allowRemoteControl: Boolean
+        username: String,
+        passwordSaltHex: String,
+        passwordHashHex: String,
+        passwordIterations: Int = DEFAULT_PBKDF2_ITERATIONS,
+        apiKeyEnabled: Boolean = false,
+        apiKeySha256Hex: String = "",
+        allowRemoteControl: Boolean = true,
+        accessScope: HubAccessScope = HubAccessScope.ALL_INTERFACES,
+        connectionProfile: HubConnectionProfile = HubConnectionProfile.AUTO_BEST,
+        externalUrl: String = ""
     ) {
         val safePort = normalizePort(port)
-        val safeToken = accessToken.ifBlank { generateSecureToken() }
+        val safeUser = username.trim().ifBlank { "admin" }
         val health = safeHealth()
-        val endpoints = discoverNetworkEndpoints(safePort)
-        val wasRunning = _state.value.isRunning
-        val configChanged = _state.value.port != safePort || _state.value.accessToken != safeToken
+        val endpoints = buildAllEndpoints(safePort, externalUrl)
+        val prev = _state.value
+        val wasRunning = prev.isRunning
+        val portChanged = prev.port != safePort
+        val authChanged = prev.username != safeUser ||
+            prev.passwordSaltHex != passwordSaltHex ||
+            prev.passwordHashHex != passwordHashHex ||
+            prev.apiKeySha256Hex != apiKeySha256Hex ||
+            prev.apiKeyEnabled != apiKeyEnabled
 
-        if (configChanged) {
+        if (portChanged || authChanged) {
             sessions.clear()
         }
 
-        _state.value = _state.value.copy(
+        _state.value = prev.copy(
             isEnabled = enabled,
             port = safePort,
-            accessToken = safeToken,
+            username = safeUser,
+            passwordSaltHex = passwordSaltHex,
+            passwordHashHex = passwordHashHex,
+            passwordIterations = passwordIterations.coerceAtLeast(1000),
+            apiKeyEnabled = apiKeyEnabled,
+            apiKeySha256Hex = apiKeySha256Hex,
             allowRemoteControl = allowRemoteControl,
+            accessScope = accessScope,
+            connectionProfile = connectionProfile,
+            externalUrl = externalUrl.trim(),
             endpoints = endpoints,
+            activeSessionCount = countActiveSessions(),
             batteryPercent = health.batteryPercent,
             isPluggedIn = health.isPluggedIn,
             freeStorageMb = health.freeStorageMb,
@@ -217,7 +296,7 @@ class RemoteHubServer(
         )
 
         if (enabled) {
-            if (!wasRunning || configChanged) {
+            if (!wasRunning || portChanged) {
                 restartServerSocket(safePort)
             }
         } else {
@@ -225,16 +304,30 @@ class RemoteHubServer(
         }
     }
 
-    fun start(
+    fun startWithPassword(
         port: Int = _state.value.port,
-        accessToken: String = _state.value.accessToken,
-        allowRemoteControl: Boolean = _state.value.allowRemoteControl
+        username: String = "admin",
+        password: String,
+        iterations: Int = DEFAULT_PBKDF2_ITERATIONS,
+        allowRemoteControl: Boolean = _state.value.allowRemoteControl,
+        accessScope: HubAccessScope = _state.value.accessScope,
+        connectionProfile: HubConnectionProfile = _state.value.connectionProfile,
+        externalUrl: String = _state.value.externalUrl
     ) {
+        val (saltHex, hashHex) = hashPassword(password, iterations)
         configure(
             enabled = true,
             port = port,
-            accessToken = accessToken,
-            allowRemoteControl = allowRemoteControl
+            username = username,
+            passwordSaltHex = saltHex,
+            passwordHashHex = hashHex,
+            passwordIterations = iterations,
+            apiKeyEnabled = _state.value.apiKeyEnabled,
+            apiKeySha256Hex = _state.value.apiKeySha256Hex,
+            allowRemoteControl = allowRemoteControl,
+            accessScope = accessScope,
+            connectionProfile = connectionProfile,
+            externalUrl = externalUrl
         )
     }
 
@@ -243,16 +336,28 @@ class RemoteHubServer(
         stopServerSocket()
     }
 
+    fun revokeAllSessions() {
+        sessions.clear()
+        _state.value = _state.value.copy(activeSessionCount = 0)
+    }
+
     fun refreshNetworkAndHealth() {
         val cur = _state.value
         val activePort = serverSocket?.localPort?.takeIf { it > 0 } ?: cur.port
         val health = safeHealth()
         _state.value = cur.copy(
-            endpoints = discoverNetworkEndpoints(activePort),
+            endpoints = buildAllEndpoints(activePort, cur.externalUrl),
+            activeSessionCount = countActiveSessions(),
             batteryPercent = health.batteryPercent,
             isPluggedIn = health.isPluggedIn,
             freeStorageMb = health.freeStorageMb
         )
+    }
+
+    private fun countActiveSessions(): Int {
+        val now = System.currentTimeMillis()
+        sessions.entries.removeIf { it.value <= now }
+        return sessions.size
     }
 
     private fun safeHealth(): HubSystemHealth {
@@ -277,7 +382,7 @@ class RemoteHubServer(
             _state.value = _state.value.copy(
                 isRunning = true,
                 port = boundPort,
-                endpoints = discoverNetworkEndpoints(boundPort),
+                endpoints = buildAllEndpoints(boundPort, _state.value.externalUrl),
                 batteryPercent = health.batteryPercent,
                 isPluggedIn = health.isPluggedIn,
                 freeStorageMb = health.freeStorageMb,
@@ -315,7 +420,8 @@ class RemoteHubServer(
         sessions.clear()
         _state.value = _state.value.copy(
             isRunning = false,
-            activeConnections = 0
+            activeConnections = 0,
+            activeSessionCount = 0
         )
     }
 
@@ -337,10 +443,27 @@ class RemoteHubServer(
             val input = BufferedInputStream(client.getInputStream(), 16 * 1024)
             val output = client.getOutputStream()
             val remoteIp = client.inetAddress?.hostAddress ?: "unknown"
+            val localIp = client.localAddress?.hostAddress ?: ""
 
             val request = readHttpRequest(input) ?: return
             val path = request.pathOnly
             val query = parseQueryParams(request.rawQuery)
+
+            // Access Scope check (Tailscale / VPN-only / LAN+VPN / All)
+            val currentScope = _state.value.accessScope
+            if (!isClientAllowedByScope(remoteIp, localIp, currentScope, _state.value.endpoints)) {
+                _state.value = _state.value.copy(
+                    lastRequestSummary = "Blocked ($currentScope): $remoteIp"
+                )
+                sendTextResponse(
+                    output = output,
+                    statusCode = 403,
+                    statusText = "Forbidden",
+                    body = """{"error":"Blocked by Hub Access Scope (${currentScope.name})"}""",
+                    contentType = "application/json; charset=utf-8"
+                )
+                return
+            }
 
             if (path != "/health" && !path.endsWith("/mjpeg") && !path.endsWith("/frame.jpg")) {
                 _state.value = _state.value.copy(
@@ -348,15 +471,13 @@ class RemoteHubServer(
                 )
             }
 
-            // CORS preflight support
             if (request.method.equals("OPTIONS", ignoreCase = true)) {
                 sendTextResponse(output, 204, "No Content", "", "text/plain")
                 return
             }
 
-            // 1. Public unauthenticated routes
             if (path == "/health") {
-                val json = """{"status":"ok","service":"omniview-hub","port":$listeningPort}"""
+                val json = """{"status":"ok","service":"omniview-hub","port":$listeningPort,"scope":${jsonStr(currentScope.name)}}"""
                 sendTextResponse(output, 200, "OK", json, "application/json; charset=utf-8")
                 return
             }
@@ -368,6 +489,7 @@ class RemoteHubServer(
 
             if (path == "/api/logout" && request.method.equals("POST", ignoreCase = true)) {
                 extractSessionCookie(request.headers["cookie"])?.let { sessions.remove(it) }
+                _state.value = _state.value.copy(activeSessionCount = countActiveSessions())
                 val json = """{"ok":true}"""
                 sendTextResponse(
                     output = output,
@@ -383,16 +505,25 @@ class RemoteHubServer(
             val isAuthenticated = isRequestAuthenticated(request, query)
 
             if (path == "/" || path == "/index.html") {
-                val html = buildWebConsoleHtml(isAuthenticated = isAuthenticated)
+                val html = buildWebConsoleHtml(
+                    isAuthenticated = isAuthenticated,
+                    usernameHint = _state.value.username
+                )
                 sendTextResponse(output, 200, "OK", html, "text/html; charset=utf-8")
                 return
             }
 
-            // 2. Protected API endpoints
             if (!isAuthenticated) {
                 recordFailedAttempt(remoteIp)
                 val err = """{"error":"Unauthorized"}"""
-                sendTextResponse(output, 401, "Unauthorized", err, "application/json; charset=utf-8")
+                sendTextResponse(
+                    output = output,
+                    statusCode = 401,
+                    statusText = "Unauthorized",
+                    body = err,
+                    contentType = "application/json; charset=utf-8",
+                    extraHeaders = listOf("""WWW-Authenticate: Basic realm="OmniView Hub"""")
+                )
                 return
             }
 
@@ -433,18 +564,25 @@ class RemoteHubServer(
         }
 
         val bodyStr = request.body.toString(StandardCharsets.UTF_8).trim()
-        val submittedToken = if (bodyStr.startsWith("{")) {
-            extractJsonString(bodyStr, "token").orEmpty()
+        val submittedUser: String
+        val submittedPass: String
+        if (bodyStr.startsWith("{")) {
+            submittedUser = extractJsonString(bodyStr, "username").orEmpty().trim()
+            submittedPass = extractJsonString(bodyStr, "password").orEmpty()
         } else {
-            parseQueryParams(bodyStr)["token"].orEmpty()
+            val form = parseQueryParams(bodyStr)
+            submittedUser = form["username"].orEmpty().trim()
+            submittedPass = form["password"].orEmpty()
         }
 
-        val expectedToken = _state.value.accessToken
-        if (submittedToken.isNotBlank() && constantTimeEquals(submittedToken, expectedToken)) {
+        val st = _state.value
+        val valid = verifyHubCredentials(submittedUser, submittedPass, st)
+        if (valid) {
             failedAttemptsByIp.remove(remoteIp)
             val sessionId = generateSessionId()
             sessions[sessionId] = now + SESSION_TTL_MS
-            val resp = """{"ok":true}"""
+            _state.value = _state.value.copy(activeSessionCount = countActiveSessions())
+            val resp = """{"ok":true,"username":${jsonStr(st.username)}}"""
             sendTextResponse(
                 output = output,
                 statusCode = 200,
@@ -455,9 +593,25 @@ class RemoteHubServer(
             )
         } else {
             recordFailedAttempt(remoteIp)
-            val resp = """{"ok":false,"error":"Invalid access token"}"""
+            val resp = """{"ok":false,"error":"Invalid username or password"}"""
             sendTextResponse(output, 401, "Unauthorized", resp, "application/json; charset=utf-8")
         }
+    }
+
+    private fun verifyHubCredentials(
+        submittedUser: String,
+        submittedPass: String,
+        st: RemoteHubState
+    ): Boolean {
+        if (st.passwordSaltHex.isBlank() || st.passwordHashHex.isBlank()) return false
+        if (submittedUser.isBlank() || submittedPass.isEmpty()) return false
+        if (!constantTimeEquals(submittedUser, st.username)) return false
+        return verifyPassword(
+            password = submittedPass,
+            saltHex = st.passwordSaltHex,
+            hashHex = st.passwordHashHex,
+            iterations = st.passwordIterations
+        )
     }
 
     private fun recordFailedAttempt(remoteIp: String) {
@@ -476,21 +630,9 @@ class RemoteHubServer(
         request: ParsedHttpRequest,
         query: Map<String, String>
     ): Boolean {
-        val expected = _state.value.accessToken
-        if (expected.isBlank()) return false
+        val st = _state.value
 
-        val authHeader = request.headers["authorization"].orEmpty()
-        if (authHeader.startsWith("Bearer ", ignoreCase = true)) {
-            val bearer = authHeader.substring(7).trim()
-            if (constantTimeEquals(bearer, expected)) return true
-        }
-
-        val xToken = request.headers["x-hub-token"].orEmpty().trim()
-        if (xToken.isNotEmpty() && constantTimeEquals(xToken, expected)) return true
-
-        val queryToken = query["token"].orEmpty().trim()
-        if (queryToken.isNotEmpty() && constantTimeEquals(queryToken, expected)) return true
-
+        // 1. HttpOnly Session Cookie
         val cookieToken = extractSessionCookie(request.headers["cookie"])
         if (!cookieToken.isNullOrBlank()) {
             val expiresAt = sessions[cookieToken]
@@ -502,6 +644,37 @@ class RemoteHubServer(
                 }
             }
         }
+
+        // 2. HTTP Basic Auth (Username + PBKDF2-verified Password)
+        val authHeader = request.headers["authorization"].orEmpty()
+        if (authHeader.startsWith("Basic ", ignoreCase = true)) {
+            val b64 = authHeader.substring(6).trim()
+            val decoded = runCatching {
+                String(Base64.getDecoder().decode(b64), StandardCharsets.UTF_8)
+            }.getOrNull()
+            if (decoded != null && decoded.contains(":")) {
+                val u = decoded.substringBefore(":")
+                val p = decoded.substringAfter(":")
+                if (verifyHubCredentials(u, p, st)) return true
+            }
+        }
+
+        // 3. Optional revocable API Key (stored strictly as SHA-256 hash)
+        if (st.apiKeyEnabled && st.apiKeySha256Hex.isNotBlank()) {
+            val bearer = if (authHeader.startsWith("Bearer ", ignoreCase = true)) {
+                authHeader.substring(7).trim()
+            } else {
+                ""
+            }
+            if (bearer.isNotEmpty() && verifyApiKey(bearer, st.apiKeySha256Hex)) return true
+
+            val headerKey = (request.headers["x-hub-token"] ?: request.headers["x-hub-api-key"]).orEmpty().trim()
+            if (headerKey.isNotEmpty() && verifyApiKey(headerKey, st.apiKeySha256Hex)) return true
+
+            val queryKey = query["apiKey"].orEmpty().trim()
+            if (queryKey.isNotEmpty() && verifyApiKey(queryKey, st.apiKeySha256Hex)) return true
+        }
+
         return false
     }
 
@@ -517,9 +690,10 @@ class RemoteHubServer(
             path == "/api/status" && method == "GET" -> {
                 val health = safeHealth()
                 val activePort = listeningPort
-                val endpoints = discoverNetworkEndpoints(activePort)
+                val endpoints = buildAllEndpoints(activePort, _state.value.externalUrl)
                 _state.value = _state.value.copy(
                     endpoints = endpoints,
+                    activeSessionCount = countActiveSessions(),
                     batteryPercent = health.batteryPercent,
                     isPluggedIn = health.isPluggedIn,
                     freeStorageMb = health.freeStorageMb
@@ -528,7 +702,7 @@ class RemoteHubServer(
                 val endpointsJson = endpoints.joinToString(",", "[", "]") { ep ->
                     """{"interface":${jsonStr(ep.interfaceName)},"ip":${jsonStr(ep.ipAddress)},"kind":${jsonStr(ep.kind.name)},"url":${jsonStr(ep.url)}}"""
                 }
-                val json = """{"deviceName":${jsonStr(health.deviceName)},"batteryPercent":${health.batteryPercent},"isPluggedIn":${health.isPluggedIn},"freeStorageMb":${health.freeStorageMb},"port":$activePort,"allowRemoteControl":${_state.value.allowRemoteControl},"activeConnections":${activeClientCount.get()},"cameraCount":${cameras.size},"recordingCount":${cameras.count { it.isRecording }},"endpoints":$endpointsJson}"""
+                val json = """{"deviceName":${jsonStr(health.deviceName)},"username":${jsonStr(_state.value.username)},"batteryPercent":${health.batteryPercent},"isPluggedIn":${health.isPluggedIn},"freeStorageMb":${health.freeStorageMb},"port":$activePort,"scope":${jsonStr(_state.value.accessScope.name)},"allowRemoteControl":${_state.value.allowRemoteControl},"activeConnections":${activeClientCount.get()},"activeSessions":${_state.value.activeSessionCount},"cameraCount":${cameras.size},"recordingCount":${cameras.count { it.isRecording }},"endpoints":$endpointsJson}"""
                 sendTextResponse(output, 200, "OK", json, "application/json; charset=utf-8")
             }
 
@@ -618,7 +792,8 @@ class RemoteHubServer(
                 val cameraFilter = query["cameraId"]?.takeIf { it.isNotBlank() }
                 val clips = backend.getClips(cameraFilter)
                 val clipsJson = clips.joinToString(",", "[", "]") { clip ->
-                    """{"id":${jsonStr(clip.id)},"cameraId":${jsonStr(clip.cameraId)},"cameraName":${jsonStr(clip.cameraName)},"timestamp":${clip.timestamp},"durationSeconds":${clip.durationSeconds},"fileSizeMb":${clip.fileSizeMb},"triggerType":${jsonStr(clip.triggerType)},"streamUrl":${jsonStr("/api/clips/${clip.id}/stream")}}"""
+                    val fileBytes = runCatching { File(clip.filePath).length() }.getOrDefault(0L)
+                    """{"id":${jsonStr(clip.id)},"cameraId":${jsonStr(clip.cameraId)},"cameraName":${jsonStr(clip.cameraName)},"timestamp":${clip.timestamp},"durationSeconds":${clip.durationSeconds},"fileSizeMb":${clip.fileSizeMb},"fileBytes":$fileBytes,"triggerType":${jsonStr(clip.triggerType)},"streamUrl":${jsonStr("/api/clips/${clip.id}/stream")}}"""
                 }
                 sendTextResponse(output, 200, "OK", """{"clips":$clipsJson}""", "application/json; charset=utf-8")
             }
@@ -630,10 +805,12 @@ class RemoteHubServer(
                     sendTextResponse(output, 404, "Not Found", """{"error":"Clip file not found"}""", "application/json")
                     return
                 }
+                val asDownload = query["download"] == "1"
                 streamFileWithRangeSupport(
                     file = file,
                     rangeHeader = request.headers["range"],
                     headOnly = method == "HEAD",
+                    asDownload = asDownload,
                     client = client,
                     output = output
                 )
@@ -675,7 +852,7 @@ class RemoteHubServer(
                 output.write("\r\n".toByteArray(StandardCharsets.US_ASCII))
                 output.flush()
             }
-            Thread.sleep(150L)
+            Thread.sleep(160L)
         }
     }
 
@@ -683,11 +860,18 @@ class RemoteHubServer(
         file: File,
         rangeHeader: String?,
         headOnly: Boolean,
+        asDownload: Boolean,
         client: Socket,
         output: OutputStream
     ) {
         client.soTimeout = 60_000
         val totalLen = file.length()
+        val dispHeader = if (asDownload) {
+            "Content-Disposition: attachment; filename=\"${file.name.replace("\"", "")}\"\r\n"
+        } else {
+            "Content-Disposition: inline; filename=\"${file.name.replace("\"", "")}\"\r\n"
+        }
+
         if (rangeHeader != null && rangeHeader.startsWith("bytes=", ignoreCase = true)) {
             val parsedRange = parseHttpRange(rangeHeader, totalLen)
             if (parsedRange == null) {
@@ -702,6 +886,7 @@ class RemoteHubServer(
                 append("Accept-Ranges: bytes\r\n")
                 append("Content-Range: bytes ${parsedRange.start}-${parsedRange.end}/$totalLen\r\n")
                 append("Content-Length: ${parsedRange.contentLength}\r\n")
+                append(dispHeader)
                 append("Cache-Control: private, max-age=60\r\n")
                 append("Connection: close\r\n\r\n")
             }
@@ -727,6 +912,7 @@ class RemoteHubServer(
                 append("Content-Type: video/mp4\r\n")
                 append("Accept-Ranges: bytes\r\n")
                 append("Content-Length: $totalLen\r\n")
+                append(dispHeader)
                 append("Cache-Control: private, max-age=60\r\n")
                 append("Connection: close\r\n\r\n")
             }
@@ -851,27 +1037,145 @@ class RemoteHubServer(
 
     companion object {
         const val DEFAULT_PORT = 8088
+        const val DEFAULT_PBKDF2_ITERATIONS = 100_000
         private const val SESSION_COOKIE_NAME = "omniview_hub_session"
         private const val SESSION_TTL_MS = 12L * 60L * 60L * 1000L
-        private const val TOKEN_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+        private const val PASS_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#\$%"
+        private const val HEX_CHARS = "0123456789abcdef"
         private val secureRandom = SecureRandom()
 
         fun normalizePort(port: Int): Int {
             return if (port == 0) 0 else port.coerceIn(1024, 65535)
         }
 
-        fun generateSecureToken(length: Int = 12): String {
+        fun generateStrongPassword(length: Int = 14): String {
             return buildString(length) {
                 repeat(length) {
-                    append(TOKEN_ALPHABET[secureRandom.nextInt(TOKEN_ALPHABET.length)])
+                    append(PASS_ALPHABET[secureRandom.nextInt(PASS_ALPHABET.length)])
                 }
             }
+        }
+
+        fun generateApiKey(length: Int = 28): String {
+            val alpha = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+            return "ovhub_" + buildString(length) {
+                repeat(length) { append(alpha[secureRandom.nextInt(alpha.length)]) }
+            }
+        }
+
+        fun evaluatePasswordStrength(password: String): PasswordStrength {
+            if (password.length < 8) return PasswordStrength.WEAK
+            var score = 0
+            if (password.length >= 12) score += 2 else score += 1
+            if (password.any { it.isLowerCase() }) score += 1
+            if (password.any { it.isUpperCase() }) score += 1
+            if (password.any { it.isDigit() }) score += 1
+            if (password.any { !it.isLetterOrDigit() }) score += 1
+            return when {
+                score >= 5 -> PasswordStrength.STRONG
+                score >= 3 -> PasswordStrength.FAIR
+                else -> PasswordStrength.WEAK
+            }
+        }
+
+        /**
+         * RFC 2898 PBKDF2-HMAC-SHA256 implemented cleanly over Mac("HmacSHA256")
+         * for identical behavior on Android API 24–36 and bare JVM tests.
+         */
+        fun pbkdf2HmacSha256(
+            password: CharArray,
+            salt: ByteArray,
+            iterations: Int = DEFAULT_PBKDF2_ITERATIONS,
+            keyLengthBytes: Int = 32
+        ): ByteArray {
+            val passBytes = String(password).toByteArray(StandardCharsets.UTF_8)
+            val mac = Mac.getInstance("HmacSHA256")
+            mac.init(SecretKeySpec(passBytes, "HmacSHA256"))
+            val hLen = 32
+            val blocks = (keyLengthBytes + hLen - 1) / hLen
+            val output = ByteArray(blocks * hLen)
+            val blockInput = ByteArray(salt.size + 4)
+            System.arraycopy(salt, 0, blockInput, 0, salt.size)
+
+            for (blockIndex in 1..blocks) {
+                blockInput[salt.size] = ((blockIndex ushr 24) and 0xFF).toByte()
+                blockInput[salt.size + 1] = ((blockIndex ushr 16) and 0xFF).toByte()
+                blockInput[salt.size + 2] = ((blockIndex ushr 8) and 0xFF).toByte()
+                blockInput[salt.size + 3] = (blockIndex and 0xFF).toByte()
+
+                var u = mac.doFinal(blockInput)
+                val t = u.copyOf()
+                for (i in 2..iterations) {
+                    u = mac.doFinal(u)
+                    for (j in t.indices) {
+                        t[j] = (t[j].toInt() xor u[j].toInt()).toByte()
+                    }
+                }
+                System.arraycopy(t, 0, output, (blockIndex - 1) * hLen, hLen)
+            }
+            return output.copyOf(keyLengthBytes)
+        }
+
+        fun hashPassword(
+            password: String,
+            iterations: Int = DEFAULT_PBKDF2_ITERATIONS
+        ): Pair<String, String> {
+            val salt = ByteArray(16)
+            secureRandom.nextBytes(salt)
+            val derived = pbkdf2HmacSha256(password.toCharArray(), salt, iterations.coerceAtLeast(1000))
+            return bytesToHex(salt) to bytesToHex(derived)
+        }
+
+        fun verifyPassword(
+            password: String,
+            saltHex: String,
+            hashHex: String,
+            iterations: Int = DEFAULT_PBKDF2_ITERATIONS
+        ): Boolean {
+            if (saltHex.isBlank() || hashHex.isBlank()) return false
+            val salt = hexToBytes(saltHex) ?: return false
+            val expectedHash = hexToBytes(hashHex) ?: return false
+            val computed = pbkdf2HmacSha256(password.toCharArray(), salt, iterations.coerceAtLeast(1000))
+            return MessageDigest.isEqual(computed, expectedHash)
+        }
+
+        fun sha256Hex(raw: String): String {
+            val md = MessageDigest.getInstance("SHA-256")
+            return bytesToHex(md.digest(raw.toByteArray(StandardCharsets.UTF_8)))
+        }
+
+        fun verifyApiKey(candidate: String, expectedSha256Hex: String): Boolean {
+            if (candidate.isBlank() || expectedSha256Hex.isBlank()) return false
+            val candidateHash = sha256Hex(candidate.trim())
+            return constantTimeEquals(candidateHash, expectedSha256Hex.lowercase(Locale.US))
+        }
+
+        private fun bytesToHex(bytes: ByteArray): String {
+            val sb = StringBuilder(bytes.size * 2)
+            for (b in bytes) {
+                val i = b.toInt() and 0xFF
+                sb.append(HEX_CHARS[i ushr 4])
+                sb.append(HEX_CHARS[i and 0x0F])
+            }
+            return sb.toString()
+        }
+
+        private fun hexToBytes(hex: String): ByteArray? {
+            if (hex.length % 2 != 0) return null
+            val out = ByteArray(hex.length / 2)
+            for (i in out.indices) {
+                val hi = Character.digit(hex[i * 2], 16)
+                val lo = Character.digit(hex[i * 2 + 1], 16)
+                if (hi < 0 || lo < 0) return null
+                out[i] = ((hi shl 4) or lo).toByte()
+            }
+            return out
         }
 
         private fun generateSessionId(): String {
             val bytes = ByteArray(24)
             secureRandom.nextBytes(bytes)
-            return bytes.joinToString("") { "%02x".format(it) }
+            return bytesToHex(bytes)
         }
 
         fun constantTimeEquals(a: String, b: String): Boolean {
@@ -917,9 +1221,6 @@ class RemoteHubServer(
             return regex.find(json)?.groupValues?.getOrNull(1)?.toDoubleOrNull()
         }
 
-        /**
-         * Checks whether an IPv4 address belongs to Tailscale's CGNAT range (100.64.0.0/10 -> 100.64..127.x.x).
-         */
         fun isTailscaleIpv4(ipAddress: String): Boolean {
             val parts = ipAddress.trim().split(".")
             if (parts.size != 4) return false
@@ -931,14 +1232,87 @@ class RemoteHubServer(
             return b0 == 100 && b1 in 64..127
         }
 
+        fun isPrivateLanIpv4(ipAddress: String): Boolean {
+            val parts = ipAddress.trim().split(".")
+            if (parts.size != 4) return false
+            val b0 = parts[0].toIntOrNull() ?: return false
+            val b1 = parts[1].toIntOrNull() ?: return false
+            val b2 = parts[2].toIntOrNull() ?: return false
+            val b3 = parts[3].toIntOrNull() ?: return false
+            if (b2 !in 0..255 || b3 !in 0..255) return false
+            return b0 == 10 ||
+                (b0 == 192 && b1 == 168) ||
+                (b0 == 172 && b1 in 16..31) ||
+                (b0 == 169 && b1 == 254)
+        }
+
+        fun isLoopbackAddress(ip: String): Boolean {
+            val clean = ip.trim().substringBefore("%")
+            return clean == "127.0.0.1" ||
+                clean == "::1" ||
+                clean == "0:0:0:0:0:0:0:1" ||
+                clean.startsWith("127.")
+        }
+
+        fun isClientAllowedByScope(
+            remoteIp: String,
+            localIp: String,
+            scope: HubAccessScope,
+            endpoints: List<NetworkEndpoint>
+        ): Boolean {
+            if (scope == HubAccessScope.ALL_INTERFACES) return true
+            if (isLoopbackAddress(remoteIp)) return true
+
+            val localEpKind = endpoints.firstOrNull { it.ipAddress == localIp }?.kind
+            val isRemoteVpn = isTailscaleIpv4(remoteIp) ||
+                localEpKind == EndpointKind.TAILSCALE ||
+                localEpKind == EndpointKind.WIREGUARD ||
+                localEpKind == EndpointKind.ZEROTIER ||
+                localEpKind == EndpointKind.VPN_TUNNEL
+
+            return when (scope) {
+                HubAccessScope.ALL_INTERFACES -> true
+                HubAccessScope.VPN_ONLY -> isRemoteVpn
+                HubAccessScope.LAN_AND_VPN -> isRemoteVpn ||
+                    isPrivateLanIpv4(remoteIp) ||
+                    localEpKind == EndpointKind.WIFI_LAN ||
+                    localEpKind == EndpointKind.HOTSPOT_USB
+            }
+        }
+
         fun classifyNetworkInterface(interfaceName: String, ipAddress: String): EndpointKind {
             val iface = interfaceName.lowercase(Locale.US)
             return when {
                 isTailscaleIpv4(ipAddress) || iface.startsWith("tailscale") -> EndpointKind.TAILSCALE
+                iface.startsWith("wg") -> EndpointKind.WIREGUARD
+                iface.startsWith("zt") -> EndpointKind.ZEROTIER
+                iface.startsWith("tun") || iface.startsWith("tap") || iface.startsWith("utun") ||
+                    iface.startsWith("ppp") || iface.startsWith("ipsec") -> EndpointKind.VPN_TUNNEL
+                iface.startsWith("ap") || iface.startsWith("swlan") || iface.startsWith("rndis") ||
+                    iface.startsWith("usb") -> EndpointKind.HOTSPOT_USB
+                iface.startsWith("rmnet") || iface.startsWith("ccmni") || iface.startsWith("wwan") ||
+                    iface.startsWith("pdp") -> EndpointKind.OTHER
                 iface.startsWith("wlan") || iface.startsWith("eth") || iface.startsWith("en") ||
-                    ipAddress.startsWith("192.168.") || ipAddress.startsWith("10.") -> EndpointKind.WIFI_LAN
+                    isPrivateLanIpv4(ipAddress) -> EndpointKind.WIFI_LAN
                 else -> EndpointKind.OTHER
             }
+        }
+
+        fun buildAllEndpoints(port: Int, externalUrl: String): List<NetworkEndpoint> {
+            val list = mutableListOf<NetworkEndpoint>()
+            val cleanExt = externalUrl.trim().trimEnd('/')
+            if (cleanExt.startsWith("http://") || cleanExt.startsWith("https://")) {
+                list.add(
+                    NetworkEndpoint(
+                        interfaceName = "tunnel",
+                        ipAddress = cleanExt.substringAfter("://").substringBefore("/").substringBefore(":"),
+                        kind = EndpointKind.EXTERNAL_TUNNEL,
+                        url = cleanExt
+                    )
+                )
+            }
+            list.addAll(discoverNetworkEndpoints(port))
+            return list
         }
 
         fun discoverNetworkEndpoints(port: Int): List<NetworkEndpoint> {
@@ -1016,8 +1390,18 @@ class RemoteHubServer(
             }
         }
 
-        fun buildWebConsoleHtml(isAuthenticated: Boolean): String {
+        private fun escapeHtml(text: String): String {
+            return text
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\"", "&quot;")
+                .replace("'", "&#39;")
+        }
+
+        fun buildWebConsoleHtml(isAuthenticated: Boolean, usernameHint: String = "admin"): String {
             return if (!isAuthenticated) {
+                val safeHint = escapeHtml(usernameHint.ifBlank { "admin" })
                 """
                 <!DOCTYPE html>
                 <html lang="en">
@@ -1030,38 +1414,53 @@ class RemoteHubServer(
                     .card{background:#121b28;border:1px solid rgba(0,229,255,.35);border-radius:16px;padding:28px;max-width:380px;width:100%;box-shadow:0 16px 40px rgba(0,0,0,.5)}
                     h1{margin:0 0 6px;color:#00e5ff;font-size:20px}
                     p{margin:0 0 18px;color:#93a4b8;font-size:13px;line-height:1.45}
-                    input{width:100%;box-sizing:border-box;padding:12px 14px;border-radius:10px;border:1px solid #28374b;background:#0b111a;color:#fff;font-size:15px;margin-bottom:12px}
-                    button{width:100%;padding:12px;border:0;border-radius:10px;background:#00e5ff;color:#041017;font-weight:800;font-size:14px;cursor:pointer}
-                    .err{color:#ff6b6b;font-size:12px;margin-top:10px;min-height:16px}
+                    label{display:block;font-size:11px;font-weight:700;color:#93a4b8;margin-bottom:5px;text-transform:uppercase;letter-spacing:.04em}
+                    .pw-wrap{position:relative}
+                    input{width:100%;box-sizing:border-box;padding:12px 14px;border-radius:10px;border:1px solid #28374b;background:#0b111a;color:#fff;font-size:15px;margin-bottom:14px}
+                    .eye{position:absolute;right:10px;top:10px;background:transparent;color:#93a4b8;border:none;font-size:12px;cursor:pointer;padding:4px 8px;width:auto}
+                    button.submit{width:100%;padding:12px;border:none;border-radius:10px;background:#00e5ff;color:#051017;font-weight:800;font-size:15px;cursor:pointer}
+                    .err{color:#ff5252;font-size:13px;margin-top:12px;min-height:18px}
                   </style>
                 </head>
                 <body>
-                  <div class="card">
+                  <form class="card" onsubmit="return doLogin(event)">
                     <h1>OmniView Camera Hub</h1>
-                    <p>Enter the Hub Access Token shown on the Android device to watch live cameras, control PTZ, and browse timeline clips.</p>
-                    <form id="loginForm">
-                      <input id="tok" type="password" placeholder="Access Token / PIN" autocomplete="current-password" required/>
-                      <button type="submit">Unlock Hub</button>
-                      <div class="err" id="err"></div>
-                    </form>
-                  </div>
+                    <p>Sign in with your hub username and password to access live camera streams, PTZ controls, and timeline recordings.</p>
+                    <label for="usr">Username</label>
+                    <input id="usr" type="text" value="$safeHint" autocomplete="username" required/>
+                    <label for="pwd">Password</label>
+                    <div class="pw-wrap">
+                      <input id="pwd" type="password" placeholder="Enter hub password" autocomplete="current-password" required autofocus/>
+                      <button type="button" class="eye" onclick="toggleEye()">Show</button>
+                    </div>
+                    <button type="submit" class="submit">Unlock Hub</button>
+                    <div id="err" class="err"></div>
+                  </form>
                   <script>
-                    document.getElementById('loginForm').addEventListener('submit', async (e) => {
+                    function toggleEye(){
+                      const p=document.getElementById('pwd');
+                      p.type=p.type==='password'?'text':'password';
+                    }
+                    async function doLogin(e){
                       e.preventDefault();
-                      const tok = document.getElementById('tok').value.trim();
-                      const err = document.getElementById('err');
-                      err.textContent = '';
-                      try {
-                        const r = await fetch('/api/login', {
-                          method: 'POST',
-                          headers: {'Content-Type': 'application/json'},
-                          credentials: 'same-origin',
-                          body: JSON.stringify({token: tok})
+                      const err=document.getElementById('err');
+                      err.textContent='';
+                      try{
+                        const r=await fetch('/api/login',{
+                          method:'POST',
+                          credentials:'same-origin',
+                          headers:{'Content-Type':'application/json'},
+                          body:JSON.stringify({
+                            username:document.getElementById('usr').value.trim(),
+                            password:document.getElementById('pwd').value
+                          })
                         });
-                        if (r.ok) { location.reload(); }
-                        else { const j = await r.json().catch(() => ({})); err.textContent = j.error || 'Access denied'; }
-                      } catch (ex) { err.textContent = 'Connection error'; }
-                    });
+                        const data=await r.json().catch(()=>({}));
+                        if(r.ok && data.ok){ location.reload(); }
+                        else{ err.textContent=data.error||'Invalid username or password'; }
+                      }catch(ex){ err.textContent='Network error'; }
+                      return false;
+                    }
                   </script>
                 </body>
                 </html>
@@ -1073,9 +1472,9 @@ class RemoteHubServer(
                 <head>
                   <meta charset="utf-8"/>
                   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-                  <title>OmniView NVR Hub Console</title>
+                  <title>OmniView Hub Dashboard</title>
                   <style>
-                    :root{--bg:#0b111a;--card:#121b28;--surf:#182334;--cyan:#00e5ff;--green:#00e676;--red:#ff5252;--amber:#ffb300;--txt:#eef4fa;--mut:#8fa2b7}
+                    :root{--bg:#0b111a;--card:#121b28;--surf:#182334;--cyan:#00e5ff;--green:#00e676;--amber:#ffab00;--red:#ff5252;--txt:#eef4fa;--mut:#8fa2b7}
                     *{box-sizing:border-box}
                     body{margin:0;background:var(--bg);color:var(--txt);font-family:system-ui,-apple-system,sans-serif;padding:14px}
                     header{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;background:var(--card);border:1px solid #223045;border-radius:14px;padding:12px 16px;margin-bottom:14px}
@@ -1083,28 +1482,34 @@ class RemoteHubServer(
                     .meta{font-size:12px;color:var(--mut)}
                     .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
                     .pill{background:var(--surf);border:1px solid #2b3b52;border-radius:8px;padding:5px 10px;font-size:12px;font-weight:700}
-                    button{background:var(--surf);color:var(--txt);border:1px solid #2b3b52;border-radius:8px;padding:7px 11px;font-size:12px;font-weight:700;cursor:pointer}
+                    button,a.btn{background:var(--surf);color:var(--txt);border:1px solid #2b3b52;border-radius:8px;padding:7px 11px;font-size:12px;font-weight:700;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:4px}
                     button.primary{background:var(--cyan);color:#051017;border-color:var(--cyan)}
                     button.danger{background:#3b161b;color:var(--red);border-color:var(--red)}
-                    .layout{display:grid;grid-template-columns:2fr 1fr;gap:14px}
-                    @media(max-width:900px){.layout{grid-template-columns:1fr}}
+                    .layout{display:grid;grid-template-columns:1.8fr 1.1fr;gap:14px}
+                    @media(max-width:960px){.layout{grid-template-columns:1fr}}
                     .panel{background:var(--card);border:1px solid #223045;border-radius:14px;padding:14px}
                     h2{margin:0 0 10px;font-size:15px;color:var(--cyan)}
                     .cams{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
                     .cam{background:var(--surf);border-radius:12px;overflow:hidden;border:1px solid #26354a}
-                    .cam img{width:100%;aspect-ratio:16/9;object-fit:cover;display:block;background:#000}
+                    .cam img{width:100%;aspect-ratio:16/9;object-fit:cover;display:block;background:#05080f;cursor:pointer}
                     .cam-body{padding:10px}
                     .cam-top{display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:6px}
-                    .badge{font-size:10px;padding:2px 6px;border-radius:5px;font-weight:800}
+                    .badge{font-size:10px;padding:2px 6px;border-radius:5px;font-weight:800;background:rgba(255,255,255,.08)}
                     .live{background:rgba(0,230,118,.18);color:var(--green)}
                     .rec{background:rgba(255,82,82,.25);color:var(--red)}
                     .ptz-grid{display:grid;grid-template-columns:repeat(3,52px);gap:6px;justify-content:center;margin:10px 0}
-                    .ptz-grid button{height:46px;font-size:15px}
-                    video{width:100%;border-radius:10px;background:#000;max-height:300px}
-                    .clips{max-height:300px;overflow:auto;display:flex;flex-direction:column;gap:6px;margin-top:8px}
+                    .ptz-grid button{height:46px;font-size:15px;justify-content:center}
+                    video{width:100%;border-radius:10px;background:#000;max-height:320px;display:block}
+                    .clips{max-height:280px;overflow:auto;display:flex;flex-direction:column;gap:6px;margin-top:8px}
                     .clip{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 10px;background:var(--surf);border-radius:9px;cursor:pointer;border:1px solid transparent}
-                    .clip.active{border-color:var(--cyan)}
+                    .clip.active{border-color:var(--cyan);background:#1b2c42}
                     .mut{color:var(--mut);font-size:11px}
+                    .diag{font-size:11px;padding:6px 10px;border-radius:8px;margin-top:6px;background:var(--surf);color:var(--cyan)}
+                    .diag.warn{background:#34250b;color:var(--amber)}
+                    .modal{position:fixed;inset:0;background:rgba(4,7,13,.88);display:none;align-items:center;justify-content:center;padding:16px;z-index:50}
+                    .modal.open{display:flex}
+                    .modal-box{background:var(--card);border:1px solid rgba(0,229,255,.45);border-radius:16px;padding:16px;max-width:860px;width:100%;max-height:94vh;overflow:auto}
+                    .modal-box img{width:100%;max-height:62vh;object-fit:contain;background:#000;border-radius:10px;display:block}
                   </style>
                 </head>
                 <body>
@@ -1116,6 +1521,7 @@ class RemoteHubServer(
                     <div class="row">
                       <span class="pill" id="powerPill">--%</span>
                       <span class="pill" id="storagePill">-- MB free</span>
+                      <button id="gridModeBtn" onclick="toggleGridStreamMode()">Grid: Adaptive</button>
                       <button onclick="refreshAll()">Refresh</button>
                       <button onclick="logout()">Sign Out</button>
                     </div>
@@ -1123,8 +1529,11 @@ class RemoteHubServer(
 
                   <div class="layout">
                     <div class="panel">
-                      <h2>Live Cameras</h2>
-                      <div class="cams" id="camsGrid"></div>
+                      <div class="cam-top">
+                        <h2 style="margin:0">Live Cameras</h2>
+                        <span class="mut">Tap any camera image for full MJPEG theater</span>
+                      </div>
+                      <div class="cams" id="camsGrid" style="margin-top:10px"></div>
                     </div>
 
                     <div style="display:flex;flex-direction:column;gap:14px">
@@ -1151,21 +1560,47 @@ class RemoteHubServer(
 
                       <div class="panel">
                         <h2>Seamless Storage Playback</h2>
-                        <video id="clipPlayer" controls playsinline></video>
+                        <video id="clipPlayer" controls playsinline preload="metadata"></video>
                         <div class="row" style="margin-top:8px;justify-content:space-between">
-                          <label class="mut"><input type="checkbox" id="autoNext" checked/> Seamless auto-advance timeline</label>
+                          <div class="row">
+                            <button onclick="stepClip(-1)">⏮ Prev</button>
+                            <button onclick="stepClip(1)">Next ⏭</button>
+                            <button id="speedBtn" onclick="cycleSpeed()">1x</button>
+                            <a id="downloadClipLink" class="btn" href="#" download>⬇ MP4</a>
+                          </div>
                           <select id="clipCamFilter" onchange="renderClips()" style="padding:5px;border-radius:7px;background:#0b111a;color:#fff;border:1px solid #2b3b52"></select>
                         </div>
+                        <label class="mut" style="display:block;margin-top:6px"><input type="checkbox" id="autoNext" checked/> Seamless auto-advance timeline</label>
+                        <div id="clipDiag" class="diag">Select or press play on a saved clip.</div>
                         <div class="clips" id="clipsList"></div>
                       </div>
+                    </div>
+                  </div>
+
+                  <div id="theaterModal" class="modal" onclick="if(event.target===this)closeTheater()">
+                    <div class="modal-box">
+                      <div class="cam-top" style="margin-bottom:10px">
+                        <strong id="theaterTitle" style="color:var(--cyan);font-size:16px">Camera Live</strong>
+                        <div class="row">
+                          <button onclick="toggleTheaterStreamMode()" id="theaterModeBtn">Mode: MJPEG</button>
+                          <button class="danger" onclick="closeTheater()">Close ✕</button>
+                        </div>
+                      </div>
+                      <img id="theaterImg" alt="Live camera theater"/>
                     </div>
                   </div>
 
                   <script>
                     let cameras = [];
                     let clips = [];
-                    let activeClipIndex = -1;
+                    let activeClipId = null;
                     let holdTimer = null;
+                    let gridUseMjpeg = false;
+                    let playbackSpeed = 1;
+                    let theaterCamId = null;
+                    let theaterUseMjpeg = true;
+                    let camLayoutSignature = '';
+                    const snapshotTimers = {};
 
                     async function api(url, opts = {}) {
                       const res = await fetch(url, { credentials: 'same-origin', ...opts });
@@ -1180,7 +1615,7 @@ class RemoteHubServer(
                         api('/api/clips')
                       ]);
                       document.getElementById('hubMeta').textContent =
-                        st.deviceName + ' • Port ' + st.port + ' • ' + st.cameraCount + ' cams • ' + st.activeConnections + ' active';
+                        st.deviceName + ' • ' + (st.username || 'admin') + ' • Port ' + st.port + ' • ' + st.cameraCount + ' cams • ' + st.activeConnections + ' active';
                       document.getElementById('powerPill').textContent =
                         st.batteryPercent + '% ' + (st.isPluggedIn ? '⚡ Plugged' : '🔋 Battery');
                       document.getElementById('storagePill').textContent = st.freeStorageMb + ' MB free';
@@ -1189,41 +1624,142 @@ class RemoteHubServer(
                       renderCameras();
                       renderSelectors();
                       renderClips();
+                      if (!activeClipId && clips.length > 0) {
+                        selectClipById(clips[clips.length - 1].id, false);
+                      }
+                    }
+
+                    function toggleGridStreamMode() {
+                      gridUseMjpeg = !gridUseMjpeg;
+                      document.getElementById('gridModeBtn').textContent = gridUseMjpeg ? 'Grid: MJPEG' : 'Grid: Adaptive';
+                      camLayoutSignature = '';
+                      renderCameras();
+                    }
+
+                    function scheduleSnapshotLoop(camId) {
+                      clearTimeout(snapshotTimers[camId]);
+                      if (gridUseMjpeg || theaterCamId === camId) return;
+                      const img = document.getElementById('cam-img-' + camId);
+                      if (!img) return;
+                      img.src = '/api/cameras/' + encodeURIComponent(camId) + '/frame.jpg?ts=' + Date.now();
+                    }
+
+                    function onGridImgDone(camId) {
+                      clearTimeout(snapshotTimers[camId]);
+                      if (!gridUseMjpeg) {
+                        snapshotTimers[camId] = setTimeout(() => scheduleSnapshotLoop(camId), 550);
+                      }
                     }
 
                     function renderCameras() {
                       const grid = document.getElementById('camsGrid');
-                      grid.innerHTML = cameras.map(c => {
-                        const badge = c.isRecording
-                          ? '<span class="badge rec">● REC</span>'
-                          : (c.isLive ? '<span class="badge live">● LIVE</span>' : '<span class="badge">STANDBY</span>');
-                        const recBtn = c.isRecording
-                          ? '<button class="danger" onclick="toggleRec(\''+c.id+'\', true)">Stop Rec</button>'
-                          : '<button class="primary" onclick="toggleRec(\''+c.id+'\', false)">Record</button>';
-                        return '<div class="cam">' +
-                          '<img src="/api/cameras/'+encodeURIComponent(c.id)+'/mjpeg" onerror="this.src=\'/api/cameras/'+encodeURIComponent(c.id)+'/frame.jpg?ts=\'+Date.now()" alt="'+c.name+'"/>' +
-                          '<div class="cam-body">' +
-                            '<div class="cam-top"><strong>'+c.name+'</strong>'+badge+'</div>' +
-                            '<div class="mut">'+(c.location || '')+' • '+c.fps+' fps • '+c.bitrateKbps+' kbps '+(c.resolution || '')+'</div>' +
-                            '<div class="row" style="margin-top:8px">' +
-                              recBtn +
-                              '<button onclick="snapCam(\''+c.id+'\')">Snapshot</button>' +
-                              '<button onclick="document.getElementById(\'ptzCam\').value=\''+c.id+'\'">Select PTZ</button>' +
-                            '</div>' +
-                          '</div></div>';
-                      }).join('');
+                      const sig = cameras.map(c => c.id).join(',') + '|' + gridUseMjpeg;
+                      if (sig !== camLayoutSignature) {
+                        camLayoutSignature = sig;
+                        Object.keys(snapshotTimers).forEach(k => clearTimeout(snapshotTimers[k]));
+                        grid.innerHTML = cameras.map(c => {
+                          const cid = encodeURIComponent(c.id);
+                          const srcAttr = gridUseMjpeg
+                            ? 'src="/api/cameras/' + cid + '/mjpeg"'
+                            : 'src="/api/cameras/' + cid + '/frame.jpg?ts=' + Date.now() + '" onload="onGridImgDone(\'' + c.id + '\')" onerror="onGridImgDone(\'' + c.id + '\')"';
+                          return '<div class="cam" id="cam-card-' + c.id + '">' +
+                            '<img id="cam-img-' + c.id + '" ' + srcAttr + ' onclick="openTheater(\'' + c.id + '\')" alt="' + c.name + '"/>' +
+                            '<div class="cam-body">' +
+                              '<div class="cam-top"><strong>' + c.name + '</strong><span id="cam-badge-' + c.id + '" class="badge"></span></div>' +
+                              '<div class="mut" id="cam-meta-' + c.id + '"></div>' +
+                              '<div class="row" style="margin-top:8px">' +
+                                '<button id="cam-recbtn-' + c.id + '" onclick="toggleRecById(\'' + c.id + '\')"></button>' +
+                                '<button onclick="openTheater(\'' + c.id + '\')">Live Stream</button>' +
+                                '<button onclick="snapCam(\'' + c.id + '\')">Snapshot</button>' +
+                                '<button onclick="document.getElementById(\'ptzCam\').value=\'' + c.id + '\'">PTZ</button>' +
+                              '</div>' +
+                            '</div></div>';
+                        }).join('');
+                      }
+
+                      // Update status badges & metrics in-place so active video frames stay smooth
+                      cameras.forEach(c => {
+                        const badge = document.getElementById('cam-badge-' + c.id);
+                        const meta = document.getElementById('cam-meta-' + c.id);
+                        const recBtn = document.getElementById('cam-recbtn-' + c.id);
+                        if (badge) {
+                          badge.className = c.isRecording ? 'badge rec' : (c.isLive ? 'badge live' : 'badge');
+                          badge.textContent = c.isRecording ? '● REC' : (c.isLive ? '● LIVE' : 'STANDBY');
+                        }
+                        if (meta) {
+                          meta.textContent = (c.location || '') + ' • ' + c.fps + ' fps • ' + c.bitrateKbps + ' kbps ' + (c.resolution || '');
+                        }
+                        if (recBtn) {
+                          recBtn.className = c.isRecording ? 'danger' : 'primary';
+                          recBtn.textContent = c.isRecording ? 'Stop Rec' : 'Record';
+                        }
+                      });
+                    }
+
+                    function openTheater(camId) {
+                      const cam = cameras.find(c => c.id === camId);
+                      theaterCamId = camId;
+                      theaterUseMjpeg = true;
+                      document.getElementById('theaterTitle').textContent = (cam ? cam.name : camId) + ' • Live Stream';
+                      document.getElementById('theaterModeBtn').textContent = 'Mode: MJPEG';
+                      document.getElementById('ptzCam').value = camId;
+                      document.getElementById('theaterModal').classList.add('open');
+                      updateTheaterSource();
+                    }
+
+                    function updateTheaterSource() {
+                      if (!theaterCamId) return;
+                      const img = document.getElementById('theaterImg');
+                      const cid = encodeURIComponent(theaterCamId);
+                      clearTimeout(snapshotTimers['__theater']);
+                      if (theaterUseMjpeg) {
+                        img.onload = null;
+                        img.onerror = () => {
+                          theaterUseMjpeg = false;
+                          document.getElementById('theaterModeBtn').textContent = 'Mode: Snapshot';
+                          updateTheaterSource();
+                        };
+                        img.src = '/api/cameras/' + cid + '/mjpeg?ts=' + Date.now();
+                      } else {
+                        img.onload = () => {
+                          if (theaterCamId && !theaterUseMjpeg) {
+                            snapshotTimers['__theater'] = setTimeout(updateTheaterSource, 280);
+                          }
+                        };
+                        img.onerror = () => {
+                          if (theaterCamId && !theaterUseMjpeg) {
+                            snapshotTimers['__theater'] = setTimeout(updateTheaterSource, 900);
+                          }
+                        };
+                        img.src = '/api/cameras/' + cid + '/frame.jpg?ts=' + Date.now();
+                      }
+                    }
+
+                    function toggleTheaterStreamMode() {
+                      theaterUseMjpeg = !theaterUseMjpeg;
+                      document.getElementById('theaterModeBtn').textContent = theaterUseMjpeg ? 'Mode: MJPEG' : 'Mode: Snapshot';
+                      updateTheaterSource();
+                    }
+
+                    function closeTheater() {
+                      const prevId = theaterCamId;
+                      theaterCamId = null;
+                      clearTimeout(snapshotTimers['__theater']);
+                      document.getElementById('theaterImg').src = '';
+                      document.getElementById('theaterModal').classList.remove('open');
+                      if (prevId && !gridUseMjpeg) scheduleSnapshotLoop(prevId);
                     }
 
                     function renderSelectors() {
                       const ptzSel = document.getElementById('ptzCam');
                       const prevPtz = ptzSel.value;
-                      ptzSel.innerHTML = cameras.map(c => '<option value="'+c.id+'">'+c.name+'</option>').join('');
+                      ptzSel.innerHTML = cameras.map(c => '<option value="' + c.id + '">' + c.name + '</option>').join('');
                       if (prevPtz) ptzSel.value = prevPtz;
 
                       const clipSel = document.getElementById('clipCamFilter');
                       const prevClip = clipSel.value;
                       clipSel.innerHTML = '<option value="">All Cameras</option>' +
-                        cameras.map(c => '<option value="'+c.id+'">'+c.name+'</option>').join('');
+                        cameras.map(c => '<option value="' + c.id + '">' + c.name + '</option>').join('');
                       clipSel.value = prevClip;
                     }
 
@@ -1233,35 +1769,68 @@ class RemoteHubServer(
                       const box = document.getElementById('clipsList');
                       if (!filtered.length) { box.innerHTML = '<div class="mut">No clips saved yet.</div>'; return; }
                       const list = filtered.slice().reverse();
-                      box.innerHTML = list.map((c, idx) => {
+                      box.innerHTML = list.map(c => {
                         const dt = new Date(c.timestamp).toLocaleString();
-                        const globalIdx = clips.findIndex(x => x.id === c.id);
-                        return '<div class="clip '+(globalIdx === activeClipIndex ? 'active' : '')+'" onclick="playClipById(\''+c.id+'\')">' +
-                          '<div><strong>'+c.cameraName+'</strong><div class="mut">'+dt+' • '+c.durationSeconds+'s • '+c.fileSizeMb.toFixed(1)+' MB</div></div>' +
+                        const sz = c.fileBytes ? (c.fileBytes < 1024 ? (c.fileBytes + ' B') : (c.fileSizeMb.toFixed(2) + ' MB')) : (c.fileSizeMb.toFixed(1) + ' MB');
+                        return '<div class="clip ' + (c.id === activeClipId ? 'active' : '') + '" onclick="selectClipById(\'' + c.id + '\', true)">' +
+                          '<div><strong>' + c.cameraName + '</strong><div class="mut">' + dt + ' • ' + c.durationSeconds + 's • ' + sz + '</div></div>' +
                           '<span class="badge live">▶</span></div>';
                       }).join('');
                     }
 
-                    function playClipById(id) {
-                      activeClipIndex = clips.findIndex(c => c.id === id);
-                      if (activeClipIndex < 0) return;
-                      const clip = clips[activeClipIndex];
+                    function selectClipById(id, autoPlay) {
+                      const clip = clips.find(c => c.id === id);
+                      if (!clip) return;
+                      activeClipId = clip.id;
                       const v = document.getElementById('clipPlayer');
+                      const dl = document.getElementById('downloadClipLink');
+                      const diag = document.getElementById('clipDiag');
+                      dl.href = clip.streamUrl + '?download=1';
+                      diag.className = 'diag';
+                      if (clip.fileBytes && clip.fileBytes <= 64) {
+                        diag.className = 'diag warn';
+                        diag.textContent = 'Clip has only ' + clip.fileBytes + ' bytes (header-only stub). Record a fresh clip to stream video frames.';
+                      } else {
+                        diag.textContent = 'Loaded: ' + clip.cameraName + ' • ' + new Date(clip.timestamp).toLocaleTimeString();
+                      }
                       v.src = clip.streamUrl;
-                      v.play().catch(() => {});
+                      v.playbackRate = playbackSpeed;
+                      if (autoPlay) {
+                        v.play().catch(err => {
+                          diag.className = 'diag warn';
+                          diag.textContent = 'Tap video play or download MP4 (' + (err.message || 'autoplay blocked') + ')';
+                        });
+                      }
                       renderClips();
                     }
 
-                    document.getElementById('clipPlayer').addEventListener('ended', () => {
-                      if (!document.getElementById('autoNext').checked) return;
+                    function stepClip(delta) {
                       const filter = document.getElementById('clipCamFilter').value;
                       const timeline = filter ? clips.filter(c => c.cameraId === filter) : clips;
-                      const cur = clips[activeClipIndex];
-                      if (!cur) return;
-                      const pos = timeline.findIndex(c => c.id === cur.id);
-                      if (pos >= 0 && pos + 1 < timeline.length) {
-                        playClipById(timeline[pos + 1].id);
-                      }
+                      if (!timeline.length) return;
+                      const idx = timeline.findIndex(c => c.id === activeClipId);
+                      const nextIdx = idx < 0 ? 0 : Math.max(0, Math.min(timeline.length - 1, idx + delta));
+                      selectClipById(timeline[nextIdx].id, true);
+                    }
+
+                    function cycleSpeed() {
+                      const speeds = [0.5, 1, 2, 4];
+                      const next = speeds[(speeds.indexOf(playbackSpeed) + 1) % speeds.length];
+                      playbackSpeed = next;
+                      document.getElementById('speedBtn').textContent = next + 'x';
+                      document.getElementById('clipPlayer').playbackRate = next;
+                    }
+
+                    const clipPlayerEl = document.getElementById('clipPlayer');
+                    clipPlayerEl.addEventListener('error', () => {
+                      const diag = document.getElementById('clipDiag');
+                      diag.className = 'diag warn';
+                      const code = clipPlayerEl.error ? clipPlayerEl.error.code : 0;
+                      diag.textContent = 'Browser could not decode this clip (code ' + code + '). Use ⬇ MP4 download or record a new clip.';
+                    });
+                    clipPlayerEl.addEventListener('ended', () => {
+                      if (!document.getElementById('autoNext').checked) return;
+                      stepClip(1);
                     });
 
                     async function ptzCmd(action, pan = 0, tilt = 0, zoom = 0) {
@@ -1283,7 +1852,9 @@ class RemoteHubServer(
                     function ptzHoldStop() { clearTimeout(holdTimer); ptzCmd('stop'); }
                     function ptzStep(pan, tilt, zoom) { ptzCmd('move', pan, tilt, zoom); setTimeout(() => ptzCmd('stop'), 400); }
 
-                    async function toggleRec(id, isRecording) {
+                    async function toggleRecById(id) {
+                      const cam = cameras.find(c => c.id === id);
+                      const isRecording = !!(cam && cam.isRecording);
                       await api('/api/cameras/' + encodeURIComponent(id) + '/record/' + (isRecording ? 'stop' : 'start'), { method: 'POST' });
                       setTimeout(refreshAll, 350);
                     }
@@ -1308,34 +1879,92 @@ class RemoteHubServer(
 }
 
 /**
- * SharedPreferences persistence for Remote Hub settings (avoids destructive Room DB migration).
+ * SharedPreferences persistence for Remote Hub settings.
+ * Stores ONLY PBKDF2-HMAC-SHA256 salt+hash and SHA-256 hashed API key — never plaintext passwords.
  */
 object RemoteHubPreferences {
     private const val PREFS_NAME = "omniview_hub_prefs"
     private const val KEY_ENABLED = "hub_enabled"
     private const val KEY_PORT = "hub_port"
-    private const val KEY_TOKEN = "hub_access_token"
+    private const val KEY_USERNAME = "hub_username"
+    private const val KEY_SALT = "hub_password_salt_hex"
+    private const val KEY_HASH = "hub_password_hash_hex"
+    private const val KEY_ITERS = "hub_password_iters"
+    private const val KEY_API_KEY_ENABLED = "hub_api_key_enabled"
+    private const val KEY_API_KEY_HASH = "hub_api_key_sha256"
     private const val KEY_ALLOW_CONTROL = "hub_allow_remote_control"
+    private const val KEY_SCOPE = "hub_access_scope"
+    private const val KEY_PROFILE = "hub_connection_profile"
+    private const val KEY_EXTERNAL_URL = "hub_external_url"
+    private const val KEY_LEGACY_TOKEN = "hub_access_token"
 
     data class HubConfig(
         val enabled: Boolean,
         val port: Int,
-        val accessToken: String,
-        val allowRemoteControl: Boolean
+        val username: String,
+        val passwordSaltHex: String,
+        val passwordHashHex: String,
+        val passwordIterations: Int,
+        val apiKeyEnabled: Boolean,
+        val apiKeySha256Hex: String,
+        val allowRemoteControl: Boolean,
+        val accessScope: HubAccessScope,
+        val connectionProfile: HubConnectionProfile,
+        val externalUrl: String,
+        val firstBootGeneratedPassword: String? = null
     )
 
     fun load(context: Context): HubConfig {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        var token = prefs.getString(KEY_TOKEN, null).orEmpty()
-        if (token.isBlank()) {
-            token = RemoteHubServer.generateSecureToken(12)
-            prefs.edit().putString(KEY_TOKEN, token).apply()
+        val username = prefs.getString(KEY_USERNAME, null)?.trim()?.ifBlank { "admin" } ?: "admin"
+        var saltHex = prefs.getString(KEY_SALT, null).orEmpty()
+        var hashHex = prefs.getString(KEY_HASH, null).orEmpty()
+        var iters = prefs.getInt(KEY_ITERS, RemoteHubServer.DEFAULT_PBKDF2_ITERATIONS)
+            .coerceAtLeast(10_000)
+        var generatedOnFirstBoot: String? = null
+
+        if (saltHex.isBlank() || hashHex.isBlank()) {
+            // Migrate legacy token if present, otherwise generate a fresh strong setup password once
+            val legacy = prefs.getString(KEY_LEGACY_TOKEN, null).orEmpty().trim()
+            val initialPass = legacy.ifBlank { RemoteHubServer.generateStrongPassword(12) }
+            val (s, h) = RemoteHubServer.hashPassword(initialPass, RemoteHubServer.DEFAULT_PBKDF2_ITERATIONS)
+            saltHex = s
+            hashHex = h
+            iters = RemoteHubServer.DEFAULT_PBKDF2_ITERATIONS
+            generatedOnFirstBoot = initialPass
+            prefs.edit()
+                .putString(KEY_USERNAME, username)
+                .putString(KEY_SALT, saltHex)
+                .putString(KEY_HASH, hashHex)
+                .putInt(KEY_ITERS, iters)
+                .remove(KEY_LEGACY_TOKEN)
+                .apply()
         }
+
+        val scope = runCatching {
+            HubAccessScope.valueOf(prefs.getString(KEY_SCOPE, HubAccessScope.ALL_INTERFACES.name).orEmpty())
+        }.getOrDefault(HubAccessScope.ALL_INTERFACES)
+
+        val profile = runCatching {
+            HubConnectionProfile.valueOf(
+                prefs.getString(KEY_PROFILE, HubConnectionProfile.AUTO_BEST.name).orEmpty()
+            )
+        }.getOrDefault(HubConnectionProfile.AUTO_BEST)
+
         return HubConfig(
             enabled = prefs.getBoolean(KEY_ENABLED, false),
             port = RemoteHubServer.normalizePort(prefs.getInt(KEY_PORT, RemoteHubServer.DEFAULT_PORT)),
-            accessToken = token,
-            allowRemoteControl = prefs.getBoolean(KEY_ALLOW_CONTROL, true)
+            username = username,
+            passwordSaltHex = saltHex,
+            passwordHashHex = hashHex,
+            passwordIterations = iters,
+            apiKeyEnabled = prefs.getBoolean(KEY_API_KEY_ENABLED, false),
+            apiKeySha256Hex = prefs.getString(KEY_API_KEY_HASH, "").orEmpty(),
+            allowRemoteControl = prefs.getBoolean(KEY_ALLOW_CONTROL, true),
+            accessScope = scope,
+            connectionProfile = profile,
+            externalUrl = prefs.getString(KEY_EXTERNAL_URL, "").orEmpty(),
+            firstBootGeneratedPassword = generatedOnFirstBoot
         )
     }
 
@@ -1344,15 +1973,24 @@ object RemoteHubPreferences {
             .edit()
             .putBoolean(KEY_ENABLED, config.enabled)
             .putInt(KEY_PORT, RemoteHubServer.normalizePort(config.port))
-            .putString(KEY_TOKEN, config.accessToken)
+            .putString(KEY_USERNAME, config.username.trim().ifBlank { "admin" })
+            .putString(KEY_SALT, config.passwordSaltHex)
+            .putString(KEY_HASH, config.passwordHashHex)
+            .putInt(KEY_ITERS, config.passwordIterations.coerceAtLeast(10_000))
+            .putBoolean(KEY_API_KEY_ENABLED, config.apiKeyEnabled)
+            .putString(KEY_API_KEY_HASH, config.apiKeySha256Hex)
             .putBoolean(KEY_ALLOW_CONTROL, config.allowRemoteControl)
+            .putString(KEY_SCOPE, config.accessScope.name)
+            .putString(KEY_PROFILE, config.connectionProfile.name)
+            .putString(KEY_EXTERNAL_URL, config.externalUrl.trim())
+            .remove(KEY_LEGACY_TOKEN)
             .apply()
     }
 }
 
 /**
- * Bridges live Android surveillance engines (ExoPlayer frame capture, ONVIF PTZ, Recording, Battery/Storage)
- * to [RemoteHubServer].
+ * Bridges live Android surveillance engines (ExoPlayer frame capture, headless ImageReader / MP4 retriever fallback,
+ * ONVIF PTZ, Recording, Battery/Storage telemetry) to [RemoteHubServer].
  */
 class AndroidRemoteHubBackend(
     private val context: Context,
@@ -1468,7 +2106,6 @@ class AndroidRemoteHubBackend(
         val latch = CountDownLatch(1)
         mainHandler.post {
             try {
-                // Ensure player is alive if remote viewer connects before Live screen visits it
                 streamManager.getOrCreatePlayer(cam)
                 liveBmp = streamManager.captureFrame(cameraId, 960, 540)
             } catch (_: Exception) {
@@ -1477,7 +2114,7 @@ class AndroidRemoteHubBackend(
             }
         }
         try {
-            latch.await(450, TimeUnit.MILLISECONDS)
+            latch.await(500, TimeUnit.MILLISECONDS)
         } catch (_: Exception) {}
 
         liveBmp?.let { bmp ->
@@ -1491,9 +2128,35 @@ class AndroidRemoteHubBackend(
             }
         }
 
-        // Fallback if screen is turned off (spare hub standby) or no live surface attached
+        // Secondary fallback: extract frame from newest recorded MP4 clip for this camera
+        extractLatestClipFrameJpeg(cameraId)?.let { clipJpeg ->
+            lastFrameCache[cameraId] = clipJpeg
+            return clipJpeg
+        }
+
         lastFrameCache[cameraId]?.let { return it }
         return renderStandbyTelemetryJpeg(cam)
+    }
+
+    private fun extractLatestClipFrameJpeg(cameraId: String): ByteArray? {
+        val latest = clipsProvider()
+            .filter { it.cameraId == cameraId }
+            .maxByOrNull { it.timestamp } ?: return null
+        val file = File(latest.filePath)
+        if (!file.exists() || file.length() < 1024L) return null
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(file.absolutePath)
+            val frame = retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC) ?: return null
+            val baos = ByteArrayOutputStream()
+            frame.compress(Bitmap.CompressFormat.JPEG, 75, baos)
+            frame.recycle()
+            baos.toByteArray().takeIf { it.isNotEmpty() }
+        } catch (_: Exception) {
+            null
+        } finally {
+            runCatching { retriever.release() }
+        }
     }
 
     private fun renderStandbyTelemetryJpeg(cam: CameraEntity): ByteArray {
@@ -1519,7 +2182,7 @@ class AndroidRemoteHubBackend(
 
         canvas.drawText(cam.name, 32f, 64f, titlePaint)
         canvas.drawText(
-            if (isRec) "● RECORDING ACTIVE (HUB STANDBY)" else "HUB STANDBY (SCREEN OFF / NO LIVE SURFACE)",
+            if (isRec) "● RECORDING ACTIVE (HEADLESS HUB)" else "HUB STANDBY (OPEN LIVE STREAM OR PRESS RECORD)",
             32f,
             110f,
             bodyPaint

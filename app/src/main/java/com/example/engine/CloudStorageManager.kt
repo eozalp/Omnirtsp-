@@ -1,6 +1,7 @@
 package com.example.engine
 
 import android.content.Context
+import android.os.StatFs
 import com.example.R
 import com.example.data.local.AppDatabase
 import com.example.data.model.CloudConfigEntity
@@ -11,6 +12,7 @@ import com.example.i18n.AppLocaleManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -55,10 +57,50 @@ class CloudStorageManager(
     private val _lastConnectionTestResult = MutableStateFlow<String?>(null)
     val lastConnectionTestResult: StateFlow<String?> = _lastConnectionTestResult.asStateFlow()
 
+    private val _detailedConnectionResult = MutableStateFlow<StorageConnectionTestResult?>(null)
+    val detailedConnectionResult: StateFlow<StorageConnectionTestResult?> = _detailedConnectionResult.asStateFlow()
+
+    private val _extendedConfig = MutableStateFlow(RemoteStoragePreferences.load(context))
+    val extendedConfig: StateFlow<ExtendedStorageConfig> = _extendedConfig.asStateFlow()
+
+    private val _isScanningStorage = MutableStateFlow(false)
+    val isScanningStorage: StateFlow<Boolean> = _isScanningStorage.asStateFlow()
+
+    private val _discoveredEndpoints = MutableStateFlow<List<DiscoveredStorageEndpoint>>(emptyList())
+    val discoveredEndpoints: StateFlow<List<DiscoveredStorageEndpoint>> = _discoveredEndpoints.asStateFlow()
+
+    fun saveExtendedConfig(config: ExtendedStorageConfig) {
+        _extendedConfig.value = config
+        RemoteStoragePreferences.save(context, config)
+    }
+
+    fun scanNetworkStorage() {
+        if (_isScanningStorage.value) return
+        scope.launch {
+            _isScanningStorage.value = true
+            try {
+                _discoveredEndpoints.value = RemoteStorageDiscovery.discoverStorageServers()
+            } catch (_: Exception) {
+                _discoveredEndpoints.value = emptyList()
+            } finally {
+                _isScanningStorage.value = false
+            }
+        }
+    }
+
+    fun checkFreeSpaceMb(): Long {
+        return try {
+            val stat = StatFs(context.filesDir.absolutePath)
+            (stat.availableBlocksLong * stat.blockSizeLong) / (1024L * 1024L)
+        } catch (_: Exception) {
+            0L
+        }
+    }
+
     fun uploadClipToCloud(clip: RecordedClipEntity, forced: Boolean = false) {
         scope.launch {
-            val config = database.cloudConfigDao().getCloudConfigSync()
-                ?: CloudConfigEntity()
+            val config = database.cloudConfigDao().getCloudConfigSync() ?: CloudConfigEntity()
+            val ext = _extendedConfig.value
 
             if (!forced && !config.autoSyncRecordings) {
                 return@launch
@@ -78,39 +120,126 @@ class CloudStorageManager(
                     throw IllegalStateException("Recording file missing or empty: ${file.name}")
                 }
 
-                val request = buildUploadRequest(config, clip, file)
-                _syncProgress.value = AppLocaleManager.getString(context, R.string.cloud_uploading_kb, (file.length() / 1024).toInt(), config.provider.name)
+                val relativePath = RemoteStorageProtocolClient.buildRemoteRelativePath(
+                    layout = ext.folderLayout,
+                    cameraName = clip.cameraName,
+                    timestampMs = clip.timestamp,
+                    fileName = file.name
+                )
 
-                val response = withContext(Dispatchers.IO) {
-                    httpClient.newCall(request).execute()
+                var lastErr: Throwable? = null
+                var uploadedUrl: String? = null
+                var statusLabel = "OK"
+                val maxAttempts = (ext.uploadRetries + 1).coerceIn(1, 6)
+
+                for (attempt in 1..maxAttempts) {
+                    try {
+                        when {
+                            config.provider == CloudProviderType.SMB_CIFS -> {
+                                if (config.safFolderUri.isNotBlank()) {
+                                    _syncProgress.value = AppLocaleManager.getString(
+                                        context,
+                                        R.string.cloud_uploading_kb,
+                                        (file.length() / 1024).toInt(),
+                                        "SMB/SAF"
+                                    )
+                                    val safRes = DeviceStorageExporter.exportClipToSafTree(
+                                        context = context,
+                                        sourceFile = file,
+                                        treeUriString = config.safFolderUri
+                                    )
+                                    val uri = safRes.getOrThrow()
+                                    uploadedUrl = uri.toString()
+                                    statusLabel = "SAF-SMB"
+                                } else {
+                                    throw IllegalStateException(
+                                        "SMB direct file write requires selecting your mounted SMB share folder via Android Files (SAF), or switching NAS protocol to FTP / WebDAV."
+                                    )
+                                }
+                            }
+
+                            config.provider == CloudProviderType.FTP_NAS_STORAGE &&
+                                ext.nasSubProtocol == NasSubProtocol.FTP -> {
+                                val host = ext.nasHost.ifBlank { RemoteStorageProtocolClient.extractHost(config.endpointUrl) }
+                                _syncProgress.value = AppLocaleManager.getString(
+                                    context,
+                                    R.string.cloud_uploading_kb,
+                                    (file.length() / 1024).toInt(),
+                                    "FTP"
+                                )
+                                val ftpRes = RemoteStorageProtocolClient.uploadViaFtp(
+                                    host = host,
+                                    port = ext.nasPort,
+                                    username = config.nasUsername,
+                                    password = config.nasPassword,
+                                    baseDir = ext.nasRemotePath,
+                                    relativePath = relativePath,
+                                    file = file
+                                )
+                                uploadedUrl = ftpRes.getOrThrow()
+                                statusLabel = "FTP 226"
+                            }
+
+                            config.provider == CloudProviderType.FTP_NAS_STORAGE &&
+                                ext.nasSubProtocol == NasSubProtocol.SFTP_PROBE -> {
+                                throw IllegalStateException(
+                                    "SFTP key/SSH stream requires FTP, WebDAV, S3, or mounted SAF share for unattended uploads."
+                                )
+                            }
+
+                            else -> {
+                                val request = buildUploadRequest(config, ext, clip, file, relativePath)
+                                _syncProgress.value = AppLocaleManager.getString(
+                                    context,
+                                    R.string.cloud_uploading_kb,
+                                    (file.length() / 1024).toInt(),
+                                    config.provider.name
+                                )
+                                val response = withContext(Dispatchers.IO) {
+                                    httpClient.newCall(request).execute()
+                                }
+                                response.use { resp ->
+                                    if (!resp.isSuccessful) {
+                                        throw IllegalStateException("HTTP ${resp.code}: ${resp.message}")
+                                    }
+                                    uploadedUrl = resp.header("Location")
+                                        ?: getTargetUrlForProvider(config, ext, relativePath)
+                                    statusLabel = "HTTP ${resp.code}"
+                                }
+                            }
+                        }
+                        if (uploadedUrl != null) break
+                    } catch (e: Throwable) {
+                        lastErr = e
+                        if (attempt < maxAttempts) {
+                            delay(800L * attempt)
+                        }
+                    }
                 }
 
-                if (response.isSuccessful) {
-                    val resolvedUrl = response.header("Location")
-                        ?: getTargetUrlForProvider(config, file.name)
+                val finalUrl = uploadedUrl ?: throw (lastErr ?: IllegalStateException("Upload failed"))
 
-                    database.recordedClipDao().updateCloudSyncStatus(
-                        clipId = clip.id,
-                        status = CloudSyncStatus.SYNCED,
-                        cloudUrl = resolvedUrl,
-                        provider = config.provider.name
-                    )
+                database.recordedClipDao().updateCloudSyncStatus(
+                    clipId = clip.id,
+                    status = CloudSyncStatus.SYNCED,
+                    cloudUrl = finalUrl,
+                    provider = config.provider.name
+                )
+                database.cloudConfigDao().insertOrUpdateConfig(
+                    config.copy(lastSyncTimestamp = System.currentTimeMillis())
+                )
 
-                    database.cloudConfigDao().insertOrUpdateConfig(
-                        config.copy(lastSyncTimestamp = System.currentTimeMillis())
-                    )
-
-                    _syncProgress.value = AppLocaleManager.getString(context, R.string.cloud_synced_http, config.provider.name, response.code)
-                } else {
-                    database.recordedClipDao().updateCloudSyncStatus(
-                        clipId = clip.id,
-                        status = CloudSyncStatus.FAILED,
-                        cloudUrl = null,
-                        provider = config.provider.name
-                    )
-                    _syncProgress.value = AppLocaleManager.getString(context, R.string.cloud_upload_http_err, response.code, response.message)
+                if (ext.deleteLocalAfterUpload && file.exists()) {
+                    // Only remove if internal copy; metadata keeps cloud URL
+                    runCatching { file.delete() }
                 }
-                response.close()
+
+                _syncProgress.value = AppLocaleManager.getString(
+                    context,
+                    R.string.cloud_synced_http,
+                    config.provider.name,
+                    statusLabel.filter { it.isDigit() }.toIntOrNull() ?: 200
+                )
             } catch (e: Exception) {
                 database.recordedClipDao().updateCloudSyncStatus(
                     clipId = clip.id,
@@ -127,34 +256,47 @@ class CloudStorageManager(
         }
     }
 
-    private fun getTargetUrlForProvider(config: CloudConfigEntity, fileName: String): String {
+    private fun getTargetUrlForProvider(
+        config: CloudConfigEntity,
+        ext: ExtendedStorageConfig,
+        relativePath: String
+    ): String {
         return when (config.provider) {
             CloudProviderType.AWS_S3_COMPATIBLE -> {
                 val base = config.s3Endpoint.trim().trimEnd('/')
-                val bucket = config.s3Bucket.trim().ifBlank { config.bucketOrFolderName }
-                "$base/$bucket/$fileName"
+                val bucket = config.s3Bucket.trim().ifBlank { config.bucketOrFolderName }.trim('/')
+                "$base/$bucket/$relativePath"
             }
             CloudProviderType.WEBDAV -> {
                 val base = config.endpointUrl.trim().trimEnd('/')
-                "$base/$fileName"
+                "$base/$relativePath"
             }
             CloudProviderType.GOOGLE_DRIVE -> {
-                "https://www.googleapis.com/drive/v3/files/$fileName"
+                "https://www.googleapis.com/drive/v3/files/${relativePath.substringAfterLast('/')}"
             }
             CloudProviderType.FTP_NAS_STORAGE -> {
-                val base = config.endpointUrl.trim().trimEnd('/')
-                "$base/$fileName"
+                if (ext.nasSubProtocol == NasSubProtocol.HTTP_GATEWAY) {
+                    val base = config.endpointUrl.trim().trimEnd('/')
+                    "$base/$relativePath"
+                } else {
+                    val host = ext.nasHost.ifBlank { RemoteStorageProtocolClient.extractHost(config.endpointUrl) }
+                    "ftp://$host:${ext.nasPort}/${ext.nasRemotePath.trim('/')}/$relativePath"
+                }
             }
-            CloudProviderType.WEBHOOK_REST_API -> {
-                config.endpointUrl.trim()
+            CloudProviderType.SMB_CIFS -> {
+                val share = ext.smbShare.trim().ifBlank { "recordings" }
+                "smb://${ext.smbHost}/$share/${ext.smbSubfolder.trim('/')}/$relativePath"
             }
+            CloudProviderType.WEBHOOK_REST_API -> config.endpointUrl.trim()
         }
     }
 
     private fun buildUploadRequest(
         config: CloudConfigEntity,
+        ext: ExtendedStorageConfig,
         clip: RecordedClipEntity,
-        file: File
+        file: File,
+        relativePath: String
     ): Request {
         val fileBody = file.asRequestBody("video/mp4".toMediaTypeOrNull())
 
@@ -162,7 +304,7 @@ class CloudStorageManager(
             CloudProviderType.AWS_S3_COMPATIBLE -> {
                 val endpoint = config.s3Endpoint.trim().ifBlank { "https://s3.amazonaws.com" }.trimEnd('/')
                 val bucket = config.s3Bucket.trim().ifBlank { config.bucketOrFolderName }.trim('/')
-                val uploadUrl = "$endpoint/$bucket/${file.name}"
+                val uploadUrl = "$endpoint/$bucket/$relativePath"
                 val uri = URI(uploadUrl)
                 val host = uri.host ?: "s3.amazonaws.com"
                 val path = uri.rawPath
@@ -188,7 +330,7 @@ class CloudStorageManager(
             }
 
             CloudProviderType.WEBDAV -> {
-                val uploadUrl = getTargetUrlForProvider(config, file.name)
+                val uploadUrl = getTargetUrlForProvider(config, ext, relativePath)
                 val reqBuilder = Request.Builder().url(uploadUrl).put(fileBody)
 
                 if (config.webdavUsername.isNotBlank() || config.webdavPassword.isNotBlank()) {
@@ -203,13 +345,12 @@ class CloudStorageManager(
             }
 
             CloudProviderType.GOOGLE_DRIVE -> {
-                val target = if (config.endpointUrl.contains("googleapis.com")) {
+                val target = if (config.endpointUrl.contains("googleapis.com") && config.endpointUrl.contains("upload")) {
                     config.endpointUrl.trim()
                 } else {
                     "https://www.googleapis.com/upload/drive/v3/files?uploadType=media"
                 }
                 val reqBuilder = Request.Builder().url(target).post(fileBody)
-
                 if (config.apiKeyOrToken.isNotBlank()) {
                     reqBuilder.addHeader("Authorization", "Bearer ${config.apiKeyOrToken.trim()}")
                 }
@@ -219,7 +360,6 @@ class CloudStorageManager(
             CloudProviderType.FTP_NAS_STORAGE -> {
                 val targetUrl = config.endpointUrl.trim()
                 val reqBuilder = Request.Builder().url(targetUrl).post(fileBody)
-
                 if (config.nasUsername.isNotBlank() || config.nasPassword.isNotBlank()) {
                     reqBuilder.addHeader(
                         "Authorization",
@@ -231,20 +371,20 @@ class CloudStorageManager(
                 reqBuilder.build()
             }
 
-            CloudProviderType.WEBHOOK_REST_API -> {
+            CloudProviderType.WEBHOOK_REST_API, CloudProviderType.SMB_CIFS -> {
                 val targetUrl = config.endpointUrl.trim()
                 val requestBody = MultipartBody.Builder()
                     .setType(MultipartBody.FORM)
                     .addFormDataPart("clipId", clip.id)
                     .addFormDataPart("cameraId", clip.cameraId)
                     .addFormDataPart("cameraName", clip.cameraName)
+                    .addFormDataPart("remotePath", relativePath)
                     .addFormDataPart("durationSeconds", clip.durationSeconds.toString())
                     .addFormDataPart("timestamp", clip.timestamp.toString())
                     .addFormDataPart("file", file.name, fileBody)
                     .build()
 
                 val reqBuilder = Request.Builder().url(targetUrl).post(requestBody)
-
                 if (config.customHeaderName.isNotBlank() && config.customHeaderValue.isNotBlank()) {
                     reqBuilder.addHeader(config.customHeaderName.trim(), config.customHeaderValue.trim())
                 } else if (config.apiKeyOrToken.isNotBlank()) {
@@ -255,19 +395,83 @@ class CloudStorageManager(
         }
     }
 
-    fun testCloudConnection(config: CloudConfigEntity) {
+    fun testCloudConnection(
+        config: CloudConfigEntity,
+        ext: ExtendedStorageConfig = _extendedConfig.value
+    ) {
         scope.launch {
             _isTestingConnection.value = true
+            _detailedConnectionResult.value = null
             _lastConnectionTestResult.value = AppLocaleManager.getString(context, R.string.cloud_auth_progress, config.provider.name)
 
             val startTime = System.currentTimeMillis()
             try {
+                when (config.provider) {
+                    CloudProviderType.SMB_CIFS -> {
+                        val res = RemoteStorageProtocolClient.testSmbConnection(
+                            context = context,
+                            host = ext.smbHost,
+                            port = ext.smbPort,
+                            share = ext.smbShare,
+                            subfolder = ext.smbSubfolder,
+                            workgroup = ext.smbWorkgroup,
+                            username = ext.smbUsername,
+                            password = ext.smbPassword,
+                            safTreeUri = config.safFolderUri
+                        )
+                        _detailedConnectionResult.value = res
+                        _lastConnectionTestResult.value = if (res.success) {
+                            "Handshake OK: ${res.summary}\n${res.details}"
+                        } else {
+                            "${res.summary}\n${res.details}"
+                        }
+                        return@launch
+                    }
+
+                    CloudProviderType.FTP_NAS_STORAGE -> {
+                        val host = ext.nasHost.ifBlank { RemoteStorageProtocolClient.extractHost(config.endpointUrl) }
+                        when (ext.nasSubProtocol) {
+                            NasSubProtocol.FTP -> {
+                                val res = RemoteStorageProtocolClient.testFtpConnection(
+                                    host = host,
+                                    port = ext.nasPort,
+                                    username = config.nasUsername,
+                                    password = config.nasPassword
+                                )
+                                _detailedConnectionResult.value = res
+                                _lastConnectionTestResult.value = if (res.success) {
+                                    "Handshake OK: ${res.summary}\n${res.details}"
+                                } else {
+                                    "${res.summary}\n${res.details}"
+                                }
+                                return@launch
+                            }
+                            NasSubProtocol.SFTP_PROBE -> {
+                                val port = if (ext.nasPort == 21) 22 else ext.nasPort
+                                val res = RemoteStorageProtocolClient.testSftpBanner(host = host, port = port)
+                                _detailedConnectionResult.value = res
+                                _lastConnectionTestResult.value = if (res.success) {
+                                    "Handshake OK: ${res.summary}\n${res.details}"
+                                } else {
+                                    "${res.summary}\n${res.details}"
+                                }
+                                return@launch
+                            }
+                            NasSubProtocol.HTTP_GATEWAY -> Unit
+                        }
+                    }
+
+                    else -> Unit
+                }
+
+                // HTTP-based storage protocols (S3, WebDAV, Google Drive, HTTP NAS Gateway, Webhook)
                 val testUrl = when (config.provider) {
                     CloudProviderType.AWS_S3_COMPATIBLE -> {
                         val endpoint = config.s3Endpoint.trim().ifBlank { "https://s3.amazonaws.com" }.trimEnd('/')
                         val bucket = config.s3Bucket.trim().ifBlank { config.bucketOrFolderName }.trim('/')
                         "$endpoint/$bucket"
                     }
+                    CloudProviderType.GOOGLE_DRIVE -> "https://www.googleapis.com/drive/v3/about?fields=user"
                     else -> config.endpointUrl.trim()
                 }
 
@@ -275,7 +479,12 @@ class CloudStorageManager(
                     throw IllegalArgumentException("Endpoint must start with http:// or https:// (got: '$testUrl')")
                 }
 
-                val reqBuilder = Request.Builder().url(testUrl).head()
+                val reqBuilder = Request.Builder().url(testUrl)
+                if (config.provider == CloudProviderType.GOOGLE_DRIVE) {
+                    reqBuilder.get()
+                } else {
+                    reqBuilder.head()
+                }
 
                 when (config.provider) {
                     CloudProviderType.AWS_S3_COMPATIBLE -> {
@@ -322,9 +531,14 @@ class CloudStorageManager(
                             reqBuilder.addHeader("Authorization", "Bearer ${config.apiKeyOrToken.trim()}")
                         }
                     }
+                    CloudProviderType.SMB_CIFS -> Unit
                 }
 
-                if (config.apiKeyOrToken.isNotBlank() && config.provider != CloudProviderType.WEBDAV && config.provider != CloudProviderType.AWS_S3_COMPATIBLE) {
+                if (config.apiKeyOrToken.isNotBlank() &&
+                    config.provider != CloudProviderType.WEBDAV &&
+                    config.provider != CloudProviderType.AWS_S3_COMPATIBLE &&
+                    config.provider != CloudProviderType.GOOGLE_DRIVE
+                ) {
                     reqBuilder.addHeader("Authorization", "Bearer ${config.apiKeyOrToken.trim()}")
                 }
 
@@ -332,23 +546,42 @@ class CloudStorageManager(
                     httpClient.newCall(reqBuilder.build()).execute()
                 }
 
-                val latency = System.currentTimeMillis() - startTime
+                val latency = (System.currentTimeMillis() - startTime).toInt().coerceAtLeast(1)
+                val code = response.code
+                val msg = response.message
+                val isReachableSuccess = code in 200..299 || code == 405
+                response.close()
+
+                _detailedConnectionResult.value = StorageConnectionTestResult(
+                    success = isReachableSuccess,
+                    protocolLabel = config.provider.name,
+                    summary = "HTTP $code $msg (${latency}ms)",
+                    details = "Endpoint: $testUrl",
+                    latencyMs = latency
+                )
                 _lastConnectionTestResult.value = AppLocaleManager.getString(
                     context,
                     R.string.cloud_handshake_ok,
-                    response.code,
-                    response.message,
-                    latency.toInt(),
+                    code,
+                    msg,
+                    latency,
                     config.provider.name
                 )
-                response.close()
             } catch (e: Exception) {
-                val latency = System.currentTimeMillis() - startTime
+                val latency = (System.currentTimeMillis() - startTime).toInt().coerceAtLeast(1)
+                val errMsg = e.localizedMessage ?: e.javaClass.simpleName
+                _detailedConnectionResult.value = StorageConnectionTestResult(
+                    success = false,
+                    protocolLabel = config.provider.name,
+                    summary = "Connection Failed (${latency}ms)",
+                    details = errMsg,
+                    latencyMs = latency
+                )
                 _lastConnectionTestResult.value = AppLocaleManager.getString(
                     context,
                     R.string.cloud_conn_failed,
-                    latency.toInt(),
-                    e.localizedMessage ?: e.javaClass.simpleName
+                    latency,
+                    errMsg
                 )
             } finally {
                 _isTestingConnection.value = false
@@ -430,5 +663,6 @@ class CloudStorageManager(
 
     fun clearTestResult() {
         _lastConnectionTestResult.value = null
+        _detailedConnectionResult.value = null
     }
 }

@@ -16,22 +16,31 @@ import androidx.media3.common.Player
 import com.example.engine.CameraDiscoveryEngine
 import com.example.engine.DeviceStorageExporter
 import com.example.engine.EndpointKind
+import com.example.engine.HubAccessScope
 import com.example.engine.HubAlertSnapshot
 import com.example.engine.HubCameraSnapshot
 import com.example.engine.HubClipSnapshot
 import com.example.engine.HubSystemHealth
+import com.example.engine.NetworkEndpoint
 import com.example.engine.OnvifPtzClient
+import com.example.engine.PasswordStrength
+import com.example.engine.RemoteFolderLayout
 import com.example.engine.RemoteHubBackend
 import com.example.engine.RemoteHubServer
+import com.example.engine.RemoteStorageProtocolClient
 import com.example.engine.RtspStreamManager
 import com.example.engine.StorageRetentionEngine
 import com.example.engine.StorageTimelineEngine
 import com.example.i18n.AppLocaleManager
+import kotlinx.coroutines.runBlocking
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
+import java.net.ServerSocket
+import java.nio.charset.StandardCharsets
+import java.util.Base64
 import com.example.service.FloatingOverlayStateHolder
 import com.example.ui.components.ResizeCorner
 import com.example.ui.components.baseWidthFromActualWidthDp
@@ -877,13 +886,46 @@ class ExampleUnitTest {
       RemoteHubServer.classifyNetworkInterface("tailscale0", "100.100.100.100")
     )
     assertEquals(
+      EndpointKind.WIREGUARD,
+      RemoteHubServer.classifyNetworkInterface("wg0", "10.66.66.2")
+    )
+    assertEquals(
+      EndpointKind.ZEROTIER,
+      RemoteHubServer.classifyNetworkInterface("zt0", "10.147.20.5")
+    )
+    assertEquals(
+      EndpointKind.VPN_TUNNEL,
+      RemoteHubServer.classifyNetworkInterface("tun1", "10.8.0.6")
+    )
+    assertEquals(
       EndpointKind.WIFI_LAN,
       RemoteHubServer.classifyNetworkInterface("wlan0", "192.168.1.50")
+    )
+    assertEquals(
+      EndpointKind.HOTSPOT_USB,
+      RemoteHubServer.classifyNetworkInterface("swlan0", "192.168.43.1")
+    )
+    assertEquals(
+      EndpointKind.HOTSPOT_USB,
+      RemoteHubServer.classifyNetworkInterface("rndis0", "192.168.42.129")
     )
     assertEquals(
       EndpointKind.OTHER,
       RemoteHubServer.classifyNetworkInterface("rmnet_data0", "172.20.1.5")
     )
+
+    // Access scope enforcement
+    val mockEndpoints = listOf(
+      NetworkEndpoint("tailscale0", "100.88.12.1", EndpointKind.TAILSCALE, "http://100.88.12.1:8088"),
+      NetworkEndpoint("wg0", "10.66.66.1", EndpointKind.WIREGUARD, "http://10.66.66.1:8088"),
+      NetworkEndpoint("wlan0", "192.168.1.10", EndpointKind.WIFI_LAN, "http://192.168.1.10:8088")
+    )
+    assertTrue(RemoteHubServer.isClientAllowedByScope("127.0.0.1", "127.0.0.1", HubAccessScope.VPN_ONLY, mockEndpoints))
+    assertTrue(RemoteHubServer.isClientAllowedByScope("100.88.12.3", "100.88.12.1", HubAccessScope.VPN_ONLY, mockEndpoints))
+    assertTrue(RemoteHubServer.isClientAllowedByScope("10.66.66.9", "10.66.66.1", HubAccessScope.VPN_ONLY, mockEndpoints))
+    assertFalse(RemoteHubServer.isClientAllowedByScope("192.168.1.40", "192.168.1.10", HubAccessScope.VPN_ONLY, mockEndpoints))
+    assertTrue(RemoteHubServer.isClientAllowedByScope("192.168.1.40", "192.168.1.10", HubAccessScope.LAN_AND_VPN, mockEndpoints))
+    assertFalse(RemoteHubServer.isClientAllowedByScope("8.8.8.8", "172.20.1.5", HubAccessScope.LAN_AND_VPN, mockEndpoints))
   }
 
   @Test
@@ -914,6 +956,19 @@ class ExampleUnitTest {
     assertNull(RemoteHubServer.parseHttpRange("bytes=1000-1100", total))
     assertNull(RemoteHubServer.parseHttpRange("bytes=500-200", total))
     assertNull(RemoteHubServer.parseHttpRange("items=0-10", total))
+  }
+
+  @Test
+  fun remoteHubServer_pbkdf2PasswordAndStrength_verifyCorrectly() {
+    assertEquals(PasswordStrength.WEAK, RemoteHubServer.evaluatePasswordStrength("abc123"))
+    assertEquals(PasswordStrength.FAIR, RemoteHubServer.evaluatePasswordStrength("CamWatch9"))
+    assertEquals(PasswordStrength.STRONG, RemoteHubServer.evaluatePasswordStrength("OmniView!2026Hub"))
+
+    val (saltHex, hashHex) = RemoteHubServer.hashPassword("OmniView!2026Hub", iterations = 2_000)
+    assertEquals(32, saltHex.length)
+    assertEquals(64, hashHex.length)
+    assertTrue(RemoteHubServer.verifyPassword("OmniView!2026Hub", saltHex, hashHex, iterations = 2_000))
+    assertFalse(RemoteHubServer.verifyPassword("WrongPass!", saltHex, hashHex, iterations = 2_000))
   }
 
   @Test
@@ -959,32 +1014,42 @@ class ExampleUnitTest {
     }
 
     val server = RemoteHubServer(fakeBackend)
-    val token = "TestHubSecret42"
+    val username = "hubadmin"
+    val password = "StrongHub#Password99"
+    val apiKey = RemoteHubServer.generateApiKey()
+    val apiKeyHash = RemoteHubServer.sha256Hex(apiKey)
     val http = OkHttpClient()
 
     try {
-      server.start(port = 0, accessToken = token, allowRemoteControl = true)
+      server.startWithPassword(
+        port = 0,
+        username = username,
+        password = password,
+        iterations = 1_500,
+        allowRemoteControl = true
+      )
       val port = server.listeningPort
       assertTrue(port > 0)
       assertTrue(server.state.value.isRunning)
 
-      // 1. Public /health works without token
+      // 1. Public /health works without credentials
       http.newCall(Request.Builder().url("http://127.0.0.1:$port/health").build()).execute().use { resp ->
         assertEquals(200, resp.code)
         val body = resp.body!!.string()
         assertTrue(body.contains("\"status\":\"ok\""))
       }
 
-      // 2. Protected /api/cameras rejects missing/wrong token
+      // 2. Protected /api/cameras rejects unauthenticated requests
       http.newCall(Request.Builder().url("http://127.0.0.1:$port/api/cameras").build()).execute().use { resp ->
         assertEquals(401, resp.code)
       }
 
-      // 3. Protected /api/cameras succeeds with Bearer token and escapes quotes properly
+      // 3. HTTP Basic authentication succeeds & escapes quotes cleanly
+      val basicCreds = Base64.getEncoder().encodeToString("$username:$password".toByteArray(StandardCharsets.UTF_8))
       http.newCall(
         Request.Builder()
           .url("http://127.0.0.1:$port/api/cameras")
-          .addHeader("Authorization", "Bearer $token")
+          .addHeader("Authorization", "Basic $basicCreds")
           .build()
       ).execute().use { resp ->
         assertEquals(200, resp.code)
@@ -993,13 +1058,19 @@ class ExampleUnitTest {
         assertTrue(body.contains("\"fps\":25"))
       }
 
-      // 4. POST /api/login issues session cookie that unlocks Web Console
-      val loginBody = """{"token":"$token"}""".toRequestBody("application/json".toMediaType())
+      // 4. Wrong password fails login; correct username+password issues HttpOnly session cookie
+      val badLogin = """{"username":"$username","password":"wrong"}""".toRequestBody("application/json".toMediaType())
+      http.newCall(Request.Builder().url("http://127.0.0.1:$port/api/login").post(badLogin).build()).execute().use { resp ->
+        assertEquals(401, resp.code)
+      }
+
+      val goodLogin = """{"username":"$username","password":"$password"}""".toRequestBody("application/json".toMediaType())
       var sessionCookie = ""
-      http.newCall(Request.Builder().url("http://127.0.0.1:$port/api/login").post(loginBody).build()).execute().use { resp ->
+      http.newCall(Request.Builder().url("http://127.0.0.1:$port/api/login").post(goodLogin).build()).execute().use { resp ->
         assertEquals(200, resp.code)
         val setCookie = resp.header("Set-Cookie") ?: ""
         assertTrue(setCookie.contains("omniview_hub_session="))
+        assertTrue(setCookie.contains("HttpOnly"))
         sessionCookie = setCookie.substringBefore(";")
       }
 
@@ -1027,12 +1098,36 @@ class ExampleUnitTest {
         assertEquals("2345", resp.body!!.string())
       }
 
-      // 6. PTZ control works when allowRemoteControl=true and returns 403 when disabled
+      // 6. Session revocation invalidates active browser session cookie
+      server.revokeAllSessions()
+      http.newCall(
+        Request.Builder()
+          .url("http://127.0.0.1:$port/api/cameras")
+          .addHeader("Cookie", sessionCookie)
+          .build()
+      ).execute().use { resp ->
+        assertEquals(401, resp.code)
+      }
+
+      // 7. Optional SHA-256-hashed API key works for PTZ and is blocked when allowRemoteControl=false
+      val curState = server.state.value
+      server.configure(
+        enabled = true,
+        port = port,
+        username = curState.username,
+        passwordSaltHex = curState.passwordSaltHex,
+        passwordHashHex = curState.passwordHashHex,
+        passwordIterations = curState.passwordIterations,
+        apiKeyEnabled = true,
+        apiKeySha256Hex = apiKeyHash,
+        allowRemoteControl = true
+      )
+
       val ptzPayload = """{"action":"move","pan":0.5,"tilt":0,"zoom":0}""".toRequestBody("application/json".toMediaType())
       http.newCall(
         Request.Builder()
           .url("http://127.0.0.1:$port/api/cameras/cam_1/ptz")
-          .addHeader("X-Hub-Token", token)
+          .addHeader("X-Hub-Token", apiKey)
           .post(ptzPayload)
           .build()
       ).execute().use { resp ->
@@ -1040,12 +1135,22 @@ class ExampleUnitTest {
         assertEquals("cam_1:move:0.5", lastPtzCall)
       }
 
-      server.configure(enabled = true, port = port, accessToken = token, allowRemoteControl = false)
+      server.configure(
+        enabled = true,
+        port = port,
+        username = curState.username,
+        passwordSaltHex = curState.passwordSaltHex,
+        passwordHashHex = curState.passwordHashHex,
+        passwordIterations = curState.passwordIterations,
+        apiKeyEnabled = true,
+        apiKeySha256Hex = apiKeyHash,
+        allowRemoteControl = false
+      )
       val ptzBlockedPayload = """{"action":"move","pan":0.5,"tilt":0,"zoom":0}""".toRequestBody("application/json".toMediaType())
       http.newCall(
         Request.Builder()
           .url("http://127.0.0.1:$port/api/cameras/cam_1/ptz")
-          .addHeader("X-Hub-Token", token)
+          .addHeader("X-Hub-Token", apiKey)
           .post(ptzBlockedPayload)
           .build()
       ).execute().use { resp ->
@@ -1053,6 +1158,120 @@ class ExampleUnitTest {
       }
     } finally {
       server.release()
+    }
+  }
+
+  @Test
+  fun remoteStorageProtocol_smb2NegotiateAndFtpPasvAndFolderLayouts() {
+    // 1. Folder layout builder
+    val ts = 1_760_000_000_000L
+    assertEquals(
+      "clip.mp4",
+      RemoteStorageProtocolClient.buildRemoteRelativePath(RemoteFolderLayout.FLAT, "Front Gate", ts, "clip.mp4")
+    )
+    assertEquals(
+      "Front_Gate/clip.mp4",
+      RemoteStorageProtocolClient.buildRemoteRelativePath(RemoteFolderLayout.BY_CAMERA, "Front Gate", ts, "clip.mp4")
+    )
+    val byDate = RemoteStorageProtocolClient.buildRemoteRelativePath(RemoteFolderLayout.BY_CAMERA_AND_DATE, "Front Gate", ts, "clip.mp4")
+    assertTrue(byDate.startsWith("Front_Gate/") && byDate.endsWith("/clip.mp4") && byDate.split("/").size == 3)
+
+    // 2. SMB2 Negotiate request packet & response parser
+    val negReq = RemoteStorageProtocolClient.buildSmb2NegotiatePacket()
+    assertEquals(0xFE.toByte(), negReq[4])
+    assertEquals('S'.code.toByte(), negReq[5])
+    assertEquals('M'.code.toByte(), negReq[6])
+    assertEquals('B'.code.toByte(), negReq[7])
+
+    // Synthetic SMB 3.1.1 Negotiate Response (4-byte NetBIOS + 64-byte SMB2 header + 8-byte body)
+    val fakeResp = ByteArray(4 + 64 + 8)
+    val smbLen = 64 + 8
+    fakeResp[1] = ((smbLen ushr 16) and 0xFF).toByte()
+    fakeResp[2] = ((smbLen ushr 8) and 0xFF).toByte()
+    fakeResp[3] = (smbLen and 0xFF).toByte()
+    fakeResp[4] = 0xFE.toByte()
+    fakeResp[5] = 'S'.code.toByte()
+    fakeResp[6] = 'M'.code.toByte()
+    fakeResp[7] = 'B'.code.toByte()
+    fakeResp[4 + 64 + 2] = 0x03 // signing enabled + required
+    fakeResp[4 + 64 + 4] = 0x11 // 0x0311 -> SMB 3.1.1
+    fakeResp[4 + 64 + 5] = 0x03
+
+    val parsed = RemoteStorageProtocolClient.parseSmb2NegotiateResponse(fakeResp)!!
+    assertTrue(parsed.isSmb2)
+    assertEquals(0x0311, parsed.dialectCode)
+    assertEquals("SMB 3.1.1", parsed.dialectLabel)
+    assertTrue(parsed.signingEnabled)
+    assertTrue(parsed.signingRequired)
+
+    // 3. Loopback socket SMB2 connection test
+    val smbServer = ServerSocket(0)
+    val smbThread = Thread {
+      smbServer.accept().use { s ->
+        s.getInputStream().read(ByteArray(256))
+        s.getOutputStream().write(fakeResp)
+        s.getOutputStream().flush()
+      }
+    }
+    smbThread.start()
+    try {
+      val smbRes = runBlocking {
+        RemoteStorageProtocolClient.testSmbConnection(
+          context = null,
+          host = "127.0.0.1",
+          port = smbServer.localPort,
+          share = "cctv",
+          subfolder = "OmniView",
+          workgroup = "WORKGROUP",
+          username = "nasuser",
+          password = "secret",
+          safTreeUri = ""
+        )
+      }
+      assertTrue(smbRes.success)
+      assertTrue(smbRes.summary.contains("SMB 3.1.1"))
+    } finally {
+      smbServer.close()
+      smbThread.join(2000)
+    }
+
+    // 4. FTP PASV parser & loopback FTP handshake test
+    val pasv = RemoteStorageProtocolClient.parsePasvEndpoint("227 Entering Passive Mode (192,168,1,50,195,80).", "10.0.0.2")
+    assertEquals("192.168.1.50" to (195 * 256 + 80), pasv)
+
+    val ftpServer = ServerSocket(0)
+    val ftpThread = Thread {
+      ftpServer.accept().use { s ->
+        val out = s.getOutputStream()
+        val reader = s.getInputStream().bufferedReader()
+        out.write("220 OmniView Test FTP Ready\r\n".toByteArray())
+        out.flush()
+        reader.readLine() // USER
+        out.write("331 Password required\r\n".toByteArray())
+        out.flush()
+        reader.readLine() // PASS
+        out.write("230 User logged in\r\n".toByteArray())
+        out.flush()
+        reader.readLine() // PWD
+        out.write("257 \"/OmniView\" is current directory\r\n".toByteArray())
+        out.flush()
+      }
+    }
+    ftpThread.start()
+    try {
+      val ftpRes = runBlocking {
+        RemoteStorageProtocolClient.testFtpConnection(
+          host = "127.0.0.1",
+          port = ftpServer.localPort,
+          username = "admin",
+          password = "pw"
+        )
+      }
+      assertTrue(ftpRes.success)
+      assertTrue(ftpRes.details.contains("/OmniView"))
+    } finally {
+      ftpServer.close()
+      ftpThread.join(2000)
     }
   }
 }

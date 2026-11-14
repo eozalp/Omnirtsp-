@@ -32,37 +32,20 @@ import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.CloudDone
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Dns
-import androidx.compose.material.icons.filled.ElectricalServices
 import androidx.compose.material.icons.filled.FolderOpen
-import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Language
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.RestartAlt
-import androidx.compose.material.icons.filled.Router
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Smartphone
 import androidx.compose.material.icons.filled.Storage
-import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Timer
-import androidx.compose.material.icons.filled.Visibility
-import androidx.compose.material.icons.filled.VisibilityOff
-import androidx.compose.material.icons.filled.VpnLock
-import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -85,16 +68,13 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
-import com.example.data.model.CloudConfigEntity
-import com.example.data.model.CloudProviderType
 import com.example.data.model.LocalSaveDestination
-import com.example.engine.EndpointKind
 import com.example.i18n.AppLocaleManager
+import com.example.ui.components.RemoteHubCard
+import com.example.ui.components.RemoteStorageSection
 import com.example.ui.theme.NeonAmber
 import com.example.ui.theme.NeonCyan
 import com.example.ui.theme.NeonGreen
@@ -118,11 +98,15 @@ fun CloudStorageScreen(
     val isGlobalMuted by viewModel.isGlobalMuted.collectAsState()
     val isTesting by viewModel.cloudStorageManager.isTestingConnection.collectAsState()
     val testResult by viewModel.cloudStorageManager.lastConnectionTestResult.collectAsState()
-    val hubState by viewModel.hubServerState.collectAsState()
+    val detailedTestResult by viewModel.detailedStorageTestResult.collectAsState()
+    val extendedStorageConfig by viewModel.extendedStorageConfig.collectAsState()
+    val discoveredEndpoints by viewModel.discoveredStorageEndpoints.collectAsState()
+    val isScanningStorage by viewModel.isScanningStorage.collectAsState()
 
-    var hubPortText by remember(hubState.port) { mutableStateOf(hubState.port.toString()) }
-    var hubTokenText by remember(hubState.accessToken) { mutableStateOf(hubState.accessToken) }
-    var isHubTokenVisible by remember { mutableStateOf(false) }
+    val hubState by viewModel.hubServerState.collectAsState()
+    val hubOneTimePassword by viewModel.hubOneTimeGeneratedPassword.collectAsState()
+    val hubOneTimeApiKey by viewModel.hubOneTimeApiKey.collectAsState()
+    val hubSelfTestResult by viewModel.hubSelfTestResult.collectAsState()
     var hubCopyMessage by remember { mutableStateOf<String?>(null) }
 
     val copyToClipboard: (String, String) -> Unit = { label, text ->
@@ -159,46 +143,6 @@ fun CloudStorageScreen(
             pickerErrorMessage = AppLocaleManager.getString(context, R.string.storage_picker_unavailable)
         }
     }
-
-    var selectedProvider by remember(cloudConfig) { mutableStateOf(cloudConfig.provider) }
-
-    // S3 credentials
-    var s3Endpoint by remember(cloudConfig) { mutableStateOf(cloudConfig.s3Endpoint) }
-    var s3Bucket by remember(cloudConfig) { mutableStateOf(cloudConfig.s3Bucket) }
-    var s3Region by remember(cloudConfig) { mutableStateOf(cloudConfig.s3Region) }
-    var s3AccessKeyId by remember(cloudConfig) { mutableStateOf(cloudConfig.s3AccessKeyId) }
-    var s3SecretAccessKey by remember(cloudConfig) { mutableStateOf(cloudConfig.s3SecretAccessKey) }
-    var isS3SecretVisible by remember { mutableStateOf(false) }
-
-    // WebDAV credentials
-    var webdavUrl by remember(cloudConfig) { mutableStateOf(cloudConfig.endpointUrl) }
-    var webdavUsername by remember(cloudConfig) { mutableStateOf(cloudConfig.webdavUsername) }
-    var webdavPassword by remember(cloudConfig) { mutableStateOf(cloudConfig.webdavPassword) }
-    var isWebdavPasswordVisible by remember { mutableStateOf(false) }
-
-    // Google Drive credentials
-    var gdriveFolder by remember(cloudConfig) { mutableStateOf(cloudConfig.bucketOrFolderName) }
-    var gdriveToken by remember(cloudConfig) { mutableStateOf(cloudConfig.apiKeyOrToken) }
-    var isGdriveTokenVisible by remember { mutableStateOf(false) }
-
-    // NAS credentials
-    var nasUrl by remember(cloudConfig) { mutableStateOf(cloudConfig.endpointUrl) }
-    var nasUsername by remember(cloudConfig) { mutableStateOf(cloudConfig.nasUsername) }
-    var nasPassword by remember(cloudConfig) { mutableStateOf(cloudConfig.nasPassword) }
-    var isNasPasswordVisible by remember { mutableStateOf(false) }
-
-    // Webhook credentials
-    var webhookUrl by remember(cloudConfig) { mutableStateOf(cloudConfig.endpointUrl) }
-    var webhookHeaderKey by remember(cloudConfig) { mutableStateOf(cloudConfig.customHeaderName) }
-    var webhookHeaderValue by remember(cloudConfig) { mutableStateOf(cloudConfig.customHeaderValue) }
-    var isWebhookSecretVisible by remember { mutableStateOf(false) }
-
-    // Sync rules
-    var autoSyncRecordings by remember(cloudConfig) { mutableStateOf(cloudConfig.autoSyncRecordings) }
-    var autoSyncMotion by remember(cloudConfig) { mutableStateOf(cloudConfig.autoSyncMotionSnapshots) }
-    var wifiOnly by remember(cloudConfig) { mutableStateOf(cloudConfig.wifiOnly) }
-
-    var saveConfirmationMessage by remember { mutableStateOf<String?>(null) }
 
     Box(
         modifier = modifier
@@ -309,329 +253,34 @@ fun CloudStorageScreen(
                 }
             }
 
-            // Spare-Device Remote Hub Server Card (Tailscale / LAN IP)
-            Card(
-                colors = CardDefaults.cardColors(containerColor = SurveillanceCardBg),
-                shape = RoundedCornerShape(14.dp),
-                modifier = Modifier.fillMaxWidth().testTag("remote_hub_server_card")
-            ) {
-                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(
-                            modifier = Modifier.weight(1f).padding(end = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(Icons.Default.Router, contentDescription = null, tint = NeonCyan, modifier = Modifier.size(20.dp))
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Column {
-                                Text(
-                                    text = stringResource(R.string.hub_title),
-                                    color = Color.White,
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Text(
-                                    text = stringResource(R.string.hub_subtitle),
-                                    color = Color.Gray,
-                                    fontSize = 11.sp
-                                )
-                            }
-                        }
-
-                        Surface(
-                            shape = RoundedCornerShape(6.dp),
-                            color = if (hubState.isRunning) NeonGreen.copy(alpha = 0.16f) else Color.White.copy(alpha = 0.08f)
-                        ) {
-                            Text(
-                                text = if (hubState.isRunning) {
-                                    stringResource(R.string.hub_status_online, hubState.port, hubState.activeConnections)
-                                } else {
-                                    stringResource(R.string.hub_status_offline)
-                                },
-                                color = if (hubState.isRunning) NeonGreen else Color.Gray,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1,
-                                softWrap = false,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                            )
-                        }
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
-                            Text(stringResource(R.string.hub_switch_title), color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                            Text(stringResource(R.string.hub_switch_sub), color = Color.Gray, fontSize = 11.sp)
-                        }
-                        Switch(
-                            checked = hubState.isEnabled,
-                            onCheckedChange = { viewModel.toggleHubServer(it) },
-                            colors = SwitchDefaults.colors(checkedThumbColor = NeonCyan),
-                            modifier = Modifier.testTag("hub_server_switch")
-                        )
-                    }
-
-                    // Power & Storage Eco-Hub Telemetry
-                    Surface(
-                        shape = RoundedCornerShape(10.dp),
-                        color = SurveillanceSurface,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Row(
-                                modifier = Modifier.weight(1f).padding(end = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(
-                                    Icons.Default.BatteryChargingFull,
-                                    contentDescription = null,
-                                    tint = if (hubState.isPluggedIn) NeonGreen else NeonAmber,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = stringResource(
-                                        R.string.hub_power_telemetry,
-                                        hubState.batteryPercent,
-                                        if (hubState.isPluggedIn) {
-                                            stringResource(R.string.hub_power_plugged)
-                                        } else {
-                                            stringResource(R.string.hub_power_battery)
-                                        },
-                                        hubState.freeStorageMb
-                                    ),
-                                    color = Color.White.copy(alpha = 0.85f),
-                                    fontSize = 11.sp
-                                )
-                            }
-                            IconButton(
-                                onClick = { viewModel.refreshHubNetworkEndpoints() },
-                                modifier = Modifier.size(32.dp).testTag("hub_refresh_ips_btn")
-                            ) {
-                                Icon(Icons.Default.Refresh, contentDescription = null, tint = NeonCyan, modifier = Modifier.size(17.dp))
-                            }
-                        }
-                    }
-
-                    // Detected Tailscale & LAN URLs
-                    Text(
-                        text = stringResource(R.string.hub_endpoints_title),
-                        color = NeonCyan,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold
+            // Spare-Device Remote Hub Server Card (Multi-Transport & PBKDF2 Security)
+            RemoteHubCard(
+                hubState = hubState,
+                oneTimeGeneratedPassword = hubOneTimePassword,
+                oneTimeApiKey = hubOneTimeApiKey,
+                selfTestResult = hubSelfTestResult,
+                copyNotice = hubCopyMessage,
+                onToggleHub = { viewModel.toggleHubServer(it) },
+                onRefreshEndpoints = { viewModel.refreshHubNetworkEndpoints() },
+                onRunSelfTest = { viewModel.testHubLocalReachability() },
+                onCopyToClipboard = copyToClipboard,
+                onApplySecurityAndConnection = { port, user, newPass, allowCtrl, scope, profile, extUrl ->
+                    viewModel.updateHubSecurityAndConnection(
+                        port = port,
+                        username = user,
+                        newPassword = newPass,
+                        allowRemoteControl = allowCtrl,
+                        accessScope = scope,
+                        connectionProfile = profile,
+                        externalUrl = extUrl
                     )
-
-                    if (hubState.endpoints.isEmpty()) {
-                        Text(
-                            text = stringResource(R.string.hub_no_ip_detected),
-                            color = NeonAmber,
-                            fontSize = 11.sp
-                        )
-                    } else {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            hubState.endpoints.forEach { ep ->
-                                val badgeColor = when (ep.kind) {
-                                    EndpointKind.TAILSCALE -> NeonCyan
-                                    EndpointKind.WIFI_LAN -> NeonGreen
-                                    EndpointKind.OTHER -> Color.LightGray
-                                }
-                                val kindLabel = when (ep.kind) {
-                                    EndpointKind.TAILSCALE -> stringResource(R.string.hub_kind_tailscale)
-                                    EndpointKind.WIFI_LAN -> stringResource(R.string.hub_kind_lan)
-                                    EndpointKind.OTHER -> stringResource(R.string.hub_kind_other)
-                                }
-                                Surface(
-                                    shape = RoundedCornerShape(10.dp),
-                                    color = SurveillanceSurface,
-                                    border = androidx.compose.foundation.BorderStroke(1.dp, badgeColor.copy(alpha = 0.35f)),
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.SpaceBetween
-                                    ) {
-                                        Row(
-                                            modifier = Modifier.weight(1f).padding(end = 8.dp),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Icon(
-                                                imageVector = if (ep.kind == EndpointKind.TAILSCALE) Icons.Default.VpnLock else Icons.Default.Wifi,
-                                                contentDescription = null,
-                                                tint = badgeColor,
-                                                modifier = Modifier.size(16.dp)
-                                            )
-                                            Spacer(modifier = Modifier.width(8.dp))
-                                            Column {
-                                                Text(
-                                                    text = "$kindLabel (${ep.interfaceName})",
-                                                    color = badgeColor,
-                                                    fontSize = 9.sp,
-                                                    fontWeight = FontWeight.Bold
-                                                )
-                                                Text(
-                                                    text = ep.url,
-                                                    color = Color.White,
-                                                    fontSize = 12.sp,
-                                                    fontFamily = FontFamily.Monospace,
-                                                    fontWeight = FontWeight.SemiBold,
-                                                    maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis
-                                                )
-                                            }
-                                        }
-
-                                        OutlinedButton(
-                                            onClick = { copyToClipboard("OmniView Hub URL", ep.url) },
-                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                                            modifier = Modifier.testTag("copy_hub_url_${ep.kind.name}")
-                                        ) {
-                                            Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(13.dp))
-                                            Spacer(modifier = Modifier.width(4.dp))
-                                            Text(stringResource(R.string.hub_copy_url), fontSize = 11.sp, maxLines = 1, softWrap = false)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if (hubState.tailscaleEndpoint == null) {
-                        Text(
-                            text = stringResource(R.string.hub_no_tailscale_hint),
-                            color = Color.Gray,
-                            fontSize = 11.sp
-                        )
-                    }
-
-                    HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        OutlinedTextField(
-                            value = hubPortText,
-                            onValueChange = { hubPortText = it.filter { ch -> ch.isDigit() }.take(5) },
-                            label = { Text(stringResource(R.string.hub_port_label), maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            modifier = Modifier.weight(0.9f).testTag("hub_port_input")
-                        )
-
-                        OutlinedTextField(
-                            value = hubTokenText,
-                            onValueChange = { hubTokenText = it.take(48) },
-                            label = { Text(stringResource(R.string.hub_token_label), maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                            singleLine = true,
-                            trailingIcon = {
-                                IconButton(onClick = { isHubTokenVisible = !isHubTokenVisible }) {
-                                    Icon(
-                                        imageVector = if (isHubTokenVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
-                                        contentDescription = stringResource(R.string.cloud_show_secret),
-                                        tint = Color.White.copy(alpha = 0.7f)
-                                    )
-                                }
-                            },
-                            visualTransformation = if (isHubTokenVisible) VisualTransformation.None else PasswordVisualTransformation(),
-                            modifier = Modifier.weight(1.3f).testTag("hub_token_input")
-                        )
-                    }
-
-                    FlowRow(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Button(
-                            onClick = {
-                                val portVal = hubPortText.toIntOrNull() ?: com.example.engine.RemoteHubServer.DEFAULT_PORT
-                                val safePort = com.example.engine.RemoteHubServer.normalizePort(portVal)
-                                hubPortText = safePort.toString()
-                                viewModel.updateHubServerConfig(safePort, hubTokenText, hubState.allowRemoteControl)
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = Color.Black),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                            modifier = Modifier.testTag("hub_apply_config_btn")
-                        ) {
-                            Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(15.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(stringResource(R.string.hub_apply_settings_btn), fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
-                        }
-
-                        OutlinedButton(
-                            onClick = { copyToClipboard("OmniView Hub Token", hubState.accessToken) },
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
-                            modifier = Modifier.testTag("hub_copy_token_btn")
-                        ) {
-                            Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(14.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(stringResource(R.string.hub_copy_token), fontSize = 11.sp, maxLines = 1, softWrap = false)
-                        }
-
-                        OutlinedButton(
-                            onClick = { viewModel.regenerateHubToken() },
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
-                            modifier = Modifier.testTag("hub_regen_token_btn")
-                        ) {
-                            Icon(Icons.Default.Key, contentDescription = null, modifier = Modifier.size(14.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(stringResource(R.string.hub_regen_token_btn), fontSize = 11.sp, maxLines = 1, softWrap = false)
-                        }
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
-                            Text(stringResource(R.string.hub_remote_control_title), color = Color.White, fontSize = 13.sp)
-                            Text(stringResource(R.string.hub_remote_control_sub), color = Color.Gray, fontSize = 11.sp)
-                        }
-                        Switch(
-                            checked = hubState.allowRemoteControl,
-                            onCheckedChange = { viewModel.setRemoteHubControlEnabled(it) },
-                            colors = SwitchDefaults.colors(checkedThumbColor = NeonCyan),
-                            modifier = Modifier.testTag("hub_allow_control_switch")
-                        )
-                    }
-
-                    if (hubState.lastRequestSummary.isNotBlank()) {
-                        Text(
-                            text = stringResource(R.string.hub_last_client, hubState.lastRequestSummary),
-                            color = Color.White.copy(alpha = 0.65f),
-                            fontSize = 10.sp,
-                            fontFamily = FontFamily.Monospace
-                        )
-                    }
-
-                    hubCopyMessage?.let { msg ->
-                        Text(text = msg, color = NeonGreen, fontSize = 11.sp, fontWeight = FontWeight.Medium)
-                    }
-
-                    hubState.lastError?.let { err ->
-                        Text(
-                            text = stringResource(R.string.hub_error_prefix, err),
-                            color = NeonRed,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Medium
-                        )
-                    }
-                }
-            }
+                },
+                onToggleRemoteControl = { viewModel.setRemoteHubControlEnabled(it) },
+                onToggleApiKeyEnabled = { viewModel.setHubApiKeyEnabled(it) },
+                onRegenerateApiKey = { viewModel.regenerateHubApiKey() },
+                onRevokeAllSessions = { viewModel.revokeAllHubSessions() },
+                onDismissOneTimeSecrets = { viewModel.dismissOneTimeHubSecrets() }
+            )
 
             // Local Device & System File Manager Folder Picker Card
             Card(
@@ -1329,523 +978,30 @@ fun CloudStorageScreen(
                 }
             }
 
-            // Provider Selector
-            Card(
-                colors = CardDefaults.cardColors(containerColor = SurveillanceCardBg),
-                shape = RoundedCornerShape(14.dp)
-            ) {
-                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text(stringResource(R.string.cloud_protocol_title), color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-
-                    FlowRow(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        FilterChip(
-                            selected = selectedProvider == CloudProviderType.AWS_S3_COMPATIBLE,
-                            onClick = { selectedProvider = CloudProviderType.AWS_S3_COMPATIBLE },
-                            label = { Text(stringResource(R.string.cloud_provider_s3), fontSize = 11.sp, maxLines = 1, softWrap = false) },
-                            modifier = Modifier.testTag("chip_provider_s3")
-                        )
-
-                        FilterChip(
-                            selected = selectedProvider == CloudProviderType.WEBDAV,
-                            onClick = { selectedProvider = CloudProviderType.WEBDAV },
-                            label = { Text(stringResource(R.string.cloud_provider_webdav), fontSize = 11.sp, maxLines = 1, softWrap = false) },
-                            modifier = Modifier.testTag("chip_provider_webdav")
-                        )
-
-                        FilterChip(
-                            selected = selectedProvider == CloudProviderType.GOOGLE_DRIVE,
-                            onClick = { selectedProvider = CloudProviderType.GOOGLE_DRIVE },
-                            label = { Text(stringResource(R.string.cloud_provider_gdrive), fontSize = 11.sp, maxLines = 1, softWrap = false) },
-                            modifier = Modifier.testTag("chip_provider_gdrive")
-                        )
-
-                        FilterChip(
-                            selected = selectedProvider == CloudProviderType.FTP_NAS_STORAGE,
-                            onClick = { selectedProvider = CloudProviderType.FTP_NAS_STORAGE },
-                            label = { Text(stringResource(R.string.cloud_provider_nas), fontSize = 11.sp, maxLines = 1, softWrap = false) },
-                            modifier = Modifier.testTag("chip_provider_nas")
-                        )
-
-                        FilterChip(
-                            selected = selectedProvider == CloudProviderType.WEBHOOK_REST_API,
-                            onClick = { selectedProvider = CloudProviderType.WEBHOOK_REST_API },
-                            label = { Text(stringResource(R.string.cloud_provider_webhook), fontSize = 11.sp, maxLines = 1, softWrap = false) },
-                            modifier = Modifier.testTag("chip_provider_webhook")
-                        )
-                    }
+            RemoteStorageSection(
+                cloudConfig = cloudConfig,
+                extendedConfig = extendedStorageConfig,
+                discoveredEndpoints = discoveredEndpoints,
+                isScanningStorage = isScanningStorage,
+                isTesting = isTesting,
+                testResult = testResult,
+                detailedTestResult = detailedTestResult,
+                onScanNetwork = { viewModel.scanNetworkStorage() },
+                onLaunchSafFolderPicker = launchSystemFolderPicker,
+                onTestConnection = { draftCloud, draftExt ->
+                    viewModel.testCloudConnection(draftCloud, draftExt)
+                },
+                onSaveCredentials = { draftCloud, draftExt ->
+                    viewModel.saveCloudConfig(draftCloud)
+                    viewModel.saveExtendedStorageConfig(draftExt)
+                },
+                onSaveExtendedOptions = { draftExt ->
+                    viewModel.saveExtendedStorageConfig(draftExt)
+                },
+                onSaveSyncPolicies = { updatedCloud ->
+                    viewModel.saveCloudConfig(updatedCloud)
                 }
-            }
-
-            // Real Provider-Specific Credentials Card
-            Card(
-                colors = CardDefaults.cardColors(containerColor = SurveillanceCardBg),
-                shape = RoundedCornerShape(14.dp)
-            ) {
-                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.Key, contentDescription = null, tint = NeonCyan, modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = when (selectedProvider) {
-                                CloudProviderType.AWS_S3_COMPATIBLE -> stringResource(R.string.cloud_creds_s3)
-                                CloudProviderType.WEBDAV -> stringResource(R.string.cloud_creds_webdav)
-                                CloudProviderType.GOOGLE_DRIVE -> stringResource(R.string.cloud_creds_gdrive)
-                                CloudProviderType.FTP_NAS_STORAGE -> stringResource(R.string.cloud_creds_nas)
-                                CloudProviderType.WEBHOOK_REST_API -> stringResource(R.string.cloud_creds_webhook)
-                            },
-                            color = Color.White,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-
-                    when (selectedProvider) {
-                        CloudProviderType.AWS_S3_COMPATIBLE -> {
-                            OutlinedTextField(
-                                value = s3Endpoint,
-                                onValueChange = { s3Endpoint = it },
-                                label = { Text(stringResource(R.string.cloud_s3_endpoint)) },
-                                placeholder = { Text("https://s3.us-east-1.amazonaws.com") },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth().testTag("s3_endpoint_input")
-                            )
-
-                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                OutlinedTextField(
-                                    value = s3Bucket,
-                                    onValueChange = { s3Bucket = it },
-                                    label = { Text(stringResource(R.string.cloud_s3_bucket)) },
-                                    singleLine = true,
-                                    modifier = Modifier.weight(1f).testTag("s3_bucket_input")
-                                )
-                                OutlinedTextField(
-                                    value = s3Region,
-                                    onValueChange = { s3Region = it },
-                                    label = { Text(stringResource(R.string.cloud_s3_region)) },
-                                    placeholder = { Text("us-east-1") },
-                                    singleLine = true,
-                                    modifier = Modifier.weight(1f).testTag("s3_region_input")
-                                )
-                            }
-
-                            OutlinedTextField(
-                                value = s3AccessKeyId,
-                                onValueChange = { s3AccessKeyId = it },
-                                label = { Text(stringResource(R.string.cloud_s3_access_key)) },
-                                leadingIcon = { Icon(Icons.Default.Person, contentDescription = null, tint = NeonCyan) },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth().testTag("s3_access_key_input")
-                            )
-
-                            OutlinedTextField(
-                                value = s3SecretAccessKey,
-                                onValueChange = { s3SecretAccessKey = it },
-                                label = { Text(stringResource(R.string.cloud_s3_secret_key)) },
-                                leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null, tint = NeonCyan) },
-                                trailingIcon = {
-                                    IconButton(onClick = { isS3SecretVisible = !isS3SecretVisible }) {
-                                        Icon(
-                                            imageVector = if (isS3SecretVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
-                                            contentDescription = if (isS3SecretVisible) {
-                                                stringResource(R.string.cloud_hide_secret)
-                                            } else {
-                                                stringResource(R.string.cloud_show_secret)
-                                            },
-                                            tint = Color.White.copy(alpha = 0.7f)
-                                        )
-                                    }
-                                },
-                                visualTransformation = if (isS3SecretVisible) VisualTransformation.None else PasswordVisualTransformation(),
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth().testTag("s3_secret_key_input")
-                            )
-                        }
-
-                        CloudProviderType.WEBDAV -> {
-                            OutlinedTextField(
-                                value = webdavUrl,
-                                onValueChange = { webdavUrl = it },
-                                label = { Text(stringResource(R.string.cloud_webdav_url)) },
-                                placeholder = { Text("https://nextcloud.example.com/remote.php/dav/files/user/cctv") },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth().testTag("webdav_url_input")
-                            )
-
-                            OutlinedTextField(
-                                value = webdavUsername,
-                                onValueChange = { webdavUsername = it },
-                                label = { Text(stringResource(R.string.cloud_webdav_user)) },
-                                leadingIcon = { Icon(Icons.Default.Person, contentDescription = null, tint = NeonCyan) },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth().testTag("webdav_username_input")
-                            )
-
-                            OutlinedTextField(
-                                value = webdavPassword,
-                                onValueChange = { webdavPassword = it },
-                                label = { Text(stringResource(R.string.cloud_webdav_pass)) },
-                                leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null, tint = NeonCyan) },
-                                trailingIcon = {
-                                    IconButton(onClick = { isWebdavPasswordVisible = !isWebdavPasswordVisible }) {
-                                        Icon(
-                                            imageVector = if (isWebdavPasswordVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
-                                            contentDescription = if (isWebdavPasswordVisible) {
-                                                stringResource(R.string.cloud_hide_secret)
-                                            } else {
-                                                stringResource(R.string.cloud_show_secret)
-                                            },
-                                            tint = Color.White.copy(alpha = 0.7f)
-                                        )
-                                    }
-                                },
-                                visualTransformation = if (isWebdavPasswordVisible) VisualTransformation.None else PasswordVisualTransformation(),
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth().testTag("webdav_password_input")
-                            )
-                        }
-
-                        CloudProviderType.GOOGLE_DRIVE -> {
-                            OutlinedTextField(
-                                value = gdriveFolder,
-                                onValueChange = { gdriveFolder = it },
-                                label = { Text(stringResource(R.string.cloud_gdrive_folder)) },
-                                placeholder = { Text("OmniView-Surveillance-Backup") },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth().testTag("gdrive_folder_input")
-                            )
-
-                            OutlinedTextField(
-                                value = gdriveToken,
-                                onValueChange = { gdriveToken = it },
-                                label = { Text(stringResource(R.string.cloud_gdrive_token)) },
-                                leadingIcon = { Icon(Icons.Default.Key, contentDescription = null, tint = NeonCyan) },
-                                trailingIcon = {
-                                    IconButton(onClick = { isGdriveTokenVisible = !isGdriveTokenVisible }) {
-                                        Icon(
-                                            imageVector = if (isGdriveTokenVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
-                                            contentDescription = if (isGdriveTokenVisible) {
-                                                stringResource(R.string.cloud_hide_secret)
-                                            } else {
-                                                stringResource(R.string.cloud_show_secret)
-                                            },
-                                            tint = Color.White.copy(alpha = 0.7f)
-                                        )
-                                    }
-                                },
-                                visualTransformation = if (isGdriveTokenVisible) VisualTransformation.None else PasswordVisualTransformation(),
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth().testTag("gdrive_token_input")
-                            )
-                        }
-
-                        CloudProviderType.FTP_NAS_STORAGE -> {
-                            OutlinedTextField(
-                                value = nasUrl,
-                                onValueChange = { nasUrl = it },
-                                label = { Text(stringResource(R.string.cloud_nas_url)) },
-                                placeholder = { Text("http://192.168.1.50:5000/api/upload") },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth().testTag("nas_url_input")
-                            )
-
-                            OutlinedTextField(
-                                value = nasUsername,
-                                onValueChange = { nasUsername = it },
-                                label = { Text(stringResource(R.string.cloud_nas_user)) },
-                                leadingIcon = { Icon(Icons.Default.Person, contentDescription = null, tint = NeonCyan) },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth().testTag("nas_username_input")
-                            )
-
-                            OutlinedTextField(
-                                value = nasPassword,
-                                onValueChange = { nasPassword = it },
-                                label = { Text(stringResource(R.string.cloud_nas_pass)) },
-                                leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null, tint = NeonCyan) },
-                                trailingIcon = {
-                                    IconButton(onClick = { isNasPasswordVisible = !isNasPasswordVisible }) {
-                                        Icon(
-                                            imageVector = if (isNasPasswordVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
-                                            contentDescription = if (isNasPasswordVisible) {
-                                                stringResource(R.string.cloud_hide_secret)
-                                            } else {
-                                                stringResource(R.string.cloud_show_secret)
-                                            },
-                                            tint = Color.White.copy(alpha = 0.7f)
-                                        )
-                                    }
-                                },
-                                visualTransformation = if (isNasPasswordVisible) VisualTransformation.None else PasswordVisualTransformation(),
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth().testTag("nas_password_input")
-                            )
-                        }
-
-                        CloudProviderType.WEBHOOK_REST_API -> {
-                            OutlinedTextField(
-                                value = webhookUrl,
-                                onValueChange = { webhookUrl = it },
-                                label = { Text(stringResource(R.string.cloud_webhook_url)) },
-                                placeholder = { Text("https://api.mycloud.com/surveillance/webhook") },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth().testTag("webhook_url_input")
-                            )
-
-                            OutlinedTextField(
-                                value = webhookHeaderKey,
-                                onValueChange = { webhookHeaderKey = it },
-                                label = { Text(stringResource(R.string.cloud_webhook_header_key)) },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth().testTag("webhook_header_key_input")
-                            )
-
-                            OutlinedTextField(
-                                value = webhookHeaderValue,
-                                onValueChange = { webhookHeaderValue = it },
-                                label = { Text(stringResource(R.string.cloud_webhook_header_val)) },
-                                leadingIcon = { Icon(Icons.Default.Key, contentDescription = null, tint = NeonCyan) },
-                                trailingIcon = {
-                                    IconButton(onClick = { isWebhookSecretVisible = !isWebhookSecretVisible }) {
-                                        Icon(
-                                            imageVector = if (isWebhookSecretVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
-                                            contentDescription = if (isWebhookSecretVisible) {
-                                                stringResource(R.string.cloud_hide_secret)
-                                            } else {
-                                                stringResource(R.string.cloud_show_secret)
-                                            },
-                                            tint = Color.White.copy(alpha = 0.7f)
-                                        )
-                                    }
-                                },
-                                visualTransformation = if (isWebhookSecretVisible) VisualTransformation.None else PasswordVisualTransformation(),
-                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth().testTag("webhook_secret_input")
-                            )
-                        }
-                    }
-
-                    // Handshake test & Save buttons (FlowRow ensures zero wrapping/overflow on narrow screens)
-                    FlowRow(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        OutlinedButton(
-                            onClick = {
-                                saveConfirmationMessage = null
-                                val testConfig = cloudConfig.copy(
-                                    provider = selectedProvider,
-                                    endpointUrl = when (selectedProvider) {
-                                        CloudProviderType.AWS_S3_COMPATIBLE -> s3Endpoint
-                                        CloudProviderType.WEBDAV -> webdavUrl
-                                        CloudProviderType.GOOGLE_DRIVE -> "https://www.googleapis.com/drive/v3"
-                                        CloudProviderType.FTP_NAS_STORAGE -> nasUrl
-                                        CloudProviderType.WEBHOOK_REST_API -> webhookUrl
-                                    },
-                                    bucketOrFolderName = when (selectedProvider) {
-                                        CloudProviderType.AWS_S3_COMPATIBLE -> s3Bucket
-                                        CloudProviderType.GOOGLE_DRIVE -> gdriveFolder
-                                        else -> "surveillance"
-                                    },
-                                    s3Endpoint = s3Endpoint,
-                                    s3Bucket = s3Bucket,
-                                    s3Region = s3Region,
-                                    s3AccessKeyId = s3AccessKeyId,
-                                    s3SecretAccessKey = s3SecretAccessKey,
-                                    webdavUsername = webdavUsername,
-                                    webdavPassword = webdavPassword,
-                                    nasUsername = nasUsername,
-                                    nasPassword = nasPassword,
-                                    customHeaderName = webhookHeaderKey,
-                                    customHeaderValue = webhookHeaderValue,
-                                    apiKeyOrToken = when (selectedProvider) {
-                                        CloudProviderType.GOOGLE_DRIVE -> gdriveToken
-                                        CloudProviderType.WEBHOOK_REST_API -> webhookHeaderValue
-                                        else -> ""
-                                    }
-                                )
-                                viewModel.testCloudConnection(testConfig)
-                            },
-                            enabled = !isTesting,
-                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
-                            modifier = Modifier.testTag("test_cloud_connection_btn")
-                        ) {
-                            if (isTesting) {
-                                CircularProgressIndicator(modifier = Modifier.size(16.dp), color = NeonCyan)
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(stringResource(R.string.cloud_testing_btn), fontSize = 12.sp, maxLines = 1, softWrap = false)
-                            } else {
-                                Icon(Icons.Default.ElectricalServices, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(stringResource(R.string.cloud_test_btn), fontSize = 12.sp, color = NeonCyan, maxLines = 1, softWrap = false)
-                            }
-                        }
-
-                        Button(
-                            onClick = {
-                                val updated = cloudConfig.copy(
-                                    provider = selectedProvider,
-                                    endpointUrl = when (selectedProvider) {
-                                        CloudProviderType.AWS_S3_COMPATIBLE -> s3Endpoint
-                                        CloudProviderType.WEBDAV -> webdavUrl
-                                        CloudProviderType.GOOGLE_DRIVE -> "https://www.googleapis.com/drive/v3"
-                                        CloudProviderType.FTP_NAS_STORAGE -> nasUrl
-                                        CloudProviderType.WEBHOOK_REST_API -> webhookUrl
-                                    },
-                                    bucketOrFolderName = when (selectedProvider) {
-                                        CloudProviderType.AWS_S3_COMPATIBLE -> s3Bucket
-                                        CloudProviderType.GOOGLE_DRIVE -> gdriveFolder
-                                        else -> "surveillance"
-                                    },
-                                    s3Endpoint = s3Endpoint,
-                                    s3Bucket = s3Bucket,
-                                    s3Region = s3Region,
-                                    s3AccessKeyId = s3AccessKeyId,
-                                    s3SecretAccessKey = s3SecretAccessKey,
-                                    webdavUsername = webdavUsername,
-                                    webdavPassword = webdavPassword,
-                                    nasUsername = nasUsername,
-                                    nasPassword = nasPassword,
-                                    customHeaderName = webhookHeaderKey,
-                                    customHeaderValue = webhookHeaderValue,
-                                    apiKeyOrToken = when (selectedProvider) {
-                                        CloudProviderType.GOOGLE_DRIVE -> gdriveToken
-                                        CloudProviderType.WEBHOOK_REST_API -> webhookHeaderValue
-                                        else -> ""
-                                    },
-                                    autoSyncRecordings = autoSyncRecordings,
-                                    autoSyncMotionSnapshots = autoSyncMotion,
-                                    wifiOnly = wifiOnly
-                                )
-                                viewModel.saveCloudConfig(updated)
-                                saveConfirmationMessage = AppLocaleManager.getString(context, R.string.cloud_saved_msg, selectedProvider.name)
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = Color.Black),
-                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
-                            modifier = Modifier.testTag("save_cloud_config_btn")
-                        ) {
-                            Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(stringResource(R.string.cloud_save_creds_btn), fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
-                        }
-                    }
-
-                    // Save confirmation badge
-                    saveConfirmationMessage?.let { msg ->
-                        Surface(
-                            shape = RoundedCornerShape(8.dp),
-                            color = NeonGreen.copy(alpha = 0.2f),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, NeonGreen),
-                            modifier = Modifier.fillMaxWidth().testTag("save_confirmation_badge")
-                        ) {
-                            Text(
-                                text = "✓ $msg",
-                                color = NeonGreen,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(10.dp)
-                            )
-                        }
-                    }
-
-                    // Handshake result output
-                    val handshakePrefix = stringResource(R.string.cloud_handshake_ok, 0, "", 0, "").substringBefore(":")
-                    testResult?.let { res ->
-                        val isSuccess = res.startsWith("Handshake OK") || res.startsWith(handshakePrefix)
-                        val statusColor = if (isSuccess) NeonGreen else NeonRed
-                        Surface(
-                            shape = RoundedCornerShape(8.dp),
-                            color = statusColor.copy(alpha = 0.15f),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, statusColor),
-                            modifier = Modifier.fillMaxWidth().testTag("handshake_result_banner")
-                        ) {
-                            Text(
-                                text = res,
-                                color = statusColor,
-                                fontSize = 11.sp,
-                                fontFamily = FontFamily.Monospace,
-                                modifier = Modifier.padding(10.dp)
-                            )
-                        }
-                    }
-                }
-            }
-
-            // Sync Rules Card
-            Card(
-                colors = CardDefaults.cardColors(containerColor = SurveillanceCardBg),
-                shape = RoundedCornerShape(14.dp)
-            ) {
-                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                    Text(stringResource(R.string.cloud_policies_title), color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
-                            Text(stringResource(R.string.cloud_auto_upload_clips), color = Color.White, fontSize = 13.sp)
-                            Text(stringResource(R.string.cloud_auto_upload_clips_sub), color = Color.Gray, fontSize = 11.sp)
-                        }
-                        Switch(
-                            checked = autoSyncRecordings,
-                            onCheckedChange = {
-                                autoSyncRecordings = it
-                                viewModel.saveCloudConfig(cloudConfig.copy(autoSyncRecordings = it))
-                            },
-                            colors = SwitchDefaults.colors(checkedThumbColor = NeonCyan)
-                        )
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
-                            Text(stringResource(R.string.cloud_auto_upload_motion), color = Color.White, fontSize = 13.sp)
-                            Text(stringResource(R.string.cloud_auto_upload_motion_sub), color = Color.Gray, fontSize = 11.sp)
-                        }
-                        Switch(
-                            checked = autoSyncMotion,
-                            onCheckedChange = {
-                                autoSyncMotion = it
-                                viewModel.saveCloudConfig(cloudConfig.copy(autoSyncMotionSnapshots = it))
-                            },
-                            colors = SwitchDefaults.colors(checkedThumbColor = NeonCyan)
-                        )
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
-                            Text(stringResource(R.string.cloud_wifi_only), color = Color.White, fontSize = 13.sp)
-                            Text(stringResource(R.string.cloud_wifi_only_sub), color = Color.Gray, fontSize = 11.sp)
-                        }
-                        Switch(
-                            checked = wifiOnly,
-                            onCheckedChange = {
-                                wifiOnly = it
-                                viewModel.saveCloudConfig(cloudConfig.copy(wifiOnly = it))
-                            },
-                            colors = SwitchDefaults.colors(checkedThumbColor = NeonCyan)
-                        )
-                    }
-                }
-            }
+            )
         }
     }
 }

@@ -10,6 +10,7 @@ import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaMuxer
+import android.os.Bundle
 import com.example.data.model.CameraEntity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -169,8 +170,16 @@ class CameraStreamRecorder(
 
                 if (codec != null && muxer != null && recorder != null && !recorder.isStopping.get()) {
                     try {
+                        if (frameIndex == 0) {
+                            runCatching {
+                                val syncBundle = Bundle().apply {
+                                    putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+                                }
+                                codec.setParameters(syncBundle)
+                            }
+                        }
                         val rawPtsUs = (System.nanoTime() - recorder.startTimeNano) / 1000L
-                        val ptsUs = maxOf(rawPtsUs, recorder.lastPresentationTimeUs + 1000L)
+                        val ptsUs = maxOf(rawPtsUs, recorder.lastPresentationTimeUs + 33_333L)
                         recorder.lastPresentationTimeUs = ptsUs
 
                         encodeFrame(
@@ -249,6 +258,29 @@ class CameraStreamRecorder(
 
         if (codec != null && muxer != null) {
             try {
+                // Guarantee at least 3 encoded frames (with keyframe) if stopped immediately after start
+                var safetyFrames = recorder.frameCount
+                while (safetyFrames < 3) {
+                    val fallbackBmp = generateCameraFrame(
+                        camera = recorder.camera,
+                        width = recorder.width,
+                        height = recorder.height,
+                        frameIndex = safetyFrames,
+                        backdrop = recorder.lastLiveFrame
+                    )
+                    val pts = maxOf(0L, recorder.lastPresentationTimeUs + 100_000L)
+                    recorder.lastPresentationTimeUs = pts
+                    if (safetyFrames == 0) {
+                        runCatching {
+                            codec.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) })
+                        }
+                    }
+                    encodeFrame(codec, muxer, fallbackBmp, recorder.width, recorder.height, pts, recorder)
+                    if (!fallbackBmp.isRecycled) fallbackBmp.recycle()
+                    safetyFrames++
+                    recorder.frameCount = safetyFrames
+                }
+
                 val inputIndex = codec.dequeueInputBuffer(20_000)
                 if (inputIndex >= 0) {
                     val eosPts = (recorder.lastPresentationTimeUs + 100_000L).coerceAtLeast(0L)
@@ -351,7 +383,7 @@ class CameraStreamRecorder(
                     }
                 }
                 outIndex == MediaCodec.INFO_TRY_AGAIN_LATER -> {
-                    if (!endOfStream || ++eosEmptyTries >= 50) {
+                    if (!endOfStream || ++eosEmptyTries >= 80) {
                         break
                     }
                 }

@@ -259,7 +259,7 @@ fun LiveMultiCamScreen(
                                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
                             ) {
                                 Icon(
-                                    imageVector = if (hubState.tailscaleEndpoint != null) Icons.Default.VpnLock else Icons.Default.Router,
+                                    imageVector = if (hubState.vpnEndpoints.isNotEmpty()) Icons.Default.VpnLock else Icons.Default.Router,
                                     contentDescription = stringResource(R.string.hub_quick_dialog_title),
                                     tint = if (hubState.isRunning) NeonGreen else Color.Gray,
                                     modifier = Modifier.size(13.dp)
@@ -1082,8 +1082,24 @@ fun LiveMultiCamScreen(
                                 fontSize = 12.sp
                             )
                         } else {
-                            hubState.endpoints.take(3).forEach { ep ->
-                                val color = if (ep.kind == EndpointKind.TAILSCALE) NeonCyan else NeonGreen
+                            hubState.endpoints.take(5).forEach { ep ->
+                                val color = when (ep.kind) {
+                                    EndpointKind.TAILSCALE, EndpointKind.EXTERNAL_TUNNEL -> NeonCyan
+                                    EndpointKind.WIREGUARD, EndpointKind.ZEROTIER, EndpointKind.VPN_TUNNEL -> Color(0xFF7B61FF)
+                                    EndpointKind.WIFI_LAN -> NeonGreen
+                                    EndpointKind.HOTSPOT_USB -> NeonAmber
+                                    EndpointKind.OTHER -> Color.LightGray
+                                }
+                                val kindText = when (ep.kind) {
+                                    EndpointKind.TAILSCALE -> stringResource(R.string.hub_kind_tailscale)
+                                    EndpointKind.WIREGUARD -> stringResource(R.string.hub_kind_wireguard)
+                                    EndpointKind.ZEROTIER -> stringResource(R.string.hub_kind_zerotier)
+                                    EndpointKind.VPN_TUNNEL -> stringResource(R.string.hub_kind_vpn)
+                                    EndpointKind.WIFI_LAN -> stringResource(R.string.hub_kind_lan)
+                                    EndpointKind.HOTSPOT_USB -> stringResource(R.string.hub_kind_hotspot)
+                                    EndpointKind.EXTERNAL_TUNNEL -> stringResource(R.string.hub_kind_external)
+                                    EndpointKind.OTHER -> stringResource(R.string.hub_kind_other)
+                                }
                                 Surface(
                                     shape = RoundedCornerShape(8.dp),
                                     color = SurveillanceSurface,
@@ -1098,11 +1114,7 @@ fun LiveMultiCamScreen(
                                     ) {
                                         Column(modifier = Modifier.weight(1f).padding(end = 6.dp)) {
                                             Text(
-                                                text = if (ep.kind == EndpointKind.TAILSCALE) {
-                                                    stringResource(R.string.hub_kind_tailscale)
-                                                } else {
-                                                    stringResource(R.string.hub_kind_lan)
-                                                },
+                                                text = "$kindText (${ep.interfaceName})",
                                                 color = color,
                                                 fontSize = 9.sp,
                                                 fontWeight = FontWeight.Bold
@@ -1122,13 +1134,29 @@ fun LiveMultiCamScreen(
                             }
                         }
 
-                        OutlinedButton(
-                            onClick = { copyQuickText("Hub Token", hubState.accessToken) },
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = SurveillanceSurface,
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(15.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(stringResource(R.string.hub_copy_token), fontSize = 12.sp)
+                            Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                Text(
+                                    text = stringResource(R.string.hub_quick_creds_summary, hubState.username),
+                                    color = Color.White.copy(alpha = 0.88f),
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                val scopeName = when (hubState.accessScope) {
+                                    com.example.engine.HubAccessScope.ALL_INTERFACES -> stringResource(R.string.hub_scope_all)
+                                    com.example.engine.HubAccessScope.VPN_ONLY -> stringResource(R.string.hub_scope_vpn_only)
+                                    com.example.engine.HubAccessScope.LAN_AND_VPN -> stringResource(R.string.hub_scope_lan_vpn)
+                                }
+                                Text(
+                                    text = stringResource(R.string.hub_quick_scope_summary, scopeName),
+                                    color = NeonCyan,
+                                    fontSize = 10.sp
+                                )
+                            }
                         }
 
                         quickHubCopyNotice?.let { notice ->

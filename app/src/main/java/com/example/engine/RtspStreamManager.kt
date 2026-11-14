@@ -22,6 +22,10 @@ import com.example.data.model.RtspTransport
 import com.example.data.model.StreamTelemetry
 import com.example.service.FloatingOverlayStateHolder
 import android.graphics.Bitmap
+import android.graphics.PixelFormat
+import android.media.ImageReader
+import android.os.Handler
+import android.os.Looper
 import android.view.TextureView
 import java.lang.ref.WeakReference
 import kotlinx.coroutines.CoroutineScope
@@ -85,10 +89,15 @@ class RtspStreamManager(private val context: Context) {
         }
     }
 
+    private val headlessReaders = ConcurrentHashMap<String, ImageReader>()
+    private val latestHeadlessBitmaps = ConcurrentHashMap<String, Bitmap>()
+    private val readerHandler = Handler(Looper.getMainLooper())
+
     fun onSurfaceAttached(cameraId: String) {
         attachedSurfaceCountMap[cameraId] = (attachedSurfaceCountMap[cameraId] ?: 0) + 1
         surfaceGraceUntilMsMap[cameraId] = System.currentTimeMillis() + SURFACE_SWITCH_GRACE_MS
         stalledSecondsMap[cameraId] = 0
+        releaseHeadlessReader(cameraId)
     }
 
     fun onSurfaceDetached(cameraId: String) {
@@ -97,6 +106,21 @@ class RtspStreamManager(private val context: Context) {
             attachedSurfaceCountMap.remove(cameraId)
         } else {
             attachedSurfaceCountMap[cameraId] = next
+        }
+    }
+
+    private fun releaseHeadlessReader(cameraId: String) {
+        headlessReaders.remove(cameraId)?.let { reader ->
+            try {
+                playerMap[cameraId]?.clearVideoSurface(reader.surface)
+            } catch (_: Exception) {}
+            try {
+                reader.setOnImageAvailableListener(null, null)
+                reader.close()
+            } catch (_: Exception) {}
+        }
+        latestHeadlessBitmaps.remove(cameraId)?.let { bmp ->
+            if (!bmp.isRecycled) bmp.recycle()
         }
     }
 
@@ -414,16 +438,71 @@ class RtspStreamManager(private val context: Context) {
     }
 
     fun captureFrame(cameraId: String, width: Int = 640, height: Int = 360): Bitmap? {
-        val tv = activeTextureViews[cameraId]?.get() ?: return null
-        return try {
-            if (tv.isAvailable && tv.width > 0 && tv.height > 0) {
+        val tv = activeTextureViews[cameraId]?.get()
+        if (tv != null && tv.isAvailable && tv.width > 0 && tv.height > 0) {
+            return try {
                 tv.getBitmap(width, height)
-            } else {
+            } catch (_: Exception) {
                 null
             }
-        } catch (_: Exception) {
-            null
         }
+
+        // Headless fallback: when no UI TextureView is mounted (e.g. screen off / another tab),
+        // bind an ImageReader surface to ExoPlayer so Remote Hub & Recorder still receive real frames.
+        if ((attachedSurfaceCountMap[cameraId] ?: 0) == 0) {
+            val player = playerMap[cameraId]
+            if (player != null) {
+                val reader = headlessReaders.getOrPut(cameraId) {
+                    val safeW = width.coerceIn(320, 960)
+                    val safeH = height.coerceIn(180, 540)
+                    ImageReader.newInstance(safeW, safeH, PixelFormat.RGBA_8888, 2).apply {
+                        setOnImageAvailableListener({ r ->
+                            try {
+                                val img = r.acquireLatestImage() ?: return@setOnImageAvailableListener
+                                try {
+                                    val plane = img.planes[0]
+                                    val buffer = plane.buffer
+                                    val pixelStride = plane.pixelStride
+                                    val rowStride = plane.rowStride
+                                    val rowPadding = rowStride - pixelStride * r.width
+                                    val fullWidth = r.width + rowPadding / pixelStride
+                                    val rawBmp = Bitmap.createBitmap(fullWidth, r.height, Bitmap.Config.ARGB_8888)
+                                    rawBmp.copyPixelsFromBuffer(buffer)
+                                    val cropped = if (fullWidth != r.width) {
+                                        Bitmap.createBitmap(rawBmp, 0, 0, r.width, r.height).also {
+                                            rawBmp.recycle()
+                                        }
+                                    } else {
+                                        rawBmp
+                                    }
+                                    val prev = latestHeadlessBitmaps.put(cameraId, cropped)
+                                    if (prev != null && prev !== cropped && !prev.isRecycled) {
+                                        prev.recycle()
+                                    }
+                                } finally {
+                                    img.close()
+                                }
+                            } catch (_: Exception) {}
+                        }, readerHandler)
+                        try {
+                            player.setVideoSurface(this.surface)
+                        } catch (_: Exception) {}
+                    }
+                }
+                if (reader.surface.isValid) {
+                    latestHeadlessBitmaps[cameraId]?.let { cached ->
+                        if (!cached.isRecycled) {
+                            return try {
+                                Bitmap.createScaledBitmap(cached, width, height, true)
+                            } catch (_: Exception) {
+                                null
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return null
     }
 
     fun isDemoCamera(camera: CameraEntity): Boolean {
@@ -622,6 +701,7 @@ class RtspStreamManager(private val context: Context) {
     }
 
     fun releasePlayer(cameraId: String) {
+        releaseHeadlessReader(cameraId)
         playerMap.remove(cameraId)?.release()
         playerFlowMap.remove(cameraId)
         telemetryMap.remove(cameraId)
@@ -640,6 +720,7 @@ class RtspStreamManager(private val context: Context) {
     }
 
     fun releaseAll() {
+        headlessReaders.keys.toList().forEach { releaseHeadlessReader(it) }
         for ((_, player) in playerMap) {
             try {
                 player.release()
