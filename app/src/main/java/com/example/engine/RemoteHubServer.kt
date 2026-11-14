@@ -229,7 +229,14 @@ class RemoteHubServer(
 
     private val activeClientCount = AtomicInteger(0)
     private val sessions = ConcurrentHashMap<String, Long>()
+    private val mediaTokens = ConcurrentHashMap<String, MediaTokenEntry>()
+    private val sessionToMediaToken = ConcurrentHashMap<String, String>()
     private val failedAttemptsByIp = ConcurrentHashMap<String, FailedAuthBucket>()
+
+    private data class MediaTokenEntry(
+        val sessionId: String,
+        val expiresAtMs: Long
+    )
 
     private data class FailedAuthBucket(
         val count: Int,
@@ -272,6 +279,8 @@ class RemoteHubServer(
 
         if (portChanged || authChanged) {
             sessions.clear()
+            mediaTokens.clear()
+            sessionToMediaToken.clear()
         }
 
         _state.value = prev.copy(
@@ -338,6 +347,8 @@ class RemoteHubServer(
 
     fun revokeAllSessions() {
         sessions.clear()
+        mediaTokens.clear()
+        sessionToMediaToken.clear()
         _state.value = _state.value.copy(activeSessionCount = 0)
     }
 
@@ -357,7 +368,26 @@ class RemoteHubServer(
     private fun countActiveSessions(): Int {
         val now = System.currentTimeMillis()
         sessions.entries.removeIf { it.value <= now }
+        mediaTokens.entries.removeIf { entry ->
+            val expired = entry.value.expiresAtMs <= now
+            val orphanedSession = !entry.value.sessionId.startsWith("direct:") &&
+                !sessions.containsKey(entry.value.sessionId)
+            expired || orphanedSession
+        }
+        sessionToMediaToken.entries.removeIf { !mediaTokens.containsKey(it.value) }
         return sessions.size
+    }
+
+    private fun issueMediaTokenForSession(sessionId: String, expiresAtMs: Long): String {
+        val existing = sessionToMediaToken[sessionId]
+        val existingEntry = existing?.let { mediaTokens[it] }
+        if (existing != null && existingEntry != null && existingEntry.expiresAtMs > System.currentTimeMillis()) {
+            return existing
+        }
+        val token = generateSessionId()
+        mediaTokens[token] = MediaTokenEntry(sessionId = sessionId, expiresAtMs = expiresAtMs)
+        sessionToMediaToken[sessionId] = token
+        return token
     }
 
     private fun safeHealth(): HubSystemHealth {
@@ -418,6 +448,8 @@ class RemoteHubServer(
     private fun stopServerSocket() {
         stopServerSocketInternal()
         sessions.clear()
+        mediaTokens.clear()
+        sessionToMediaToken.clear()
         _state.value = _state.value.copy(
             isRunning = false,
             activeConnections = 0,
@@ -488,7 +520,10 @@ class RemoteHubServer(
             }
 
             if (path == "/api/logout" && request.method.equals("POST", ignoreCase = true)) {
-                extractSessionCookie(request.headers["cookie"])?.let { sessions.remove(it) }
+                extractSessionCookie(request.headers["cookie"])?.let { sid ->
+                    sessions.remove(sid)
+                    sessionToMediaToken.remove(sid)?.let { mediaTokens.remove(it) }
+                }
                 _state.value = _state.value.copy(activeSessionCount = countActiveSessions())
                 val json = """{"ok":true}"""
                 sendTextResponse(
@@ -505,9 +540,22 @@ class RemoteHubServer(
             val isAuthenticated = isRequestAuthenticated(request, query)
 
             if (path == "/" || path == "/index.html") {
+                val mediaToken = if (isAuthenticated) {
+                    val sid = extractSessionCookie(request.headers["cookie"])?.takeIf { sessions.containsKey(it) }
+                    val now = System.currentTimeMillis()
+                    if (sid != null) {
+                        issueMediaTokenForSession(sid, sessions[sid] ?: (now + SESSION_TTL_MS))
+                    } else {
+                        val directSid = "direct:${generateSessionId()}"
+                        issueMediaTokenForSession(directSid, now + SESSION_TTL_MS)
+                    }
+                } else {
+                    ""
+                }
                 val html = buildWebConsoleHtml(
                     isAuthenticated = isAuthenticated,
-                    usernameHint = _state.value.username
+                    usernameHint = _state.value.username,
+                    mediaToken = mediaToken
                 )
                 sendTextResponse(output, 200, "OK", html, "text/html; charset=utf-8")
                 return
@@ -673,6 +721,26 @@ class RemoteHubServer(
 
             val queryKey = query["apiKey"].orEmpty().trim()
             if (queryKey.isNotEmpty() && verifyApiKey(queryKey, st.apiKeySha256Hex)) return true
+        }
+
+        // 4. Scoped Media Token (?mt=...) ONLY for read-only media element GET/HEAD routes
+        val isMediaMethod = request.method.equals("GET", ignoreCase = true) ||
+            request.method.equals("HEAD", ignoreCase = true)
+        if (isMediaMethod && isMediaStreamPath(request.pathOnly)) {
+            val mt = query["mt"].orEmpty().trim()
+            if (mt.isNotEmpty()) {
+                val entry = mediaTokens[mt]
+                if (entry != null) {
+                    val now = System.currentTimeMillis()
+                    val sessionValid = entry.sessionId.startsWith("direct:") ||
+                        (sessions[entry.sessionId]?.let { it > now } == true)
+                    if (entry.expiresAtMs > now && sessionValid) {
+                        return true
+                    } else {
+                        mediaTokens.remove(mt)
+                    }
+                }
+            }
         }
 
         return false
@@ -1390,6 +1458,11 @@ class RemoteHubServer(
             }
         }
 
+        fun isMediaStreamPath(path: String): Boolean {
+            return (path.startsWith("/api/clips/") && path.endsWith("/stream")) ||
+                (path.startsWith("/api/cameras/") && (path.endsWith("/frame.jpg") || path.endsWith("/mjpeg")))
+        }
+
         private fun escapeHtml(text: String): String {
             return text
                 .replace("&", "&amp;")
@@ -1399,7 +1472,11 @@ class RemoteHubServer(
                 .replace("'", "&#39;")
         }
 
-        fun buildWebConsoleHtml(isAuthenticated: Boolean, usernameHint: String = "admin"): String {
+        fun buildWebConsoleHtml(
+            isAuthenticated: Boolean,
+            usernameHint: String = "admin",
+            mediaToken: String = ""
+        ): String {
             return if (!isAuthenticated) {
                 val safeHint = escapeHtml(usernameHint.ifBlank { "admin" })
                 """
@@ -1591,6 +1668,20 @@ class RemoteHubServer(
                   </div>
 
                   <script>
+                    const MEDIA_TOKEN = ${jsonStr(mediaToken)};
+                    function withMt(url) {
+                      if (!MEDIA_TOKEN) return url;
+                      return url + (url.indexOf('?') >= 0 ? '&' : '?') + 'mt=' + encodeURIComponent(MEDIA_TOKEN);
+                    }
+                    function esc(s) {
+                      return String(s == null ? '' : s)
+                        .replace(/&/g, '&amp;')
+                        .replace(/</g, '&lt;')
+                        .replace(/>/g, '&gt;')
+                        .replace(/"/g, '&quot;')
+                        .replace(/'/g, '&#39;');
+                    }
+
                     let cameras = [];
                     let clips = [];
                     let activeClipId = null;
@@ -1605,7 +1696,11 @@ class RemoteHubServer(
                     async function api(url, opts = {}) {
                       const res = await fetch(url, { credentials: 'same-origin', ...opts });
                       if (res.status === 401) { location.reload(); throw new Error('Unauthorized'); }
-                      return res.json();
+                      const data = await res.json().catch(() => ({}));
+                      if (!res.ok && data && typeof data === 'object' && data.ok === undefined) {
+                        data.ok = false;
+                      }
+                      return data;
                     }
 
                     async function refreshAll() {
@@ -1625,7 +1720,9 @@ class RemoteHubServer(
                       renderSelectors();
                       renderClips();
                       if (!activeClipId && clips.length > 0) {
-                        selectClipById(clips[clips.length - 1].id, false);
+                        const playable = clips.filter(c => !c.fileBytes || c.fileBytes > 256);
+                        const initialClip = playable.length ? playable[playable.length - 1] : clips[clips.length - 1];
+                        selectClipById(initialClip.id, false);
                       }
                     }
 
@@ -1641,7 +1738,7 @@ class RemoteHubServer(
                       if (gridUseMjpeg || theaterCamId === camId) return;
                       const img = document.getElementById('cam-img-' + camId);
                       if (!img) return;
-                      img.src = '/api/cameras/' + encodeURIComponent(camId) + '/frame.jpg?ts=' + Date.now();
+                      img.src = withMt('/api/cameras/' + encodeURIComponent(camId) + '/frame.jpg?ts=' + Date.now());
                     }
 
                     function onGridImgDone(camId) {
@@ -1658,23 +1755,45 @@ class RemoteHubServer(
                         camLayoutSignature = sig;
                         Object.keys(snapshotTimers).forEach(k => clearTimeout(snapshotTimers[k]));
                         grid.innerHTML = cameras.map(c => {
+                          const safeId = esc(c.id);
+                          const safeName = esc(c.name);
                           const cid = encodeURIComponent(c.id);
+                          const frameUrl = esc(withMt('/api/cameras/' + cid + '/frame.jpg?ts=' + Date.now()));
+                          const mjpegUrl = esc(withMt('/api/cameras/' + cid + '/mjpeg'));
                           const srcAttr = gridUseMjpeg
-                            ? 'src="/api/cameras/' + cid + '/mjpeg"'
-                            : 'src="/api/cameras/' + cid + '/frame.jpg?ts=' + Date.now() + '" onload="onGridImgDone(\'' + c.id + '\')" onerror="onGridImgDone(\'' + c.id + '\')"';
-                          return '<div class="cam" id="cam-card-' + c.id + '">' +
-                            '<img id="cam-img-' + c.id + '" ' + srcAttr + ' onclick="openTheater(\'' + c.id + '\')" alt="' + c.name + '"/>' +
+                            ? 'src="' + mjpegUrl + '"'
+                            : 'src="' + frameUrl + '" data-cam-done="' + safeId + '"';
+                          return '<div class="cam" id="cam-card-' + safeId + '">' +
+                            '<img id="cam-img-' + safeId + '" ' + srcAttr + ' data-cam-open="' + safeId + '" alt="' + safeName + '"/>' +
                             '<div class="cam-body">' +
-                              '<div class="cam-top"><strong>' + c.name + '</strong><span id="cam-badge-' + c.id + '" class="badge"></span></div>' +
-                              '<div class="mut" id="cam-meta-' + c.id + '"></div>' +
+                              '<div class="cam-top"><strong>' + safeName + '</strong><span id="cam-badge-' + safeId + '" class="badge"></span></div>' +
+                              '<div class="mut" id="cam-meta-' + safeId + '"></div>' +
                               '<div class="row" style="margin-top:8px">' +
-                                '<button id="cam-recbtn-' + c.id + '" onclick="toggleRecById(\'' + c.id + '\')"></button>' +
-                                '<button onclick="openTheater(\'' + c.id + '\')">Live Stream</button>' +
-                                '<button onclick="snapCam(\'' + c.id + '\')">Snapshot</button>' +
-                                '<button onclick="document.getElementById(\'ptzCam\').value=\'' + c.id + '\'">PTZ</button>' +
+                                '<button id="cam-recbtn-' + safeId + '" data-cam-rec="' + safeId + '"></button>' +
+                                '<button data-cam-open="' + safeId + '">Live Stream</button>' +
+                                '<button data-cam-snap="' + safeId + '">Snapshot</button>' +
+                                '<button data-cam-ptz="' + safeId + '">PTZ</button>' +
                               '</div>' +
                             '</div></div>';
                         }).join('');
+
+                        grid.querySelectorAll('img[data-cam-done]').forEach(img => {
+                          const id = img.getAttribute('data-cam-done');
+                          img.onload = () => onGridImgDone(id);
+                          img.onerror = () => onGridImgDone(id);
+                        });
+                        grid.querySelectorAll('[data-cam-open]').forEach(el => {
+                          el.onclick = () => openTheater(el.getAttribute('data-cam-open'));
+                        });
+                        grid.querySelectorAll('[data-cam-rec]').forEach(el => {
+                          el.onclick = () => toggleRecById(el.getAttribute('data-cam-rec'));
+                        });
+                        grid.querySelectorAll('[data-cam-snap]').forEach(el => {
+                          el.onclick = () => snapCam(el.getAttribute('data-cam-snap'));
+                        });
+                        grid.querySelectorAll('[data-cam-ptz]').forEach(el => {
+                          el.onclick = () => { document.getElementById('ptzCam').value = el.getAttribute('data-cam-ptz'); };
+                        });
                       }
 
                       // Update status badges & metrics in-place so active video frames stay smooth
@@ -1719,7 +1838,7 @@ class RemoteHubServer(
                           document.getElementById('theaterModeBtn').textContent = 'Mode: Snapshot';
                           updateTheaterSource();
                         };
-                        img.src = '/api/cameras/' + cid + '/mjpeg?ts=' + Date.now();
+                        img.src = withMt('/api/cameras/' + cid + '/mjpeg?ts=' + Date.now());
                       } else {
                         img.onload = () => {
                           if (theaterCamId && !theaterUseMjpeg) {
@@ -1731,7 +1850,7 @@ class RemoteHubServer(
                             snapshotTimers['__theater'] = setTimeout(updateTheaterSource, 900);
                           }
                         };
-                        img.src = '/api/cameras/' + cid + '/frame.jpg?ts=' + Date.now();
+                        img.src = withMt('/api/cameras/' + cid + '/frame.jpg?ts=' + Date.now());
                       }
                     }
 
@@ -1753,13 +1872,13 @@ class RemoteHubServer(
                     function renderSelectors() {
                       const ptzSel = document.getElementById('ptzCam');
                       const prevPtz = ptzSel.value;
-                      ptzSel.innerHTML = cameras.map(c => '<option value="' + c.id + '">' + c.name + '</option>').join('');
+                      ptzSel.innerHTML = cameras.map(c => '<option value="' + esc(c.id) + '">' + esc(c.name) + '</option>').join('');
                       if (prevPtz) ptzSel.value = prevPtz;
 
                       const clipSel = document.getElementById('clipCamFilter');
                       const prevClip = clipSel.value;
                       clipSel.innerHTML = '<option value="">All Cameras</option>' +
-                        cameras.map(c => '<option value="' + c.id + '">' + c.name + '</option>').join('');
+                        cameras.map(c => '<option value="' + esc(c.id) + '">' + esc(c.name) + '</option>').join('');
                       clipSel.value = prevClip;
                     }
 
@@ -1772,10 +1891,14 @@ class RemoteHubServer(
                       box.innerHTML = list.map(c => {
                         const dt = new Date(c.timestamp).toLocaleString();
                         const sz = c.fileBytes ? (c.fileBytes < 1024 ? (c.fileBytes + ' B') : (c.fileSizeMb.toFixed(2) + ' MB')) : (c.fileSizeMb.toFixed(1) + ' MB');
-                        return '<div class="clip ' + (c.id === activeClipId ? 'active' : '') + '" onclick="selectClipById(\'' + c.id + '\', true)">' +
-                          '<div><strong>' + c.cameraName + '</strong><div class="mut">' + dt + ' • ' + c.durationSeconds + 's • ' + sz + '</div></div>' +
-                          '<span class="badge live">▶</span></div>';
+                        const isStub = c.fileBytes && c.fileBytes <= 256;
+                        return '<div class="clip ' + (c.id === activeClipId ? 'active' : '') + '" data-clip-id="' + esc(c.id) + '">' +
+                          '<div><strong>' + esc(c.cameraName) + '</strong><div class="mut">' + esc(dt) + ' • ' + c.durationSeconds + 's • ' + esc(sz) + (isStub ? ' (empty)' : '') + '</div></div>' +
+                          '<span class="badge ' + (isStub ? '' : 'live') + '">' + (isStub ? '⚠' : '▶') + '</span></div>';
                       }).join('');
+                      box.querySelectorAll('[data-clip-id]').forEach(el => {
+                        el.onclick = () => selectClipById(el.getAttribute('data-clip-id'), true);
+                      });
                     }
 
                     function selectClipById(id, autoPlay) {
@@ -1785,15 +1908,16 @@ class RemoteHubServer(
                       const v = document.getElementById('clipPlayer');
                       const dl = document.getElementById('downloadClipLink');
                       const diag = document.getElementById('clipDiag');
-                      dl.href = clip.streamUrl + '?download=1';
+                      dl.href = withMt(clip.streamUrl + '?download=1');
                       diag.className = 'diag';
-                      if (clip.fileBytes && clip.fileBytes <= 64) {
+                      if (clip.fileBytes && clip.fileBytes <= 256) {
                         diag.className = 'diag warn';
                         diag.textContent = 'Clip has only ' + clip.fileBytes + ' bytes (header-only stub). Record a fresh clip to stream video frames.';
                       } else {
                         diag.textContent = 'Loaded: ' + clip.cameraName + ' • ' + new Date(clip.timestamp).toLocaleTimeString();
                       }
-                      v.src = clip.streamUrl;
+                      v.src = withMt(clip.streamUrl);
+                      v.load();
                       v.playbackRate = playbackSpeed;
                       if (autoPlay) {
                         v.play().catch(err => {
@@ -1806,7 +1930,9 @@ class RemoteHubServer(
 
                     function stepClip(delta) {
                       const filter = document.getElementById('clipCamFilter').value;
-                      const timeline = filter ? clips.filter(c => c.cameraId === filter) : clips;
+                      const allFiltered = filter ? clips.filter(c => c.cameraId === filter) : clips;
+                      const playable = allFiltered.filter(c => !c.fileBytes || c.fileBytes > 256);
+                      const timeline = playable.length ? playable : allFiltered;
                       if (!timeline.length) return;
                       const idx = timeline.findIndex(c => c.id === activeClipId);
                       const nextIdx = idx < 0 ? 0 : Math.max(0, Math.min(timeline.length - 1, idx + delta));
@@ -1836,12 +1962,16 @@ class RemoteHubServer(
                     async function ptzCmd(action, pan = 0, tilt = 0, zoom = 0) {
                       const camId = document.getElementById('ptzCam').value;
                       if (!camId) return;
+                      const stEl = document.getElementById('ptzStatus');
+                      stEl.className = 'diag';
+                      stEl.textContent = action === 'probe' ? 'Querying ONVIF…' : ('Sending PTZ ' + action + '…');
                       const res = await api('/api/cameras/' + encodeURIComponent(camId) + '/ptz', {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
                         body: JSON.stringify({action, pan, tilt, zoom})
                       }).catch(e => ({ok:false, message:e.message}));
-                      document.getElementById('ptzStatus').textContent = res.message || action;
+                      stEl.className = res.ok ? 'diag' : 'diag warn';
+                      stEl.textContent = res.message || action;
                     }
 
                     function ptzHold(pan, tilt, zoom) {
@@ -1856,11 +1986,13 @@ class RemoteHubServer(
                       const cam = cameras.find(c => c.id === id);
                       const isRecording = !!(cam && cam.isRecording);
                       await api('/api/cameras/' + encodeURIComponent(id) + '/record/' + (isRecording ? 'stop' : 'start'), { method: 'POST' });
-                      setTimeout(refreshAll, 350);
+                      setTimeout(refreshAll, 450);
                     }
                     async function snapCam(id) {
                       await api('/api/cameras/' + encodeURIComponent(id) + '/snapshot', { method: 'POST' });
-                      document.getElementById('ptzStatus').textContent = 'Snapshot triggered';
+                      const stEl = document.getElementById('ptzStatus');
+                      stEl.className = 'diag';
+                      stEl.textContent = 'Snapshot triggered';
                     }
                     async function logout() {
                       await fetch('/api/logout', { method: 'POST', credentials: 'same-origin' });
@@ -2001,7 +2133,7 @@ class AndroidRemoteHubBackend(
     private val camerasProvider: () -> List<CameraEntity>,
     private val clipsProvider: () -> List<RecordedClipEntity>,
     private val alertsProvider: () -> List<MotionAlertEntity>,
-    private val ptzActionDispatcher: (CameraEntity, String, Float, Float, Float, String) -> Unit
+    private val ptzActionDispatcher: (CameraEntity, String, Float, Float, Float, String) -> Pair<Boolean, String>
 ) : RemoteHubBackend {
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -2102,20 +2234,12 @@ class AndroidRemoteHubBackend(
 
     override fun captureCameraJpeg(cameraId: String): ByteArray? {
         val cam = camerasProvider().firstOrNull { it.id == cameraId } ?: return null
-        var liveBmp: Bitmap? = null
-        val latch = CountDownLatch(1)
-        mainHandler.post {
-            try {
-                streamManager.getOrCreatePlayer(cam)
-                liveBmp = streamManager.captureFrame(cameraId, 960, 540)
-            } catch (_: Exception) {
-            } finally {
-                latch.countDown()
-            }
-        }
-        try {
-            latch.await(500, TimeUnit.MILLISECONDS)
-        } catch (_: Exception) {}
+        val liveBmp = streamManager.captureFrameForBackgroundWorker(
+            camera = cam,
+            maxSide = 960,
+            alignTo = 2,
+            waitHeadlessFirstFrameMs = 350L
+        )
 
         liveBmp?.let { bmp ->
             val baos = ByteArrayOutputStream()
@@ -2128,7 +2252,7 @@ class AndroidRemoteHubBackend(
             }
         }
 
-        // Secondary fallback: extract frame from newest recorded MP4 clip for this camera
+        // Secondary fallback: extract frame from newest playable recorded MP4 clip for this camera
         extractLatestClipFrameJpeg(cameraId)?.let { clipJpeg ->
             lastFrameCache[cameraId] = clipJpeg
             return clipJpeg
@@ -2139,24 +2263,29 @@ class AndroidRemoteHubBackend(
     }
 
     private fun extractLatestClipFrameJpeg(cameraId: String): ByteArray? {
-        val latest = clipsProvider()
+        val candidates = clipsProvider()
             .filter { it.cameraId == cameraId }
-            .maxByOrNull { it.timestamp } ?: return null
-        val file = File(latest.filePath)
-        if (!file.exists() || file.length() < 1024L) return null
-        val retriever = MediaMetadataRetriever()
-        return try {
-            retriever.setDataSource(file.absolutePath)
-            val frame = retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC) ?: return null
-            val baos = ByteArrayOutputStream()
-            frame.compress(Bitmap.CompressFormat.JPEG, 75, baos)
-            frame.recycle()
-            baos.toByteArray().takeIf { it.isNotEmpty() }
-        } catch (_: Exception) {
-            null
-        } finally {
-            runCatching { retriever.release() }
+            .sortedByDescending { it.timestamp }
+        for (clip in candidates) {
+            val file = File(clip.filePath)
+            if (!StorageTimelineEngine.isPlayableClipFile(file)) continue
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(file.absolutePath)
+                val frame = retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                if (frame != null) {
+                    val baos = ByteArrayOutputStream()
+                    frame.compress(Bitmap.CompressFormat.JPEG, 75, baos)
+                    frame.recycle()
+                    val bytes = baos.toByteArray()
+                    if (bytes.isNotEmpty()) return bytes
+                }
+            } catch (_: Exception) {
+            } finally {
+                runCatching { retriever.release() }
+            }
         }
+        return null
     }
 
     private fun renderStandbyTelemetryJpeg(cam: CameraEntity): ByteArray {
@@ -2211,8 +2340,7 @@ class AndroidRemoteHubBackend(
     ): Pair<Boolean, String> {
         val cam = camerasProvider().firstOrNull { it.id == cameraId }
             ?: return false to "Camera not found"
-        ptzActionDispatcher(cam, action, pan, tilt, zoom, presetToken)
-        return true to "PTZ $action queued for ${cam.name}"
+        return ptzActionDispatcher(cam, action, pan, tilt, zoom, presetToken)
     }
 
     override fun startRecording(cameraId: String): Boolean {

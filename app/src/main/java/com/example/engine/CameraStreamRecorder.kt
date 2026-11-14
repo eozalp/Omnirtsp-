@@ -5,12 +5,15 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Rect
 import android.media.Image
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.os.Bundle
+import android.util.Log
+import android.view.Surface
 import com.example.data.model.CameraEntity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -48,6 +51,7 @@ class CameraStreamRecorder(
         val muxer: MediaMuxer?,
         val colorFormat: Int,
         val useInputImage: Boolean,
+        val inputSurface: Surface? = null,
         val startTimeNano: Long = System.nanoTime(),
         val isStopping: AtomicBoolean = AtomicBoolean(false),
         var isMuxerStarted: Boolean = false,
@@ -77,13 +81,17 @@ class CameraStreamRecorder(
             }
         }
 
-        val width = 640
-        val height = 360
+        val (width, height) = streamManager.getAspectPreservingTargetSize(
+            cameraId = camera.id,
+            maxSide = 640,
+            alignTo = 16
+        )
         val frameRate = 10
         val bitRate = 1_500_000
 
         var codec: MediaCodec? = null
         var muxer: MediaMuxer? = null
+        var inputSurface: Surface? = null
         var chosenColorFormat = MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar
         var useInputImage = false
 
@@ -102,32 +110,63 @@ class CameraStreamRecorder(
             }.getOrNull()
 
             val supportedFormats = caps?.colorFormats?.toSet() ?: emptySet()
-            chosenColorFormat = when {
-                supportedFormats.contains(MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible) -> {
-                    useInputImage = true
-                    MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible
+            var surfaceConfigured = false
+
+            if (supportedFormats.contains(MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)) {
+                try {
+                    val surfaceFormat = MediaFormat.createVideoFormat(mimeType, width, height).apply {
+                        setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+                        setInteger(MediaFormat.KEY_BIT_RATE, bitRate)
+                        setInteger(MediaFormat.KEY_FRAME_RATE, frameRate)
+                        setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+                    }
+                    codec.configure(surfaceFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                    inputSurface = codec.createInputSurface()
+                    chosenColorFormat = MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface
+                    codec.start()
+                    surfaceConfigured = true
+                } catch (e: Exception) {
+                    Log.w("CameraStreamRecorder", "Surface encoder configure failed, falling back to YUV: ${e.message}")
+                    try { inputSurface?.release() } catch (_: Exception) {}
+                    inputSurface = null
+                    try { codec.reset() } catch (_: Exception) {
+                        try { codec.release() } catch (_: Exception) {}
+                        codec = MediaCodec.createEncoderByType(mimeType)
+                    }
                 }
-                supportedFormats.contains(MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar) -> {
-                    MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar
-                }
-                supportedFormats.contains(MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar) -> {
-                    MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar
-                }
-                else -> MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar
             }
 
-            val format = MediaFormat.createVideoFormat(mimeType, width, height).apply {
-                setInteger(MediaFormat.KEY_COLOR_FORMAT, chosenColorFormat)
-                setInteger(MediaFormat.KEY_BIT_RATE, bitRate)
-                setInteger(MediaFormat.KEY_FRAME_RATE, frameRate)
-                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
-            }
+            if (!surfaceConfigured) {
+                chosenColorFormat = when {
+                    supportedFormats.contains(MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible) -> {
+                        useInputImage = true
+                        MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible
+                    }
+                    supportedFormats.contains(MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar) -> {
+                        MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar
+                    }
+                    supportedFormats.contains(MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar) -> {
+                        MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar
+                    }
+                    else -> MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar
+                }
 
-            codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            codec.start()
-        } catch (_: Exception) {
+                val format = MediaFormat.createVideoFormat(mimeType, width, height).apply {
+                    setInteger(MediaFormat.KEY_COLOR_FORMAT, chosenColorFormat)
+                    setInteger(MediaFormat.KEY_BIT_RATE, bitRate)
+                    setInteger(MediaFormat.KEY_FRAME_RATE, frameRate)
+                    setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+                }
+
+                codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                codec.start()
+            }
+        } catch (e: Exception) {
+            Log.e("CameraStreamRecorder", "Encoder init failed for ${camera.id}: ${e.message}")
+            try { inputSurface?.release() } catch (_: Exception) {}
             try { codec?.release() } catch (_: Exception) {}
             try { muxer?.release() } catch (_: Exception) {}
+            inputSurface = null
             codec = null
             muxer = null
         }
@@ -144,13 +183,28 @@ class CameraStreamRecorder(
 
                 val loopStart = System.currentTimeMillis()
 
-                // TextureView.getBitmap() must be invoked on the UI/Main thread
-                val liveBitmap = try {
-                    withContext(Dispatchers.Main.immediate) {
-                        streamManager.captureFrame(camera.id, width, height)
-                    }
+                // Uses foreground TextureView when visible or HeadlessGlFrameGrabber when backgrounded
+                val rawLiveBitmap = try {
+                    streamManager.captureFrameForBackgroundWorker(
+                        camera = camera,
+                        maxSide = maxOf(width, height),
+                        alignTo = 16,
+                        waitHeadlessFirstFrameMs = if (frameIndex == 0) 250L else 0L
+                    )
                 } catch (_: Exception) {
                     null
+                }
+
+                val liveBitmap = rawLiveBitmap?.let { bmp ->
+                    if (bmp.width == width && bmp.height == height) {
+                        bmp
+                    } else {
+                        runCatching {
+                            Bitmap.createScaledBitmap(bmp, width, height, true).also {
+                                if (it !== bmp && !bmp.isRecycled) bmp.recycle()
+                            }
+                        }.getOrDefault(bmp)
+                    }
                 }
 
                 if (liveBitmap != null && recorder != null) {
@@ -191,7 +245,9 @@ class CameraStreamRecorder(
                             presentationTimeUs = ptsUs,
                             recorder = recorder
                         )
-                    } catch (_: Exception) {}
+                    } catch (e: Exception) {
+                        Log.w("CameraStreamRecorder", "encodeFrame error: ${e.message}")
+                    }
                 }
 
                 if (!frameBitmap.isRecycled) {
@@ -221,7 +277,8 @@ class CameraStreamRecorder(
             codec = codec,
             muxer = muxer,
             colorFormat = chosenColorFormat,
-            useInputImage = useInputImage
+            useInputImage = useInputImage,
+            inputSurface = inputSurface
         )
         recorderHolder[0] = recorder
         activeRecorders[camera.id] = recorder
@@ -281,16 +338,20 @@ class CameraStreamRecorder(
                     recorder.frameCount = safetyFrames
                 }
 
-                val inputIndex = codec.dequeueInputBuffer(20_000)
-                if (inputIndex >= 0) {
-                    val eosPts = (recorder.lastPresentationTimeUs + 100_000L).coerceAtLeast(0L)
-                    codec.queueInputBuffer(
-                        inputIndex,
-                        0,
-                        0,
-                        eosPts,
-                        MediaCodec.BUFFER_FLAG_END_OF_STREAM
-                    )
+                if (recorder.inputSurface != null) {
+                    codec.signalEndOfInputStream()
+                } else {
+                    val inputIndex = codec.dequeueInputBuffer(20_000)
+                    if (inputIndex >= 0) {
+                        val eosPts = (recorder.lastPresentationTimeUs + 100_000L).coerceAtLeast(0L)
+                        codec.queueInputBuffer(
+                            inputIndex,
+                            0,
+                            0,
+                            eosPts,
+                            MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                        )
+                    }
                 }
 
                 drainCodec(codec, muxer, recorder, endOfStream = true)
@@ -298,10 +359,12 @@ class CameraStreamRecorder(
                 if (recorder.isMuxerStarted) {
                     muxer.stop()
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                Log.w("CameraStreamRecorder", "finalizeRecorder error: ${e.message}")
             } finally {
                 try { codec.stop() } catch (_: Exception) {}
                 try { codec.release() } catch (_: Exception) {}
+                try { recorder.inputSurface?.release() } catch (_: Exception) {}
                 try { muxer.release() } catch (_: Exception) {}
             }
         }
@@ -329,6 +392,19 @@ class CameraStreamRecorder(
         presentationTimeUs: Long,
         recorder: ActiveRecorder
     ) {
+        val surface = recorder.inputSurface
+        if (surface != null) {
+            val canvas = surface.lockCanvas(null)
+            try {
+                canvas.drawColor(Color.BLACK)
+                canvas.drawBitmap(bitmap, null, Rect(0, 0, width, height), null)
+            } finally {
+                surface.unlockCanvasAndPost(canvas)
+            }
+            drainCodec(codec, muxer, recorder, endOfStream = false)
+            return
+        }
+
         val inputIndex = codec.dequeueInputBuffer(15_000)
         if (inputIndex >= 0) {
             var writtenSize = 0
@@ -515,7 +591,7 @@ class CameraStreamRecorder(
         val canvas = Canvas(bitmap)
 
         if (backdrop != null && !backdrop.isRecycled) {
-            canvas.drawBitmap(backdrop, 0f, 0f, null)
+            canvas.drawBitmap(backdrop, null, Rect(0, 0, width, height), null)
             canvas.drawColor(Color.argb(95, 6, 12, 20))
         } else {
             canvas.drawColor(Color.rgb(10, 16, 26))

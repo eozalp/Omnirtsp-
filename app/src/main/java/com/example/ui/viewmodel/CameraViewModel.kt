@@ -203,13 +203,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             clipsProvider = { clips.value },
             alertsProvider = { alerts.value },
             ptzActionDispatcher = { cam, action, pan, tilt, zoom, presetToken ->
-                when (action.lowercase()) {
-                    "move" -> startCameraPtzMove(cam, pan, tilt, zoom, "Remote PTZ")
-                    "home" -> gotoCameraPtzHome(cam)
-                    "preset" -> if (presetToken.isNotBlank()) gotoCameraPtzPreset(cam, presetToken)
-                    "probe" -> probeCameraPtz(cam, forceRefresh = true)
-                    else -> stopCameraPtz(cam)
-                }
+                executeRemoteHubPtzSync(cam, action, pan, tilt, zoom, presetToken)
             }
         )
     )
@@ -488,6 +482,76 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             database.cameraDao().insertCamera(updated)
             val state = onvifPtzClient.probeCamera(updated, forceRefresh = true)
             persistDiscoveredPtzMetadata(updated, state)
+        }
+    }
+
+    fun executeRemoteHubPtzSync(
+        camera: CameraEntity,
+        action: String,
+        pan: Float,
+        tilt: Float,
+        zoom: Float,
+        presetToken: String
+    ): Pair<Boolean, String> {
+        return runBlocking(Dispatchers.IO) {
+            withTimeoutOrNull(12_000L) {
+                when (action.lowercase()) {
+                    "probe" -> {
+                        val st = onvifPtzClient.probeCamera(camera, forceRefresh = true)
+                        persistDiscoveredPtzMetadata(camera, st)
+                        if (st.lastError == null && st.isQueried) {
+                            true to st.diagnosticSummary.ifBlank { st.activeAction }
+                        } else {
+                            false to (st.lastError ?: "ONVIF probe failed for ${camera.name}")
+                        }
+                    }
+                    "move" -> {
+                        val res = onvifPtzClient.continuousMove(
+                            camera = camera,
+                            panVelocity = pan,
+                            tiltVelocity = tilt,
+                            zoomVelocity = zoom,
+                            actionLabel = "Remote PTZ"
+                        )
+                        val st = onvifPtzClient.status.value
+                        persistDiscoveredPtzMetadata(camera, st)
+                        res.fold(
+                            onSuccess = { true to st.activeAction },
+                            onFailure = { err -> false to (err.message ?: st.lastError ?: "PTZ move failed") }
+                        )
+                    }
+                    "home" -> {
+                        val res = onvifPtzClient.gotoHome(camera)
+                        val st = onvifPtzClient.status.value
+                        persistDiscoveredPtzMetadata(camera, st)
+                        res.fold(
+                            onSuccess = { true to st.activeAction },
+                            onFailure = { err -> false to (err.message ?: st.lastError ?: "PTZ home failed") }
+                        )
+                    }
+                    "preset" -> {
+                        if (presetToken.isBlank()) {
+                            false to "Preset token is required"
+                        } else {
+                            val res = onvifPtzClient.gotoPreset(camera, presetToken)
+                            val st = onvifPtzClient.status.value
+                            persistDiscoveredPtzMetadata(camera, st)
+                            res.fold(
+                                onSuccess = { true to st.activeAction },
+                                onFailure = { err -> false to (err.message ?: st.lastError ?: "Preset move failed") }
+                            )
+                        }
+                    }
+                    else -> {
+                        val res = onvifPtzClient.stop(camera)
+                        val st = onvifPtzClient.status.value
+                        res.fold(
+                            onSuccess = { true to st.activeAction },
+                            onFailure = { err -> false to (err.message ?: st.lastError ?: "PTZ stop failed") }
+                        )
+                    }
+                }
+            } ?: (false to "ONVIF request timed out (12s) for ${camera.name}")
         }
     }
 

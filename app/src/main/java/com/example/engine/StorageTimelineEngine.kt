@@ -59,9 +59,14 @@ object StorageTimelineEngine {
             .sortedDescending()
     }
 
+    const val MIN_PLAYABLE_CLIP_BYTES = 256L
+
+    fun isPlayableClipFile(file: File): Boolean =
+        file.exists() && file.length() > MIN_PLAYABLE_CLIP_BYTES
+
     fun resolvePlayableUri(context: Context?, clip: RecordedClipEntity): Uri? {
         val internalFile = File(clip.filePath)
-        if (internalFile.exists() && internalFile.length() > 32L) {
+        if (isPlayableClipFile(internalFile)) {
             return Uri.fromFile(internalFile)
         }
         val exportStr = clip.localExportUri
@@ -70,19 +75,18 @@ object StorageTimelineEngine {
             if (uri != null) {
                 if (uri.scheme == "file") {
                     val f = uri.path?.let { File(it) }
-                    if (f != null && f.exists() && f.length() > 32L) return uri
+                    if (f != null && isPlayableClipFile(f)) return uri
                 } else if (context != null) {
-                    val exists = runCatching {
-                        context.contentResolver.openFileDescriptor(uri, "r")?.use { true } ?: false
+                    val existsAndValid = runCatching {
+                        context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                            pfd.statSize < 0L || pfd.statSize > MIN_PLAYABLE_CLIP_BYTES
+                        } ?: false
                     }.getOrDefault(false)
-                    if (exists) return uri
+                    if (existsAndValid) return uri
                 } else {
                     return uri
                 }
             }
-        }
-        if (internalFile.exists() && internalFile.length() > 0L) {
-            return Uri.fromFile(internalFile)
         }
         return null
     }

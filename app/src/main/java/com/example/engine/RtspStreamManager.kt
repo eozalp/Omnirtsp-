@@ -22,12 +22,13 @@ import com.example.data.model.RtspTransport
 import com.example.data.model.StreamTelemetry
 import com.example.service.FloatingOverlayStateHolder
 import android.graphics.Bitmap
-import android.graphics.PixelFormat
-import android.media.ImageReader
 import android.os.Handler
 import android.os.Looper
 import android.view.TextureView
 import java.lang.ref.WeakReference
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlin.math.roundToInt
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -89,15 +90,35 @@ class RtspStreamManager(private val context: Context) {
         }
     }
 
-    private val headlessReaders = ConcurrentHashMap<String, ImageReader>()
-    private val latestHeadlessBitmaps = ConcurrentHashMap<String, Bitmap>()
-    private val readerHandler = Handler(Looper.getMainLooper())
+    @Volatile
+    var isAppInForeground: Boolean = true
+        private set
+
+    private val headlessGrabbers = ConcurrentHashMap<String, HeadlessGlFrameGrabber>()
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    fun setAppInForeground(inForeground: Boolean) {
+        if (isAppInForeground == inForeground) return
+        isAppInForeground = inForeground
+        if (inForeground) {
+            for ((cameraId, tvRef) in activeTextureViews) {
+                val tv = tvRef.get()
+                if (tv != null && tv.isAvailable && (attachedSurfaceCountMap[cameraId] ?: 0) > 0) {
+                    releaseHeadlessGrabber(cameraId)
+                    try {
+                        playerMap[cameraId]?.setVideoTextureView(tv)
+                    } catch (_: Exception) {}
+                    surfaceGraceUntilMsMap[cameraId] = System.currentTimeMillis() + SURFACE_SWITCH_GRACE_MS
+                }
+            }
+        }
+    }
 
     fun onSurfaceAttached(cameraId: String) {
         attachedSurfaceCountMap[cameraId] = (attachedSurfaceCountMap[cameraId] ?: 0) + 1
         surfaceGraceUntilMsMap[cameraId] = System.currentTimeMillis() + SURFACE_SWITCH_GRACE_MS
         stalledSecondsMap[cameraId] = 0
-        releaseHeadlessReader(cameraId)
+        releaseHeadlessGrabber(cameraId)
     }
 
     fun onSurfaceDetached(cameraId: String) {
@@ -109,18 +130,26 @@ class RtspStreamManager(private val context: Context) {
         }
     }
 
-    private fun releaseHeadlessReader(cameraId: String) {
-        headlessReaders.remove(cameraId)?.let { reader ->
-            try {
-                playerMap[cameraId]?.clearVideoSurface(reader.surface)
-            } catch (_: Exception) {}
-            try {
-                reader.setOnImageAvailableListener(null, null)
-                reader.close()
-            } catch (_: Exception) {}
+    private fun releaseHeadlessGrabber(cameraId: String) {
+        headlessGrabbers.remove(cameraId)?.let { grabber ->
+            val surface = grabber.surface
+            if (surface != null) {
+                try {
+                    playerMap[cameraId]?.clearVideoSurface(surface)
+                } catch (_: Exception) {}
+            }
+            grabber.release()
         }
-        latestHeadlessBitmaps.remove(cameraId)?.let { bmp ->
-            if (!bmp.isRecycled) bmp.recycle()
+    }
+
+    fun reattachTextureView(cameraId: String, textureView: TextureView) {
+        activeTextureViews[cameraId] = WeakReference(textureView)
+        releaseHeadlessGrabber(cameraId)
+        surfaceGraceUntilMsMap[cameraId] = System.currentTimeMillis() + SURFACE_SWITCH_GRACE_MS
+        if (textureView.isAvailable) {
+            try {
+                playerMap[cameraId]?.setVideoTextureView(textureView)
+            } catch (_: Exception) {}
         }
     }
 
@@ -437,72 +466,121 @@ class RtspStreamManager(private val context: Context) {
         }
     }
 
-    fun captureFrame(cameraId: String, width: Int = 640, height: Int = 360): Bitmap? {
-        val tv = activeTextureViews[cameraId]?.get()
-        if (tv != null && tv.isAvailable && tv.width > 0 && tv.height > 0) {
-            return try {
-                tv.getBitmap(width, height)
-            } catch (_: Exception) {
-                null
+    private fun ensureHeadlessGrabberLocked(
+        cameraId: String,
+        player: ExoPlayer,
+        width: Int,
+        height: Int
+    ): HeadlessGlFrameGrabber? {
+        val safeW = width.coerceIn(320, 960).let { if (it % 2 == 0) it else it - 1 }
+        val safeH = height.coerceIn(180, 960).let { if (it % 2 == 0) it else it - 1 }
+        val existing = headlessGrabbers[cameraId]
+        if (existing != null && existing.isReady &&
+            kotlin.math.abs(existing.width - safeW) <= 16 &&
+            kotlin.math.abs(existing.height - safeH) <= 16
+        ) {
+            return existing
+        }
+        if (existing != null) {
+            releaseHeadlessGrabber(cameraId)
+        }
+        val created = HeadlessGlFrameGrabber(cameraId, safeW, safeH)
+        if (!created.isReady) {
+            created.release()
+            return null
+        }
+        headlessGrabbers[cameraId] = created
+        val surface = created.surface
+        if (surface != null) {
+            try {
+                player.setVideoSurface(surface)
+            } catch (_: Exception) {}
+        }
+        return created
+    }
+
+    fun captureFrame(cameraId: String, width: Int = 640, height: Int = 368): Bitmap? {
+        if (isAppInForeground && (attachedSurfaceCountMap[cameraId] ?: 0) > 0) {
+            val tv = activeTextureViews[cameraId]?.get()
+            if (tv != null && tv.isAvailable && tv.width > 0 && tv.height > 0) {
+                return try {
+                    tv.getBitmap(width, height)
+                } catch (_: Exception) {
+                    null
+                }
             }
         }
 
-        // Headless fallback: when no UI TextureView is mounted (e.g. screen off / another tab),
-        // bind an ImageReader surface to ExoPlayer so Remote Hub & Recorder still receive real frames.
-        if ((attachedSurfaceCountMap[cameraId] ?: 0) == 0) {
-            val player = playerMap[cameraId]
-            if (player != null) {
-                val reader = headlessReaders.getOrPut(cameraId) {
-                    val safeW = width.coerceIn(320, 960)
-                    val safeH = height.coerceIn(180, 540)
-                    ImageReader.newInstance(safeW, safeH, PixelFormat.RGBA_8888, 2).apply {
-                        setOnImageAvailableListener({ r ->
-                            try {
-                                val img = r.acquireLatestImage() ?: return@setOnImageAvailableListener
-                                try {
-                                    val plane = img.planes[0]
-                                    val buffer = plane.buffer
-                                    val pixelStride = plane.pixelStride
-                                    val rowStride = plane.rowStride
-                                    val rowPadding = rowStride - pixelStride * r.width
-                                    val fullWidth = r.width + rowPadding / pixelStride
-                                    val rawBmp = Bitmap.createBitmap(fullWidth, r.height, Bitmap.Config.ARGB_8888)
-                                    rawBmp.copyPixelsFromBuffer(buffer)
-                                    val cropped = if (fullWidth != r.width) {
-                                        Bitmap.createBitmap(rawBmp, 0, 0, r.width, r.height).also {
-                                            rawBmp.recycle()
-                                        }
-                                    } else {
-                                        rawBmp
-                                    }
-                                    val prev = latestHeadlessBitmaps.put(cameraId, cropped)
-                                    if (prev != null && prev !== cropped && !prev.isRecycled) {
-                                        prev.recycle()
-                                    }
-                                } finally {
-                                    img.close()
-                                }
-                            } catch (_: Exception) {}
-                        }, readerHandler)
-                        try {
-                            player.setVideoSurface(this.surface)
-                        } catch (_: Exception) {}
-                    }
+        val player = playerMap[cameraId] ?: return null
+        val grabber = ensureHeadlessGrabberLocked(cameraId, player, width, height) ?: return null
+        return grabber.captureBitmap(width, height, waitIfEmptyMs = 0L)
+    }
+
+    /**
+     * Thread-safe capture helper intended for IO workers (RemoteHubServer, CameraStreamRecorder).
+     * Never blocks the Main thread waiting for GPU frames: attaches a HeadlessGlFrameGrabber on Main
+     * if no foreground UI TextureView is active, then awaits the first GL frame on the caller's IO thread.
+     */
+    fun captureFrameForBackgroundWorker(
+        camera: CameraEntity,
+        maxSide: Int = 960,
+        alignTo: Int = 2,
+        waitHeadlessFirstFrameMs: Long = 350L
+    ): Bitmap? {
+        var directBitmap: Bitmap? = null
+        var grabberRef: HeadlessGlFrameGrabber? = null
+        var targetW = 640
+        var targetH = 368
+
+        val latch = CountDownLatch(1)
+        mainHandler.post {
+            try {
+                val player = getOrCreatePlayer(camera)
+                val (w, h) = computeAspectPreservingDimensions(
+                    videoWidth = player.videoSize.width,
+                    videoHeight = player.videoSize.height,
+                    maxSide = maxSide,
+                    alignTo = alignTo
+                )
+                targetW = w
+                targetH = h
+
+                val tv = activeTextureViews[camera.id]?.get()
+                val canReadTextureView = isAppInForeground &&
+                    (attachedSurfaceCountMap[camera.id] ?: 0) > 0 &&
+                    tv != null && tv.isAvailable && tv.width > 0 && tv.height > 0
+
+                if (canReadTextureView && tv != null) {
+                    directBitmap = runCatching { tv.getBitmap(w, h) }.getOrNull()
+                } else {
+                    grabberRef = ensureHeadlessGrabberLocked(camera.id, player, w, h)
                 }
-                if (reader.surface.isValid) {
-                    latestHeadlessBitmaps[cameraId]?.let { cached ->
-                        if (!cached.isRecycled) {
-                            return try {
-                                Bitmap.createScaledBitmap(cached, width, height, true)
-                            } catch (_: Exception) {
-                                null
-                            }
-                        }
-                    }
-                }
+            } catch (_: Exception) {
+            } finally {
+                latch.countDown()
             }
         }
-        return null
+
+        try {
+            latch.await(450, TimeUnit.MILLISECONDS)
+        } catch (_: Exception) {}
+
+        directBitmap?.let { return it }
+        return grabberRef?.captureBitmap(targetW, targetH, waitIfEmptyMs = waitHeadlessFirstFrameMs)
+    }
+
+    fun getAspectPreservingTargetSize(
+        cameraId: String,
+        maxSide: Int = 640,
+        alignTo: Int = 16
+    ): Pair<Int, Int> {
+        val vs = playerMap[cameraId]?.videoSize
+        return computeAspectPreservingDimensions(
+            videoWidth = vs?.width ?: 0,
+            videoHeight = vs?.height ?: 0,
+            maxSide = maxSide,
+            alignTo = alignTo
+        )
     }
 
     fun isDemoCamera(camera: CameraEntity): Boolean {
@@ -601,7 +679,7 @@ class RtspStreamManager(private val context: Context) {
                         playbackState = player.playbackState
                     )
                     val inSurfaceGrace = now < (surfaceGraceUntilMsMap[id] ?: 0L)
-                    val hasSurface = (attachedSurfaceCountMap[id] ?: 0) > 0
+                    val hasSurface = isAppInForeground && (attachedSurfaceCountMap[id] ?: 0) > 0
 
                     val eval = evaluateLiveVideoHealth(
                         isLiveRtsp = isLiveRtsp,
@@ -701,7 +779,7 @@ class RtspStreamManager(private val context: Context) {
     }
 
     fun releasePlayer(cameraId: String) {
-        releaseHeadlessReader(cameraId)
+        releaseHeadlessGrabber(cameraId)
         playerMap.remove(cameraId)?.release()
         playerFlowMap.remove(cameraId)
         telemetryMap.remove(cameraId)
@@ -720,7 +798,7 @@ class RtspStreamManager(private val context: Context) {
     }
 
     fun releaseAll() {
-        headlessReaders.keys.toList().forEach { releaseHeadlessReader(it) }
+        headlessGrabbers.keys.toList().forEach { releaseHeadlessGrabber(it) }
         for ((_, player) in playerMap) {
             try {
                 player.release()
@@ -891,6 +969,29 @@ class RtspStreamManager(private val context: Context) {
                 isLive = false,
                 isReconnecting = playbackState == Player.STATE_BUFFERING
             )
+        }
+
+        fun computeAspectPreservingDimensions(
+            videoWidth: Int,
+            videoHeight: Int,
+            maxSide: Int = 640,
+            alignTo: Int = 16
+        ): Pair<Int, Int> {
+            val safeAlign = alignTo.coerceAtLeast(2)
+            val safeMax = ((maxSide.coerceAtLeast(safeAlign * 4) / safeAlign) * safeAlign)
+            if (videoWidth <= 0 || videoHeight <= 0) {
+                val defaultH = ((safeMax * 9f / 16f) / safeAlign).roundToInt().coerceAtLeast(2) * safeAlign
+                return safeMax to defaultH
+            }
+            val aspect = videoWidth.toFloat() / videoHeight.toFloat()
+            val (rawW, rawH) = if (aspect >= 1f) {
+                safeMax.toFloat() to (safeMax / aspect)
+            } else {
+                (safeMax * aspect) to safeMax.toFloat()
+            }
+            val alignedW = ((rawW / safeAlign).roundToInt().coerceAtLeast(4) * safeAlign).coerceAtMost(safeMax)
+            val alignedH = ((rawH / safeAlign).roundToInt().coerceAtLeast(4) * safeAlign).coerceAtMost(safeMax)
+            return alignedW to alignedH
         }
     }
 }

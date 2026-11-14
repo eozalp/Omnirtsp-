@@ -108,7 +108,7 @@ fun RecordingsScreen(
     val selectedLanguageTag by viewModel.selectedLanguageTag.collectAsState()
 
     var clipToPlay by remember { mutableStateOf<RecordedClipEntity?>(null) }
-    var isTimelineMode by remember { mutableStateOf(false) }
+    var isTimelineMode by remember { mutableStateOf(true) }
     var timelineInitialClipId by remember { mutableStateOf<String?>(null) }
     var pendingSaveAsClip by remember { mutableStateOf<RecordedClipEntity?>(null) }
     var fileManagerUnavailableMsg by remember { mutableStateOf<String?>(null) }

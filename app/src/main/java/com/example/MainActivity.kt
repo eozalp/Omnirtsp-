@@ -83,6 +83,16 @@ class MainActivity : ComponentActivity() {
         super.attachBaseContext(AppLocaleManager.wrapContext(newBase))
     }
 
+    override fun onStart() {
+        super.onStart()
+        viewModel.streamManager.setAppInForeground(true)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        viewModel.streamManager.setAppInForeground(false)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()

@@ -105,6 +105,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
@@ -211,6 +212,9 @@ fun StorageTimelinePlayer(
         }
     }
 
+    var loadedSegmentKeys by remember { mutableStateOf<List<String>>(emptyList()) }
+    var lastAppliedInitialClipId by remember { mutableStateOf<String?>(null) }
+
     DisposableEffect(Unit) {
         val listener = object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
@@ -227,6 +231,18 @@ fun StorageTimelinePlayer(
 
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == Player.STATE_ENDED && timeline.segments.isNotEmpty()) {
+                    isPlaying = false
+                }
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                val idx = timelinePlayer.currentMediaItemIndex
+                val count = timelinePlayer.mediaItemCount
+                if (idx in 0 until count - 1) {
+                    timelinePlayer.seekTo(idx + 1, 0L)
+                    timelinePlayer.prepare()
+                    timelinePlayer.playWhenReady = true
+                } else {
                     isPlaying = false
                 }
             }
@@ -266,7 +282,10 @@ fun StorageTimelinePlayer(
 
     LaunchedEffect(playlistSignature, initialClipId) {
         val playableSegments = timeline.segments.filter { it.mediaUri != null }
+        val newKeys = playableSegments.map { "${it.clip.id}:${it.mediaUri}" }
         if (playableSegments.isEmpty()) {
+            loadedSegmentKeys = emptyList()
+            lastAppliedInitialClipId = initialClipId
             timelinePlayer.stop()
             timelinePlayer.clearMediaItems()
             currentSegmentIndex = 0
@@ -281,19 +300,51 @@ fun StorageTimelinePlayer(
                         .build()
                 }
             }
-            val startIdx = if (initialClipId != null) {
-                playableSegments.indexOfFirst { it.clip.id == initialClipId }.coerceAtLeast(0)
-            } else {
-                0
+
+            val isTailAppend = loadedSegmentKeys.isNotEmpty() &&
+                initialClipId == lastAppliedInitialClipId &&
+                newKeys.size > loadedSegmentKeys.size &&
+                newKeys.take(loadedSegmentKeys.size) == loadedSegmentKeys
+
+            if (isTailAppend) {
+                val appendedItems = mediaItems.drop(loadedSegmentKeys.size)
+                if (appendedItems.isNotEmpty()) {
+                    timelinePlayer.addMediaItems(appendedItems)
+                }
+                loadedSegmentKeys = newKeys
+            } else if (loadedSegmentKeys != newKeys || initialClipId != lastAppliedInitialClipId) {
+                val previouslyPlayingClipId = timelinePlayer.currentMediaItem?.mediaId
+                val previousPositionMs = timelinePlayer.currentPosition.coerceAtLeast(0L)
+                val targetClipId = if (initialClipId != null && initialClipId != lastAppliedInitialClipId) {
+                    initialClipId
+                } else {
+                    previouslyPlayingClipId ?: initialClipId
+                }
+                val startIdx = if (targetClipId != null) {
+                    playableSegments.indexOfFirst { it.clip.id == targetClipId }.coerceAtLeast(0)
+                } else {
+                    0
+                }
+                val startPosMs = if (targetClipId != null &&
+                    targetClipId == previouslyPlayingClipId &&
+                    initialClipId == lastAppliedInitialClipId
+                ) {
+                    previousPositionMs
+                } else {
+                    0L
+                }
+
+                loadedSegmentKeys = newKeys
+                lastAppliedInitialClipId = initialClipId
+                currentSegmentIndex = startIdx
+                currentPositionInClipMs = startPosMs
+                timelinePlayer.setMediaItems(mediaItems, startIdx, startPosMs)
+                timelinePlayer.setPlaybackSpeed(playbackSpeed)
+                timelinePlayer.volume = if (isMuted) 0f else 1f
+                timelinePlayer.prepare()
+                timelinePlayer.playWhenReady = true
+                isPlaying = true
             }
-            currentSegmentIndex = startIdx
-            currentPositionInClipMs = 0L
-            timelinePlayer.setMediaItems(mediaItems, startIdx, 0L)
-            timelinePlayer.setPlaybackSpeed(playbackSpeed)
-            timelinePlayer.volume = if (isMuted) 0f else 1f
-            timelinePlayer.prepare()
-            timelinePlayer.playWhenReady = true
-            isPlaying = true
         }
     }
 

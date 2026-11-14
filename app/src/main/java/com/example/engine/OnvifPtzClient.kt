@@ -941,10 +941,10 @@ class OnvifPtzClient(private val context: Context? = null) {
         val isUsable = ptzVerified || chosenProfile != null
         val finalError = if (isUsable) {
             null
-        } else if (resolvedUser.isBlank() && sawAuthHttpCode) {
+        } else if (sawAuthHttpCode) {
             msg(
                 R.string.ptz_auth_required_error,
-                "Auth failed (${lastError ?: "HTTP 400/401"}) — check Camera Username & Password in Camera Settings",
+                "Auth rejected (${lastError ?: "HTTP 400/401"}) — check Camera Account username & password in Camera Settings",
                 lastError ?: "HTTP 400/401"
             )
         } else {

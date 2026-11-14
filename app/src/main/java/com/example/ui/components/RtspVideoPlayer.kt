@@ -128,6 +128,11 @@ fun RtspVideoPlayer(
             if (event == Lifecycle.Event.ON_RESUME) {
                 playerViewRef?.let { pv ->
                     if (player != null) {
+                        val tv = (pv.videoSurfaceView as? TextureView)
+                            ?: (0 until pv.childCount).mapNotNull { pv.getChildAt(it) as? TextureView }.firstOrNull()
+                        if (tv != null) {
+                            sharedStreamManager.reattachTextureView(camera.id, tv)
+                        }
                         if (pv.player !== player) {
                             pv.player = player
                         }
