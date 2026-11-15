@@ -1,6 +1,7 @@
 package com.example
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.content.res.Configuration
@@ -45,6 +46,7 @@ import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.NavigationRailItemDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.ScaffoldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -86,6 +88,7 @@ class MainActivity : ComponentActivity() {
     private val viewModel: CameraViewModel by viewModels()
     private var isSystemPiP by mutableStateOf(false)
 
+    @SuppressLint("InvalidFragmentVersionForActivityResult")
     private val notificationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { _ -> }
 
@@ -246,6 +249,8 @@ fun OmniViewApp(viewModel: CameraViewModel) {
     val unreadAlertCount by viewModel.unreadAlertCount.collectAsState()
     val isTvMode by viewModel.isTvMode.collectAsState()
     val isGlobalMuted by viewModel.isGlobalMuted.collectAsState()
+    val isTimelineFullscreen by viewModel.isTimelineFullscreen.collectAsState()
+    val effectiveTimelineFullscreen = isTimelineFullscreen && activeScreen == "recordings"
 
     BoxWithConstraints(
         modifier = Modifier
@@ -269,117 +274,131 @@ fun OmniViewApp(viewModel: CameraViewModel) {
         } else if (isWideScreen) {
             // Adaptive Two-Pane / Navigation Rail for Tablet, Desktop and Android TV
             Row(modifier = Modifier.fillMaxSize()) {
-                NavigationRail(
-                    containerColor = SurveillanceCardBg,
-                    contentColor = Color.White,
-                    windowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical + WindowInsetsSides.Start),
-                    modifier = Modifier.testTag("surveillance_nav_rail")
-                ) {
-                    NavigationRailItem(
-                        selected = activeScreen == "live",
-                        onClick = { viewModel.navigateTo("live") },
-                        icon = { Icon(Icons.Default.Videocam, contentDescription = stringResource(R.string.nav_live_desc)) },
-                        label = { Text(stringResource(R.string.nav_live), fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false) },
-                        colors = NavigationRailItemDefaults.colors(
-                            selectedIconColor = Color.Black,
-                            selectedTextColor = NeonCyan,
-                            indicatorColor = NeonCyan,
-                            unselectedIconColor = Color.Gray,
-                            unselectedTextColor = Color.Gray
-                        ),
-                        modifier = Modifier.testTag("nav_rail_live")
-                    )
+                if (!effectiveTimelineFullscreen) {
+                    NavigationRail(
+                        containerColor = SurveillanceCardBg,
+                        contentColor = Color.White,
+                        windowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical + WindowInsetsSides.Start),
+                        modifier = Modifier.testTag("surveillance_nav_rail")
+                    ) {
+                        NavigationRailItem(
+                            selected = activeScreen == "live",
+                            onClick = { viewModel.navigateTo("live") },
+                            icon = { Icon(Icons.Default.Videocam, contentDescription = stringResource(R.string.nav_live_desc)) },
+                            label = { Text(stringResource(R.string.nav_live), fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false) },
+                            colors = NavigationRailItemDefaults.colors(
+                                selectedIconColor = Color.Black,
+                                selectedTextColor = NeonCyan,
+                                indicatorColor = NeonCyan,
+                                unselectedIconColor = Color.Gray,
+                                unselectedTextColor = Color.Gray
+                            ),
+                            modifier = Modifier.testTag("nav_rail_live")
+                        )
 
-                    NavigationRailItem(
-                        selected = activeScreen == "alerts",
-                        onClick = { viewModel.navigateTo("alerts") },
-                        icon = {
-                            BadgedBox(
-                                badge = {
-                                    if (unreadAlertCount > 0) {
-                                        Badge(containerColor = NeonAmber) { Text("$unreadAlertCount") }
+                        NavigationRailItem(
+                            selected = activeScreen == "alerts",
+                            onClick = { viewModel.navigateTo("alerts") },
+                            icon = {
+                                BadgedBox(
+                                    badge = {
+                                        if (unreadAlertCount > 0) {
+                                            Badge(containerColor = NeonAmber) { Text("$unreadAlertCount") }
+                                        }
                                     }
+                                ) {
+                                    Icon(Icons.Default.MotionPhotosOn, contentDescription = stringResource(R.string.nav_alerts_desc))
                                 }
-                            ) {
-                                Icon(Icons.Default.MotionPhotosOn, contentDescription = stringResource(R.string.nav_alerts_desc))
-                            }
-                        },
-                        label = { Text(stringResource(R.string.nav_alerts), fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false) },
-                        colors = NavigationRailItemDefaults.colors(
-                            selectedIconColor = Color.Black,
-                            selectedTextColor = NeonCyan,
-                            indicatorColor = NeonCyan,
-                            unselectedIconColor = Color.Gray,
-                            unselectedTextColor = Color.Gray
-                        ),
-                        modifier = Modifier.testTag("nav_rail_alerts")
-                    )
+                            },
+                            label = { Text(stringResource(R.string.nav_alerts), fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false) },
+                            colors = NavigationRailItemDefaults.colors(
+                                selectedIconColor = Color.Black,
+                                selectedTextColor = NeonCyan,
+                                indicatorColor = NeonCyan,
+                                unselectedIconColor = Color.Gray,
+                                unselectedTextColor = Color.Gray
+                            ),
+                            modifier = Modifier.testTag("nav_rail_alerts")
+                        )
 
-                    NavigationRailItem(
-                        selected = activeScreen == "schedules",
-                        onClick = { viewModel.navigateTo("schedules") },
-                        icon = { Icon(Icons.Default.CalendarMonth, contentDescription = stringResource(R.string.nav_schedules_desc)) },
-                        label = { Text(stringResource(R.string.nav_plans), fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false) },
-                        colors = NavigationRailItemDefaults.colors(
-                            selectedIconColor = Color.Black,
-                            selectedTextColor = NeonCyan,
-                            indicatorColor = NeonCyan,
-                            unselectedIconColor = Color.Gray,
-                            unselectedTextColor = Color.Gray
-                        ),
-                        modifier = Modifier.testTag("nav_rail_schedules")
-                    )
+                        NavigationRailItem(
+                            selected = activeScreen == "schedules",
+                            onClick = { viewModel.navigateTo("schedules") },
+                            icon = { Icon(Icons.Default.CalendarMonth, contentDescription = stringResource(R.string.nav_schedules_desc)) },
+                            label = { Text(stringResource(R.string.nav_plans), fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false) },
+                            colors = NavigationRailItemDefaults.colors(
+                                selectedIconColor = Color.Black,
+                                selectedTextColor = NeonCyan,
+                                indicatorColor = NeonCyan,
+                                unselectedIconColor = Color.Gray,
+                                unselectedTextColor = Color.Gray
+                            ),
+                            modifier = Modifier.testTag("nav_rail_schedules")
+                        )
 
-                    NavigationRailItem(
-                        selected = activeScreen == "recordings",
-                        onClick = { viewModel.navigateTo("recordings") },
-                        icon = { Icon(Icons.Default.VideoLibrary, contentDescription = stringResource(R.string.nav_recordings_desc)) },
-                        label = { Text(stringResource(R.string.nav_clips), fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false) },
-                        colors = NavigationRailItemDefaults.colors(
-                            selectedIconColor = Color.Black,
-                            selectedTextColor = NeonCyan,
-                            indicatorColor = NeonCyan,
-                            unselectedIconColor = Color.Gray,
-                            unselectedTextColor = Color.Gray
-                        ),
-                        modifier = Modifier.testTag("nav_rail_recordings")
-                    )
+                        NavigationRailItem(
+                            selected = activeScreen == "recordings",
+                            onClick = { viewModel.navigateTo("recordings") },
+                            icon = { Icon(Icons.Default.VideoLibrary, contentDescription = stringResource(R.string.nav_recordings_desc)) },
+                            label = { Text(stringResource(R.string.nav_clips), fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false) },
+                            colors = NavigationRailItemDefaults.colors(
+                                selectedIconColor = Color.Black,
+                                selectedTextColor = NeonCyan,
+                                indicatorColor = NeonCyan,
+                                unselectedIconColor = Color.Gray,
+                                unselectedTextColor = Color.Gray
+                            ),
+                            modifier = Modifier.testTag("nav_rail_recordings")
+                        )
 
-                    NavigationRailItem(
-                        selected = activeScreen == "cloud",
-                        onClick = { viewModel.navigateTo("cloud") },
-                        icon = { Icon(Icons.Default.Cloud, contentDescription = stringResource(R.string.nav_storage_desc)) },
-                        label = { Text(stringResource(R.string.nav_storage), fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false) },
-                        colors = NavigationRailItemDefaults.colors(
-                            selectedIconColor = Color.Black,
-                            selectedTextColor = NeonCyan,
-                            indicatorColor = NeonCyan,
-                            unselectedIconColor = Color.Gray,
-                            unselectedTextColor = Color.Gray
-                        ),
-                        modifier = Modifier.testTag("nav_rail_cloud")
-                    )
+                        NavigationRailItem(
+                            selected = activeScreen == "cloud",
+                            onClick = { viewModel.navigateTo("cloud") },
+                            icon = { Icon(Icons.Default.Cloud, contentDescription = stringResource(R.string.nav_storage_desc)) },
+                            label = { Text(stringResource(R.string.nav_storage), fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false) },
+                            colors = NavigationRailItemDefaults.colors(
+                                selectedIconColor = Color.Black,
+                                selectedTextColor = NeonCyan,
+                                indicatorColor = NeonCyan,
+                                unselectedIconColor = Color.Gray,
+                                unselectedTextColor = Color.Gray
+                            ),
+                            modifier = Modifier.testTag("nav_rail_cloud")
+                        )
+                    }
                 }
 
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
                         .weight(1f)
-                        .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical + WindowInsetsSides.End))
+                        .then(
+                            if (effectiveTimelineFullscreen) {
+                                Modifier
+                            } else {
+                                Modifier.windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical + WindowInsetsSides.End))
+                            }
+                        )
                 ) {
-                    ScreenContent(activeScreen = activeScreen, viewModel = viewModel)
+                    ScreenContent(
+                        activeScreen = activeScreen,
+                        viewModel = viewModel,
+                        isTimelineFullscreen = effectiveTimelineFullscreen
+                    )
                 }
             }
         } else {
             // Mobile Scaffold with Bottom Navigation Bar
             Scaffold(
                 containerColor = SurveillanceDarkBg,
+                contentWindowInsets = if (effectiveTimelineFullscreen) WindowInsets(0, 0, 0, 0) else ScaffoldDefaults.contentWindowInsets,
                 bottomBar = {
-                    NavigationBar(
-                        containerColor = SurveillanceCardBg,
-                        tonalElevation = 8.dp,
-                        modifier = Modifier.testTag("surveillance_bottom_nav")
-                    ) {
+                    if (!effectiveTimelineFullscreen) {
+                        NavigationBar(
+                            containerColor = SurveillanceCardBg,
+                            tonalElevation = 8.dp,
+                            modifier = Modifier.testTag("surveillance_bottom_nav")
+                        ) {
                         NavigationBarItem(
                             selected = activeScreen == "live",
                             onClick = { viewModel.navigateTo("live") },
@@ -464,15 +483,20 @@ fun OmniViewApp(viewModel: CameraViewModel) {
                             ),
                             modifier = Modifier.testTag("bottom_nav_cloud")
                         )
+                        }
                     }
                 }
             ) { innerPadding ->
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(innerPadding)
+                        .then(if (effectiveTimelineFullscreen) Modifier else Modifier.padding(innerPadding))
                 ) {
-                    ScreenContent(activeScreen = activeScreen, viewModel = viewModel)
+                    ScreenContent(
+                        activeScreen = activeScreen,
+                        viewModel = viewModel,
+                        isTimelineFullscreen = effectiveTimelineFullscreen
+                    )
                 }
             }
         }
@@ -521,8 +545,12 @@ fun OmniViewApp(viewModel: CameraViewModel) {
 }
 
 @Composable
-fun ScreenContent(activeScreen: String, viewModel: CameraViewModel) {
-    if (activeScreen != "live") {
+fun ScreenContent(
+    activeScreen: String,
+    viewModel: CameraViewModel,
+    isTimelineFullscreen: Boolean = false
+) {
+    if (activeScreen != "live" && !isTimelineFullscreen) {
         BackHandler { viewModel.navigateTo("live") }
     }
 

@@ -4,9 +4,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
-import android.os.Build
 import android.view.LayoutInflater
-import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.annotation.OptIn
 import androidx.compose.animation.AnimatedVisibility
@@ -27,19 +25,21 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -99,7 +99,6 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
@@ -108,10 +107,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
-import androidx.compose.ui.window.DialogWindowProvider
-import androidx.core.view.WindowCompat
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
@@ -151,6 +146,8 @@ fun StorageTimelinePlayer(
     clips: List<RecordedClipEntity>,
     selectedLanguageTag: String,
     initialClipId: String? = null,
+    isFullscreen: Boolean? = null,
+    onFullscreenChange: ((Boolean) -> Unit)? = null,
     onSaveAsClip: (RecordedClipEntity) -> Unit,
     onUploadClip: (RecordedClipEntity) -> Unit,
     modifier: Modifier = Modifier
@@ -204,7 +201,12 @@ fun StorageTimelinePlayer(
     var isMuted by remember { mutableStateOf(false) }
 
     // Convenience UI states
-    var isFullscreen by remember { mutableStateOf(false) }
+    var internalFullscreen by remember { mutableStateOf(false) }
+    val activeFullscreen = (isFullscreen ?: internalFullscreen) && !timeline.isEmpty
+    val setFullscreen: (Boolean) -> Unit = { expand ->
+        internalFullscreen = expand
+        onFullscreenChange?.invoke(expand)
+    }
     var showDetails by remember { mutableStateOf(true) }
     var showFilters by remember { mutableStateOf(false) }
     var useCropMode by remember { mutableStateOf(false) }
@@ -265,8 +267,8 @@ fun StorageTimelinePlayer(
     }
 
     // Restore orientation whenever exiting fullscreen
-    LaunchedEffect(isFullscreen, isLandscapeLocked) {
-        if (isFullscreen && isLandscapeLocked) {
+    LaunchedEffect(activeFullscreen, isLandscapeLocked) {
+        if (activeFullscreen && isLandscapeLocked) {
             activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
         } else {
             activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
@@ -282,8 +284,8 @@ fun StorageTimelinePlayer(
     }
 
     // Auto-hide fullscreen HUD after 4s while playing and not scrubbing/opening drawer
-    LaunchedEffect(isFullscreen, showFullscreenHud, isPlaying, showFullscreenDrawer) {
-        if (isFullscreen && showFullscreenHud && isPlaying && !showFullscreenDrawer) {
+    LaunchedEffect(activeFullscreen, showFullscreenHud, isPlaying, showFullscreenDrawer) {
+        if (activeFullscreen && showFullscreenHud && isPlaying && !showFullscreenDrawer) {
             delay(4_000L)
             showFullscreenHud = false
         }
@@ -456,6 +458,364 @@ fun StorageTimelinePlayer(
         }
     }
 
+    if (activeFullscreen) {
+        BackHandler {
+            if (showFullscreenDrawer) {
+                showFullscreenDrawer = false
+            } else {
+                setFullscreen(false)
+            }
+        }
+
+        Box(
+            modifier = modifier
+                .fillMaxSize()
+                .background(Color.Black)
+                .testTag("timeline_fullscreen_dialog")
+        ) {
+            TimelineVideoSurface(
+                player = timelinePlayer,
+                useCropMode = useCropMode,
+                onSingleTap = { showFullscreenHud = !showFullscreenHud },
+                onDoubleTapLeft = {
+                    seekRelativeMs(-10_000L)
+                    doubleTapFeedback = "-10s"
+                },
+                onDoubleTapRight = {
+                    seekRelativeMs(10_000L)
+                    doubleTapFeedback = "+10s"
+                }
+            )
+
+            doubleTapFeedback?.let { pill ->
+                Surface(
+                    shape = RoundedCornerShape(24.dp),
+                    color = Color.Black.copy(alpha = 0.78f),
+                    border = BorderStroke(1.5.dp, NeonCyan),
+                    modifier = Modifier.align(Alignment.Center)
+                ) {
+                    Text(
+                        text = pill,
+                        color = NeonCyan,
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Black,
+                        fontFamily = FontFamily.Monospace,
+                        modifier = Modifier.padding(horizontal = 22.dp, vertical = 10.dp)
+                    )
+                }
+            }
+
+            // Fullscreen Top & Bottom HUD Overlay (hosted in Activity window with real WindowInsets)
+            AnimatedVisibility(
+                visible = showFullscreenHud,
+                enter = fadeIn(),
+                exit = fadeOut(),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                Box(modifier = Modifier.fillMaxSize()) {
+                    // Top bar
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .align(Alignment.TopCenter)
+                            .background(
+                                Brush.verticalGradient(
+                                    listOf(Color.Black.copy(alpha = 0.88f), Color.Black.copy(alpha = 0.4f), Color.Transparent)
+                                )
+                            )
+                            .windowInsetsPadding(
+                                WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)
+                            )
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                            if (showDetails) {
+                                Text(
+                                    text = activeSegment?.clip?.cameraName.orEmpty(),
+                                    color = Color.White,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = buildString {
+                                        if (currentWallClockMs > 0L) {
+                                            append(wallClockFormatter.format(Date(currentWallClockMs)))
+                                            append(" • ")
+                                        }
+                                        append("#${currentSegmentIndex + 1}/${timeline.segments.size}")
+                                    },
+                                    color = NeonCyan,
+                                    fontSize = 11.sp,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            } else {
+                                Text(
+                                    text = activeSegment?.clip?.cameraName.orEmpty(),
+                                    color = Color.White.copy(alpha = 0.85f),
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(2.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            IconButton(
+                                onClick = { showDetails = !showDetails },
+                                modifier = Modifier.minimumInteractiveComponentSize()
+                            ) {
+                                Icon(
+                                    imageVector = if (showDetails) Icons.Filled.Info else Icons.Outlined.Info,
+                                    contentDescription = stringResource(R.string.timeline_toggle_details_desc),
+                                    tint = if (showDetails) NeonCyan else Color.White
+                                )
+                            }
+                            IconButton(
+                                onClick = { useCropMode = !useCropMode },
+                                modifier = Modifier.minimumInteractiveComponentSize().testTag("timeline_resize_mode_btn")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.AspectRatio,
+                                    contentDescription = stringResource(R.string.timeline_resize_mode_desc),
+                                    tint = if (useCropMode) NeonCyan else Color.White
+                                )
+                            }
+                            IconButton(
+                                onClick = { isLandscapeLocked = !isLandscapeLocked },
+                                modifier = Modifier.minimumInteractiveComponentSize().testTag("timeline_rotate_btn")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.ScreenRotation,
+                                    contentDescription = stringResource(R.string.timeline_rotate_screen_desc),
+                                    tint = if (isLandscapeLocked) NeonCyan else Color.White
+                                )
+                            }
+                            IconButton(
+                                onClick = { showFullscreenDrawer = !showFullscreenDrawer },
+                                modifier = Modifier.minimumInteractiveComponentSize().testTag("timeline_fs_drawer_btn")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.List,
+                                    contentDescription = stringResource(R.string.timeline_segments_drawer_desc),
+                                    tint = if (showFullscreenDrawer) NeonCyan else Color.White
+                                )
+                            }
+                            IconButton(
+                                onClick = { setFullscreen(false) },
+                                modifier = Modifier.minimumInteractiveComponentSize().testTag("timeline_exit_fullscreen_btn")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.FullscreenExit,
+                                    contentDescription = stringResource(R.string.timeline_exit_fullscreen_desc),
+                                    tint = NeonCyan
+                                )
+                            }
+                        }
+                    }
+
+                    // Bottom Fullscreen Transport & Scrubber (safely padded above gesture/nav bar)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .align(Alignment.BottomCenter)
+                            .background(
+                                Brush.verticalGradient(
+                                    listOf(Color.Transparent, Color(0xCC0B111A), Color(0xF50B111A))
+                                )
+                            )
+                            .windowInsetsPadding(
+                                WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal)
+                            )
+                            .padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 14.dp)
+                            .testTag("timeline_fullscreen_bottom_hud")
+                    ) {
+                        scrubPreviewFraction?.let { frac ->
+                            val previewTarget = StorageTimelineEngine.resolveSeekTarget(timeline, frac)
+                            val previewSeg = previewTarget?.let { timeline.segments.getOrNull(it.segmentIndex) }
+                            val previewClock = StorageTimelineEngine.resolveWallClockAt(
+                                previewSeg,
+                                previewTarget?.positionInClipMs ?: 0L
+                            )
+                            if (previewClock > 0L) {
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = NeonCyan,
+                                    modifier = Modifier.padding(bottom = 6.dp)
+                                ) {
+                                    Text(
+                                        text = "${wallClockFormatter.format(Date(previewClock))} • ${previewSeg?.clip?.cameraName.orEmpty()}",
+                                        color = Color.Black,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        fontFamily = FontFamily.Monospace,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        TimelineRulerCanvas(
+                            timeline = timeline,
+                            currentSegmentIndex = currentSegmentIndex,
+                            overallProgress = overallProgress,
+                            onSeekFraction = seekTimelineFraction,
+                            onScrubStateChanged = { scrubPreviewFraction = it }
+                        )
+
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        // Time + Speed & Mute row (always visible without horizontal clipping)
+                        val speedLabel = if (playbackSpeed % 1f == 0f) "${playbackSpeed.toInt()}x" else "${playbackSpeed}x"
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column {
+                                Text(
+                                    text = "${StorageTimelineEngine.formatDurationHms(elapsedTotalMs)} / ${StorageTimelineEngine.formatDurationHms(timeline.totalFootageMs)}",
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                if (showDetails && activeSegment != null) {
+                                    Text(
+                                        text = "${activeSegment.clip.durationSeconds}s • ${activeSegment.clip.fileSizeMb} MB",
+                                        color = Color.White.copy(alpha = 0.72f),
+                                        fontSize = 10.sp,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                }
+                            }
+
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = SurveillanceSurface,
+                                    border = BorderStroke(1.dp, NeonCyan.copy(alpha = 0.55f)),
+                                    modifier = Modifier
+                                        .minimumInteractiveComponentSize()
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable(onClick = cycleSpeed)
+                                        .testTag("timeline_speed_btn")
+                                ) {
+                                    Box(
+                                        contentAlignment = Alignment.Center,
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                                    ) {
+                                        Text(
+                                            text = speedLabel,
+                                            color = NeonCyan,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            fontFamily = FontFamily.Monospace
+                                        )
+                                    }
+                                }
+
+                                IconButton(
+                                    onClick = {
+                                        isMuted = !isMuted
+                                        timelinePlayer.volume = if (isMuted) 0f else 1f
+                                    },
+                                    modifier = Modifier.minimumInteractiveComponentSize().testTag("timeline_mute_btn")
+                                ) {
+                                    Icon(
+                                        imageVector = if (isMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                                        contentDescription = stringResource(R.string.recordings_timeline_mute_toggle),
+                                        tint = if (isMuted) Color.Gray else NeonCyan
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(4.dp))
+
+                        // Centered 7-button primary transport row (fits edge-to-edge without overflow)
+                        FullscreenTimelineTransportRow(
+                            isPlaying = isPlaying,
+                            hasPrevChunk = currentSegmentIndex > 0,
+                            hasNextChunk = currentSegmentIndex < timeline.segments.lastIndex,
+                            hasPrevMotion = prevMotionIndex != null,
+                            hasNextMotion = nextMotionIndex != null,
+                            onPrevChunk = { jumpToSegment((currentSegmentIndex - 1).coerceAtLeast(0)) },
+                            onRewind10 = { seekRelativeMs(-10_000L) },
+                            onTogglePlayPause = togglePlayPause,
+                            onForward10 = { seekRelativeMs(10_000L) },
+                            onNextChunk = { jumpToSegment((currentSegmentIndex + 1).coerceAtMost(timeline.segments.lastIndex)) },
+                            onPrevMotion = { prevMotionIndex?.let(jumpToSegment) },
+                            onNextMotion = { nextMotionIndex?.let(jumpToSegment) }
+                        )
+                    }
+                }
+            }
+
+            // Slide-over Segments Drawer inside Fullscreen
+            if (showFullscreenDrawer) {
+                Surface(
+                    color = SurveillanceCardBg.copy(alpha = 0.95f),
+                    shape = RoundedCornerShape(topStart = 16.dp, bottomStart = 16.dp),
+                    border = BorderStroke(1.dp, NeonCyan.copy(alpha = 0.4f)),
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .fillMaxHeight()
+                        .widthIn(min = 260.dp, max = 330.dp)
+                        .windowInsetsPadding(WindowInsets.safeDrawing)
+                        .padding(vertical = 8.dp)
+                ) {
+                    Column(modifier = Modifier.fillMaxSize().padding(12.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = stringResource(R.string.timeline_segments_drawer_desc),
+                                color = NeonCyan,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            TextButton(onClick = { showFullscreenDrawer = false }) {
+                                Text(stringResource(R.string.common_close), color = Color.LightGray, fontSize = 11.sp)
+                            }
+                        }
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize(),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            items(timeline.segments, key = { it.clip.id }) { segment ->
+                                TimelineSegmentRowCard(
+                                    segment = segment,
+                                    isCurrent = segment.index == currentSegmentIndex,
+                                    isPlaying = isPlaying,
+                                    showDetails = showDetails,
+                                    timeOnlyFormatter = timeOnlyFormatter,
+                                    onClick = {
+                                        jumpToSegment(segment.index)
+                                        showFullscreenDrawer = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -538,7 +898,7 @@ fun StorageTimelinePlayer(
                         .clip(RoundedCornerShape(8.dp))
                         .clickable {
                             showFullscreenHud = true
-                            isFullscreen = true
+                            setFullscreen(true)
                         }
                         .testTag("timeline_fullscreen_btn")
                 ) {
@@ -661,21 +1021,19 @@ fun StorageTimelinePlayer(
                             .aspectRatio(16f / 9f)
                             .background(Color.Black)
                     ) {
-                        if (!isFullscreen) {
-                            TimelineVideoSurface(
-                                player = timelinePlayer,
-                                useCropMode = useCropMode,
-                                onSingleTap = togglePlayPause,
-                                onDoubleTapLeft = {
-                                    seekRelativeMs(-10_000L)
-                                    doubleTapFeedback = "-10s"
-                                },
-                                onDoubleTapRight = {
-                                    seekRelativeMs(10_000L)
-                                    doubleTapFeedback = "+10s"
-                                }
-                            )
-                        }
+                        TimelineVideoSurface(
+                            player = timelinePlayer,
+                            useCropMode = useCropMode,
+                            onSingleTap = togglePlayPause,
+                            onDoubleTapLeft = {
+                                seekRelativeMs(-10_000L)
+                                doubleTapFeedback = "-10s"
+                            },
+                            onDoubleTapRight = {
+                                seekRelativeMs(10_000L)
+                                doubleTapFeedback = "+10s"
+                            }
+                        )
 
                         // Double-tap seek indicator
                         doubleTapFeedback?.let { pill ->
@@ -712,7 +1070,7 @@ fun StorageTimelinePlayer(
                                 onToggleResize = { useCropMode = !useCropMode },
                                 onEnterFullscreen = {
                                     showFullscreenHud = true
-                                    isFullscreen = true
+                                    setFullscreen(true)
                                 }
                             )
                         }
@@ -810,7 +1168,7 @@ fun StorageTimelinePlayer(
                             },
                             onToggleFullscreen = {
                                 showFullscreenHud = true
-                                isFullscreen = true
+                                setFullscreen(true)
                             }
                         )
 
@@ -902,349 +1260,6 @@ fun StorageTimelinePlayer(
                         timeOnlyFormatter = timeOnlyFormatter,
                         onClick = { jumpToSegment(segment.index) }
                     )
-                }
-            }
-        }
-    }
-
-    // True Fullscreen Edge-to-Edge Timeline Watch Dialog
-    if (isFullscreen && !timeline.isEmpty) {
-        Dialog(
-            onDismissRequest = { isFullscreen = false },
-            properties = DialogProperties(
-                usePlatformDefaultWidth = false,
-                decorFitsSystemWindows = false
-            )
-        ) {
-            val dialogView = LocalView.current
-            SideEffect {
-                val window = (dialogView.parent as? DialogWindowProvider)?.window
-                if (window != null) {
-                    WindowCompat.setDecorFitsSystemWindows(window, false)
-                    window.setLayout(
-                        WindowManager.LayoutParams.MATCH_PARENT,
-                        WindowManager.LayoutParams.MATCH_PARENT
-                    )
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                        window.attributes = window.attributes.apply {
-                            layoutInDisplayCutoutMode =
-                                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-                        }
-                    }
-                }
-            }
-
-            BackHandler {
-                if (showFullscreenDrawer) {
-                    showFullscreenDrawer = false
-                } else {
-                    isFullscreen = false
-                }
-            }
-
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black)
-                    .testTag("timeline_fullscreen_dialog")
-            ) {
-                TimelineVideoSurface(
-                    player = timelinePlayer,
-                    useCropMode = useCropMode,
-                    onSingleTap = { showFullscreenHud = !showFullscreenHud },
-                    onDoubleTapLeft = {
-                        seekRelativeMs(-10_000L)
-                        doubleTapFeedback = "-10s"
-                    },
-                    onDoubleTapRight = {
-                        seekRelativeMs(10_000L)
-                        doubleTapFeedback = "+10s"
-                    }
-                )
-
-                doubleTapFeedback?.let { pill ->
-                    Surface(
-                        shape = RoundedCornerShape(24.dp),
-                        color = Color.Black.copy(alpha = 0.78f),
-                        border = BorderStroke(1.5.dp, NeonCyan),
-                        modifier = Modifier.align(Alignment.Center)
-                    ) {
-                        Text(
-                            text = pill,
-                            color = NeonCyan,
-                            fontSize = 20.sp,
-                            fontWeight = FontWeight.Black,
-                            fontFamily = FontFamily.Monospace,
-                            modifier = Modifier.padding(horizontal = 22.dp, vertical = 10.dp)
-                        )
-                    }
-                }
-
-                // Fullscreen Top & Bottom HUD Overlay
-                AnimatedVisibility(
-                    visible = showFullscreenHud,
-                    enter = fadeIn(),
-                    exit = fadeOut(),
-                    modifier = Modifier.fillMaxSize()
-                ) {
-                    Box(
-                        modifier = Modifier.fillMaxSize()
-                    ) {
-                        // Top bar
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .align(Alignment.TopCenter)
-                                .background(
-                                    Brush.verticalGradient(
-                                        listOf(Color.Black.copy(alpha = 0.85f), Color.Transparent)
-                                    )
-                                )
-                                .statusBarsPadding()
-                                .displayCutoutPadding()
-                                .padding(horizontal = 12.dp, vertical = 8.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                                if (showDetails) {
-                                    Text(
-                                        text = activeSegment?.clip?.cameraName.orEmpty(),
-                                        color = Color.White,
-                                        fontSize = 15.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Text(
-                                        text = buildString {
-                                            if (currentWallClockMs > 0L) {
-                                                append(wallClockFormatter.format(Date(currentWallClockMs)))
-                                                append(" • ")
-                                            }
-                                            append("#${currentSegmentIndex + 1}/${timeline.segments.size}")
-                                        },
-                                        color = NeonCyan,
-                                        fontSize = 11.sp,
-                                        fontFamily = FontFamily.Monospace
-                                    )
-                                } else {
-                                    Text(
-                                        text = activeSegment?.clip?.cameraName.orEmpty(),
-                                        color = Color.White.copy(alpha = 0.85f),
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                            }
-
-                            Row(
-                                horizontalArrangement = Arrangement.spacedBy(2.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                IconButton(
-                                    onClick = { showDetails = !showDetails },
-                                    modifier = Modifier.minimumInteractiveComponentSize()
-                                ) {
-                                    Icon(
-                                        imageVector = if (showDetails) Icons.Filled.Info else Icons.Outlined.Info,
-                                        contentDescription = stringResource(R.string.timeline_toggle_details_desc),
-                                        tint = if (showDetails) NeonCyan else Color.White
-                                    )
-                                }
-                                IconButton(
-                                    onClick = { useCropMode = !useCropMode },
-                                    modifier = Modifier.minimumInteractiveComponentSize().testTag("timeline_resize_mode_btn")
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.AspectRatio,
-                                        contentDescription = stringResource(R.string.timeline_resize_mode_desc),
-                                        tint = if (useCropMode) NeonCyan else Color.White
-                                    )
-                                }
-                                IconButton(
-                                    onClick = { isLandscapeLocked = !isLandscapeLocked },
-                                    modifier = Modifier.minimumInteractiveComponentSize().testTag("timeline_rotate_btn")
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.ScreenRotation,
-                                        contentDescription = stringResource(R.string.timeline_rotate_screen_desc),
-                                        tint = if (isLandscapeLocked) NeonCyan else Color.White
-                                    )
-                                }
-                                IconButton(
-                                    onClick = { showFullscreenDrawer = !showFullscreenDrawer },
-                                    modifier = Modifier.minimumInteractiveComponentSize().testTag("timeline_fs_drawer_btn")
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.AutoMirrored.Filled.List,
-                                        contentDescription = stringResource(R.string.timeline_segments_drawer_desc),
-                                        tint = if (showFullscreenDrawer) NeonCyan else Color.White
-                                    )
-                                }
-                                IconButton(
-                                    onClick = { isFullscreen = false },
-                                    modifier = Modifier.minimumInteractiveComponentSize().testTag("timeline_exit_fullscreen_btn")
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.FullscreenExit,
-                                        contentDescription = stringResource(R.string.timeline_exit_fullscreen_desc),
-                                        tint = NeonCyan
-                                    )
-                                }
-                            }
-                        }
-
-                        // Bottom Fullscreen Transport & Scrubber
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .align(Alignment.BottomCenter)
-                                .background(
-                                    Brush.verticalGradient(
-                                        listOf(Color.Transparent, Color(0xD80B111A), Color(0xF00B111A))
-                                    )
-                                )
-                                .navigationBarsPadding()
-                                .displayCutoutPadding()
-                                .padding(horizontal = 16.dp, vertical = 10.dp)
-                        ) {
-                            scrubPreviewFraction?.let { frac ->
-                                val previewTarget = StorageTimelineEngine.resolveSeekTarget(timeline, frac)
-                                val previewSeg = previewTarget?.let { timeline.segments.getOrNull(it.segmentIndex) }
-                                val previewClock = StorageTimelineEngine.resolveWallClockAt(
-                                    previewSeg,
-                                    previewTarget?.positionInClipMs ?: 0L
-                                )
-                                if (previewClock > 0L) {
-                                    Surface(
-                                        shape = RoundedCornerShape(6.dp),
-                                        color = NeonCyan,
-                                        modifier = Modifier.padding(bottom = 6.dp)
-                                    ) {
-                                        Text(
-                                            text = "${wallClockFormatter.format(Date(previewClock))} • ${previewSeg?.clip?.cameraName.orEmpty()}",
-                                            color = Color.Black,
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            fontFamily = FontFamily.Monospace,
-                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp)
-                                        )
-                                    }
-                                }
-                            }
-
-                            TimelineRulerCanvas(
-                                timeline = timeline,
-                                currentSegmentIndex = currentSegmentIndex,
-                                overallProgress = overallProgress,
-                                onSeekFraction = seekTimelineFraction,
-                                onScrubStateChanged = { scrubPreviewFraction = it }
-                            )
-
-                            Spacer(modifier = Modifier.height(6.dp))
-
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = "${StorageTimelineEngine.formatDurationHms(elapsedTotalMs)} / ${StorageTimelineEngine.formatDurationHms(timeline.totalFootageMs)}",
-                                    color = Color.White,
-                                    fontSize = 12.sp,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                if (showDetails && activeSegment != null) {
-                                    Text(
-                                        text = "${activeSegment.clip.durationSeconds}s • ${activeSegment.clip.fileSizeMb} MB",
-                                        color = Color.White.copy(alpha = 0.75f),
-                                        fontSize = 11.sp,
-                                        fontFamily = FontFamily.Monospace
-                                    )
-                                }
-                            }
-
-                            TimelineTransportBar(
-                                isPlaying = isPlaying,
-                                playbackSpeed = playbackSpeed,
-                                isMuted = isMuted,
-                                hasPrevChunk = currentSegmentIndex > 0,
-                                hasNextChunk = currentSegmentIndex < timeline.segments.lastIndex,
-                                hasPrevMotion = prevMotionIndex != null,
-                                hasNextMotion = nextMotionIndex != null,
-                                isFullscreen = true,
-                                onPrevChunk = { jumpToSegment((currentSegmentIndex - 1).coerceAtLeast(0)) },
-                                onRewind10 = { seekRelativeMs(-10_000L) },
-                                onTogglePlayPause = togglePlayPause,
-                                onForward10 = { seekRelativeMs(10_000L) },
-                                onNextChunk = { jumpToSegment((currentSegmentIndex + 1).coerceAtMost(timeline.segments.lastIndex)) },
-                                onPrevMotion = { prevMotionIndex?.let(jumpToSegment) },
-                                onNextMotion = { nextMotionIndex?.let(jumpToSegment) },
-                                onCycleSpeed = cycleSpeed,
-                                onToggleMute = {
-                                    isMuted = !isMuted
-                                    timelinePlayer.volume = if (isMuted) 0f else 1f
-                                },
-                                onToggleFullscreen = { isFullscreen = false }
-                            )
-                        }
-                    }
-                }
-
-                // Slide-over Segments Drawer inside Fullscreen
-                if (showFullscreenDrawer) {
-                    Surface(
-                        color = SurveillanceCardBg.copy(alpha = 0.95f),
-                        shape = RoundedCornerShape(topStart = 16.dp, bottomStart = 16.dp),
-                        border = BorderStroke(1.dp, NeonCyan.copy(alpha = 0.4f)),
-                        modifier = Modifier
-                            .align(Alignment.CenterEnd)
-                            .fillMaxHeight()
-                            .widthIn(min = 260.dp, max = 330.dp)
-                            .systemBarsPadding()
-                            .displayCutoutPadding()
-                            .padding(vertical = 8.dp)
-                    ) {
-                        Column(modifier = Modifier.fillMaxSize().padding(12.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = stringResource(R.string.timeline_segments_drawer_desc),
-                                    color = NeonCyan,
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                TextButton(onClick = { showFullscreenDrawer = false }) {
-                                    Text(stringResource(R.string.common_close), color = Color.LightGray, fontSize = 11.sp)
-                                }
-                            }
-                            LazyColumn(
-                                modifier = Modifier.fillMaxSize(),
-                                verticalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                items(timeline.segments, key = { it.clip.id }) { segment ->
-                                    TimelineSegmentRowCard(
-                                        segment = segment,
-                                        isCurrent = segment.index == currentSegmentIndex,
-                                        isPlaying = isPlaying,
-                                        showDetails = showDetails,
-                                        timeOnlyFormatter = timeOnlyFormatter,
-                                        onClick = {
-                                            jumpToSegment(segment.index)
-                                            showFullscreenDrawer = false
-                                        }
-                                    )
-                                }
-                            }
-                        }
-                    }
                 }
             }
         }
@@ -1478,6 +1493,126 @@ private fun TimelineRulerCanvas(
             radius = 6f,
             center = Offset(playheadX, h / 2f)
         )
+    }
+}
+
+@Composable
+private fun FullscreenTimelineTransportRow(
+    isPlaying: Boolean,
+    hasPrevChunk: Boolean,
+    hasNextChunk: Boolean,
+    hasPrevMotion: Boolean,
+    hasNextMotion: Boolean,
+    onPrevChunk: () -> Unit,
+    onRewind10: () -> Unit,
+    onTogglePlayPause: () -> Unit,
+    onForward10: () -> Unit,
+    onNextChunk: () -> Unit,
+    onPrevMotion: () -> Unit,
+    onNextMotion: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 52.dp),
+        horizontalArrangement = Arrangement.SpaceEvenly,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        IconButton(
+            onClick = onPrevMotion,
+            enabled = hasPrevMotion,
+            modifier = Modifier.weight(1f).minimumInteractiveComponentSize().testTag("timeline_prev_motion_btn")
+        ) {
+            Icon(
+                Icons.Default.NotificationsActive,
+                contentDescription = stringResource(R.string.timeline_prev_motion_desc),
+                tint = if (hasPrevMotion) NeonAmber else Color.Gray.copy(alpha = 0.45f),
+                modifier = Modifier.size(19.dp)
+            )
+        }
+
+        IconButton(
+            onClick = onPrevChunk,
+            enabled = hasPrevChunk,
+            modifier = Modifier.weight(1f).minimumInteractiveComponentSize().testTag("timeline_prev_chunk_btn")
+        ) {
+            Icon(
+                Icons.Default.SkipPrevious,
+                contentDescription = stringResource(R.string.recordings_timeline_prev_chunk),
+                tint = if (hasPrevChunk) Color.White else Color.Gray
+            )
+        }
+
+        IconButton(
+            onClick = onRewind10,
+            modifier = Modifier.weight(1f).minimumInteractiveComponentSize().testTag("timeline_rewind_btn")
+        ) {
+            Icon(
+                Icons.Default.Replay10,
+                contentDescription = stringResource(R.string.recordings_timeline_rewind),
+                tint = Color.White
+            )
+        }
+
+        Box(
+            modifier = Modifier.weight(1.2f),
+            contentAlignment = Alignment.Center
+        ) {
+            Surface(
+                shape = CircleShape,
+                color = NeonCyan,
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(CircleShape)
+                    .clickable(onClick = onTogglePlayPause)
+                    .testTag("timeline_play_pause_btn")
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                        contentDescription = stringResource(R.string.recordings_timeline_play_pause),
+                        tint = Color.Black,
+                        modifier = Modifier.size(26.dp)
+                    )
+                }
+            }
+        }
+
+        IconButton(
+            onClick = onForward10,
+            modifier = Modifier.weight(1f).minimumInteractiveComponentSize().testTag("timeline_forward_btn")
+        ) {
+            Icon(
+                Icons.Default.Forward10,
+                contentDescription = stringResource(R.string.recordings_timeline_forward),
+                tint = Color.White
+            )
+        }
+
+        IconButton(
+            onClick = onNextChunk,
+            enabled = hasNextChunk,
+            modifier = Modifier.weight(1f).minimumInteractiveComponentSize().testTag("timeline_next_chunk_btn")
+        ) {
+            Icon(
+                Icons.Default.SkipNext,
+                contentDescription = stringResource(R.string.recordings_timeline_next_chunk),
+                tint = if (hasNextChunk) Color.White else Color.Gray
+            )
+        }
+
+        IconButton(
+            onClick = onNextMotion,
+            enabled = hasNextMotion,
+            modifier = Modifier.weight(1f).minimumInteractiveComponentSize().testTag("timeline_next_motion_btn")
+        ) {
+            Icon(
+                Icons.Default.NotificationsActive,
+                contentDescription = stringResource(R.string.timeline_next_motion_desc),
+                tint = if (hasNextMotion) NeonAmber else Color.Gray.copy(alpha = 0.45f),
+                modifier = Modifier.size(19.dp)
+            )
+        }
     }
 }
 

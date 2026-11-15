@@ -58,6 +58,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -93,6 +94,7 @@ import com.example.ui.viewmodel.CameraViewModel
 import java.text.SimpleDateFormat
 import java.util.Date
 
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun RecordingsScreen(
@@ -106,6 +108,7 @@ fun RecordingsScreen(
     val localExportStatus by viewModel.localExportStatus.collectAsState()
     val retentionStatus by viewModel.retentionStatus.collectAsState()
     val selectedLanguageTag by viewModel.selectedLanguageTag.collectAsState()
+    val isTimelineFullscreen by viewModel.isTimelineFullscreen.collectAsState()
 
     var clipToPlay by remember { mutableStateOf<RecordedClipEntity?>(null) }
     var isTimelineMode by remember { mutableStateOf(true) }
@@ -162,133 +165,142 @@ fun RecordingsScreen(
         }
     }
 
+    LaunchedEffect(clips.isEmpty(), isTimelineMode) {
+        if (clips.isEmpty() || !isTimelineMode) {
+            viewModel.setTimelineFullscreen(false)
+        }
+    }
+    val hideOuterChrome = isTimelineFullscreen && isTimelineMode && clips.isNotEmpty()
+
     Box(
         modifier = modifier
             .fillMaxSize()
             .background(SurveillanceDarkBg)
             .testTag("recordings_screen")
     ) {
-        Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-            // Header
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                    Text(
-                        text = stringResource(R.string.recordings_title),
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.Black,
-                        color = NeonCyan,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        text = stringResource(R.string.recordings_saved_count, clips.size),
-                        fontSize = 12.sp,
-                        color = Color.White.copy(alpha = 0.7f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-
-                if (clips.any { it.cloudSyncStatus != CloudSyncStatus.SYNCED }) {
-                    Button(
-                        onClick = {
-                            clips.filter { it.cloudSyncStatus != CloudSyncStatus.SYNCED }
-                                .forEach { viewModel.uploadClipToCloud(it) }
-                        },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = NeonCyan,
-                            contentColor = Color.Black
-                        ),
-                        shape = RoundedCornerShape(8.dp),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                        modifier = Modifier.testTag("sync_all_clips_btn")
-                    ) {
-                        Icon(Icons.Default.CloudUpload, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(stringResource(R.string.recordings_sync_all), fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // Mode Switcher: Seamless Timeline Watching vs Clips List
-            if (clips.isNotEmpty()) {
+        Column(modifier = Modifier.fillMaxSize().padding(if (hideOuterChrome) 0.dp else 16.dp)) {
+            if (!hideOuterChrome) {
+                // Header
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Surface(
-                        shape = RoundedCornerShape(10.dp),
-                        color = if (isTimelineMode) NeonCyan else SurveillanceCardBg,
-                        border = if (!isTimelineMode) androidx.compose.foundation.BorderStroke(1.dp, NeonCyan.copy(alpha = 0.4f)) else null,
-                        modifier = Modifier
-                            .weight(1f)
-                            .clip(RoundedCornerShape(10.dp))
-                            .clickable { isTimelineMode = true }
-                            .testTag("recordings_mode_timeline_btn")
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                            horizontalArrangement = Arrangement.Center,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                Icons.Default.Timeline,
-                                contentDescription = null,
-                                tint = if (isTimelineMode) Color.Black else NeonCyan,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = stringResource(R.string.recordings_tab_timeline),
-                                color = if (isTimelineMode) Color.Black else NeonCyan,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1,
-                                softWrap = false
-                            )
-                        }
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text(
+                            text = stringResource(R.string.recordings_title),
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Black,
+                            color = NeonCyan,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = stringResource(R.string.recordings_saved_count, clips.size),
+                            fontSize = 12.sp,
+                            color = Color.White.copy(alpha = 0.7f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
 
-                    Surface(
-                        shape = RoundedCornerShape(10.dp),
-                        color = if (!isTimelineMode) NeonCyan else SurveillanceCardBg,
-                        border = if (isTimelineMode) androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.2f)) else null,
-                        modifier = Modifier
-                            .weight(1f)
-                            .clip(RoundedCornerShape(10.dp))
-                            .clickable { isTimelineMode = false }
-                            .testTag("recordings_mode_clips_btn")
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                            horizontalArrangement = Arrangement.Center,
-                            verticalAlignment = Alignment.CenterVertically
+                    if (clips.any { it.cloudSyncStatus != CloudSyncStatus.SYNCED }) {
+                        Button(
+                            onClick = {
+                                clips.filter { it.cloudSyncStatus != CloudSyncStatus.SYNCED }
+                                    .forEach { viewModel.uploadClipToCloud(it) }
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = NeonCyan,
+                                contentColor = Color.Black
+                            ),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                            modifier = Modifier.testTag("sync_all_clips_btn")
                         ) {
-                            Icon(
-                                Icons.Default.VideoLibrary,
-                                contentDescription = null,
-                                tint = if (!isTimelineMode) Color.Black else Color.White,
-                                modifier = Modifier.size(16.dp)
-                            )
+                            Icon(Icons.Default.CloudUpload, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = stringResource(R.string.recordings_tab_clips),
-                                color = if (!isTimelineMode) Color.Black else Color.White,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1,
-                                softWrap = false
-                            )
+                            Text(stringResource(R.string.recordings_sync_all), fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
                         }
                     }
                 }
+
                 Spacer(modifier = Modifier.height(10.dp))
+
+                // Mode Switcher: Seamless Timeline Watching vs Clips List
+                if (clips.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = if (isTimelineMode) NeonCyan else SurveillanceCardBg,
+                            border = if (!isTimelineMode) androidx.compose.foundation.BorderStroke(1.dp, NeonCyan.copy(alpha = 0.4f)) else null,
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(10.dp))
+                                .clickable { isTimelineMode = true }
+                                .testTag("recordings_mode_timeline_btn")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                horizontalArrangement = Arrangement.Center,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    Icons.Default.Timeline,
+                                    contentDescription = null,
+                                    tint = if (isTimelineMode) Color.Black else NeonCyan,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = stringResource(R.string.recordings_tab_timeline),
+                                    color = if (isTimelineMode) Color.Black else NeonCyan,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = if (!isTimelineMode) NeonCyan else SurveillanceCardBg,
+                            border = if (isTimelineMode) androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.2f)) else null,
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(10.dp))
+                                .clickable { isTimelineMode = false }
+                                .testTag("recordings_mode_clips_btn")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                horizontalArrangement = Arrangement.Center,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    Icons.Default.VideoLibrary,
+                                    contentDescription = null,
+                                    tint = if (!isTimelineMode) Color.Black else Color.White,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = stringResource(R.string.recordings_tab_clips),
+                                    color = if (!isTimelineMode) Color.Black else Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+                }
             }
 
             if (!isTimelineMode) {
@@ -517,6 +529,8 @@ fun RecordingsScreen(
                     clips = clips,
                     selectedLanguageTag = selectedLanguageTag,
                     initialClipId = timelineInitialClipId,
+                    isFullscreen = isTimelineFullscreen,
+                    onFullscreenChange = { viewModel.setTimelineFullscreen(it) },
                     onSaveAsClip = launchSaveAsForClip,
                     onUploadClip = { viewModel.uploadClipToCloud(it) },
                     modifier = Modifier.fillMaxSize().weight(1f)

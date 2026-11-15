@@ -43,7 +43,6 @@ import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.text.SimpleDateFormat
-import java.util.Base64
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
@@ -698,7 +697,7 @@ class RemoteHubServer(
         if (authHeader.startsWith("Basic ", ignoreCase = true)) {
             val b64 = authHeader.substring(6).trim()
             val decoded = runCatching {
-                String(Base64.getDecoder().decode(b64), StandardCharsets.UTF_8)
+                decodeBase64Bytes(b64)?.toString(StandardCharsets.UTF_8)
             }.getOrNull()
             if (decoded != null && decoded.contains(":")) {
                 val u = decoded.substringBefore(":")
@@ -1461,6 +1460,32 @@ class RemoteHubServer(
         fun isMediaStreamPath(path: String): Boolean {
             return (path.startsWith("/api/clips/") && path.endsWith("/stream")) ||
                 (path.startsWith("/api/cameras/") && (path.endsWith("/frame.jpg") || path.endsWith("/mjpeg")))
+        }
+
+        private fun decodeBase64Bytes(input: String): ByteArray? {
+            val clean = input.trim().filterNot { it.isWhitespace() }
+            if (clean.isEmpty()) return ByteArray(0)
+            val out = ByteArrayOutputStream((clean.length * 3) / 4 + 3)
+            var buffer = 0
+            var bitsCollected = 0
+            for (ch in clean) {
+                if (ch == '=') break
+                val val6 = when (ch) {
+                    in 'A'..'Z' -> ch.code - 'A'.code
+                    in 'a'..'z' -> ch.code - 'a'.code + 26
+                    in '0'..'9' -> ch.code - '0'.code + 52
+                    '+', '-' -> 62
+                    '/', '_' -> 63
+                    else -> return null
+                }
+                buffer = (buffer shl 6) or val6
+                bitsCollected += 6
+                if (bitsCollected >= 8) {
+                    bitsCollected -= 8
+                    out.write((buffer shr bitsCollected) and 0xFF)
+                }
+            }
+            return out.toByteArray()
         }
 
         private fun escapeHtml(text: String): String {

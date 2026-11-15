@@ -183,6 +183,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private val _isShuttingDown = MutableStateFlow(false)
     val isShuttingDown: StateFlow<Boolean> = _isShuttingDown.asStateFlow()
 
+    private val _isTimelineFullscreen = MutableStateFlow(false)
+    val isTimelineFullscreen: StateFlow<Boolean> = _isTimelineFullscreen.asStateFlow()
+
     val extendedStorageConfig: StateFlow<ExtendedStorageConfig> = cloudStorageManager.extendedConfig
     val discoveredStorageEndpoints: StateFlow<List<DiscoveredStorageEndpoint>> = cloudStorageManager.discoveredEndpoints
     val isScanningStorage: StateFlow<Boolean> = cloudStorageManager.isScanningStorage
@@ -732,7 +735,14 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun navigateTo(screen: String) {
+        if (screen != "recordings") {
+            _isTimelineFullscreen.value = false
+        }
         _activeScreen.value = screen
+    }
+
+    fun setTimelineFullscreen(fullscreen: Boolean) {
+        _isTimelineFullscreen.value = fullscreen
     }
 
     fun triggerMotionAlertManually(camera: CameraEntity, level: Int = 85) {
