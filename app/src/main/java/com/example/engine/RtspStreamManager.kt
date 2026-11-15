@@ -450,11 +450,7 @@ class RtspStreamManager(private val context: Context) {
     }
 
     private fun resolveEffectiveUrl(camera: CameraEntity): String {
-        var rawUrl = camera.rtspUrl.trim()
-        if (rawUrl.contains("commondatastorage.googleapis.com") || rawUrl.contains("wowzaec2demo")) {
-            rawUrl = "android.resource://${context.packageName}/${com.example.R.raw.surveillance_feed}"
-        }
-        return rawUrl
+        return camera.rtspUrl.trim()
     }
 
     private val activeTextureViews = ConcurrentHashMap<String, WeakReference<TextureView>>()
@@ -625,13 +621,6 @@ class RtspStreamManager(private val context: Context) {
         )
     }
 
-    fun isDemoCamera(camera: CameraEntity): Boolean {
-        val rawUrl = camera.rtspUrl.lowercase()
-        return rawUrl.contains("surveillance_feed") ||
-                rawUrl.contains("commondatastorage.googleapis.com") ||
-                rawUrl.contains("wowzaec2demo") ||
-                rawUrl.startsWith("android.resource")
-    }
 
     fun isLiveRtspCamera(camera: CameraEntity): Boolean {
         val rawUrl = resolveEffectiveUrl(camera)
@@ -755,23 +744,26 @@ class RtspStreamManager(private val context: Context) {
                     }
 
                     val updatedStalled = stalledSecondsMap[id] ?: 0
+                    val measuredFps = if (renderedFrames >= 0 && previousRendered >= 0 && renderedFrames >= previousRendered) {
+                        renderedFrames - previousRendered
+                    } else {
+                        0
+                    }
                     val realFps = if (format?.frameRate != null && format.frameRate > 0) {
                         if (eval.healthyProgress || updatedStalled < 3) format.frameRate.toInt() else 0
                     } else if (eval.healthyProgress) {
-                        30
+                        measuredFps
                     } else {
                         0
                     }
 
                     val realBitrate = if (format?.bitrate != null && format.bitrate > 0) {
                         if (eval.healthyProgress || updatedStalled < 3) format.bitrate / 1000 else 0
-                    } else if (eval.healthyProgress) {
-                        2048
                     } else {
                         0
                     }
 
-                    val realCodec = format?.sampleMimeType ?: flow.value.codec.takeIf { !flow.value.hasError } ?: "H.264 / RTSP"
+                    val realCodec = format?.sampleMimeType ?: flow.value.codec.takeIf { !flow.value.hasError } ?: ""
                     val showLiveBadge = !flow.value.hasError && (eval.isLive && updatedStalled < 3)
                     val attemptCount = recoveryAttemptsMap[id] ?: 0
                     val showReconnectingBadge = !flow.value.hasError && when {

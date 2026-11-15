@@ -583,7 +583,7 @@
     <string name="storage_smb_saf_attached">Bağlı SAF Paylaşımı: %1$s</string>
     <string name="storage_nas_proto_label">NAS Aktarım Protokolü:</string>
     <string name="storage_nas_proto_ftp">FTP</string>
-    <string name="storage_nas_proto_sftp">SFTP (Yoklama)</string>
+    <string name="storage_nas_proto_sftp">SFTP (SSH)</string>
     <string name="storage_nas_proto_http">HTTP Ağ Geçidi</string>
     <string name="storage_nas_host_label">NAS Sunucusu / IP</string>
     <string name="storage_nas_port_label">Port</string>

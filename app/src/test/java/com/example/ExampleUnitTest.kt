@@ -1414,4 +1414,61 @@ class ExampleUnitTest {
     assertTrue(redV > redU)
     assertTrue(blueU > blueV)
   }
+
+  @Test
+  fun remoteStorageProtocolClient_sftpValidationAndBannerProbe() {
+    runBlocking {
+      val missingHost = RemoteStorageProtocolClient.testSftpConnection(
+        host = "",
+        port = 22,
+        username = "nas",
+        password = "secret",
+        baseDir = "/OmniView"
+      )
+      assertFalse(missingHost.success)
+      assertTrue(missingHost.summary.contains("Missing SFTP host"))
+
+      val missingUser = RemoteStorageProtocolClient.testSftpConnection(
+        host = "192.168.1.50",
+        port = 22,
+        username = "",
+        password = "secret",
+        baseDir = "/OmniView"
+      )
+      assertFalse(missingUser.success)
+      assertTrue(missingUser.summary.contains("Missing SFTP username"))
+
+      val missingFile = RemoteStorageProtocolClient.uploadViaSftp(
+        host = "192.168.1.50",
+        port = 22,
+        username = "nas",
+        password = "secret",
+        baseDir = "/OmniView",
+        relativePath = "Front_Gate/clip.mp4",
+        file = File("/nonexistent_omniview_clip.mp4")
+      )
+      assertTrue(missingFile.isFailure)
+    }
+
+    val sshServer = ServerSocket(0)
+    val sshThread = Thread {
+      runCatching {
+        sshServer.accept().use { sock ->
+          sock.getOutputStream().write("SSH-2.0-OpenSSH_9.6 OmniViewTest\r\n".toByteArray())
+          sock.getOutputStream().flush()
+        }
+      }
+    }
+    sshThread.start()
+    try {
+      val bannerRes = runBlocking {
+        RemoteStorageProtocolClient.testSftpBanner("127.0.0.1", sshServer.localPort)
+      }
+      assertTrue(bannerRes.success)
+      assertTrue(bannerRes.details.contains("SSH-2.0-OpenSSH"))
+    } finally {
+      sshServer.close()
+      sshThread.join(2000)
+    }
+  }
 }

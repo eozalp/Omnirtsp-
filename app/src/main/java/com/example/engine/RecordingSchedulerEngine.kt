@@ -16,8 +16,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.joinAll
@@ -61,6 +64,9 @@ class RecordingSchedulerEngine(
 
     private val _activeSchedulesState = MutableStateFlow<List<RecordingScheduleEntity>>(emptyList())
     val activeSchedulesState: StateFlow<List<RecordingScheduleEntity>> = _activeSchedulesState.asStateFlow()
+
+    private val _recordingErrors = MutableSharedFlow<String>(extraBufferCapacity = 16)
+    val recordingErrors: SharedFlow<String> = _recordingErrors.asSharedFlow()
 
     init {
         ensureRecordingsDirectory()
@@ -121,41 +127,13 @@ class RecordingSchedulerEngine(
         }
     }
 
-    private fun copyDemoVideoPayload(file: File) {
-        try {
-            file.parentFile?.mkdirs()
-            if (file.exists() && file.length() >= 100 * 1024L) {
-                return
-            }
-            context.resources.openRawResource(com.example.R.raw.surveillance_feed).use { input ->
-                file.outputStream().use { out ->
-                    input.copyTo(out)
-                    out.flush()
-                    try {
-                        out.fd.sync()
-                    } catch (_: Exception) {}
-                }
-            }
-        } catch (_: Exception) {
-            if (!file.exists() || file.length() == 0L) {
-                val mp4Header = byteArrayOf(
-                    0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70,
-                    0x69, 0x73, 0x6F, 0x6D, 0x00, 0x00, 0x02, 0x00,
-                    0x69, 0x73, 0x6F, 0x6D, 0x69, 0x73, 0x6F, 0x32,
-                    0x61, 0x76, 0x63, 0x31, 0x6D, 0x70, 0x34, 0x31
-                )
-                file.writeBytes(mp4Header)
-            }
-        }
-    }
-
     private fun repairExistingEmptyRecordings() {
         scope.launch(Dispatchers.IO) {
             try {
                 val clips = database.recordedClipDao().getAllClipsSync()
                 for (clip in clips) {
                     val file = File(clip.filePath)
-                    if (file.exists() && file.length() > 0) {
+                    if (StorageTimelineEngine.isPlayableClipFile(file)) {
                         val realMb = (Math.round((file.length().toFloat() / (1024f * 1024f)) * 100f) / 100f).coerceAtLeast(0.1f)
                         if (clip.fileSizeMb != realMb) {
                             database.recordedClipDao().updateClip(clip.copy(fileSizeMb = realMb))
@@ -175,12 +153,7 @@ class RecordingSchedulerEngine(
         val dir = ensureRecordingsDirectory()
         val clipFile = File(dir, "clip_${camera.name.replace(" ", "_")}_${System.currentTimeMillis()}.mp4")
 
-        val isDemo = streamManager.isDemoCamera(camera)
-        if (isDemo) {
-            copyDemoVideoPayload(clipFile)
-        } else {
-            cameraStreamRecorder.startRecording(clipId, camera, clipFile, scope)
-        }
+        cameraStreamRecorder.startRecording(clipId, camera, clipFile, scope)
 
         val session = ActiveRecordingSession(
             clipId = clipId,
@@ -203,13 +176,7 @@ class RecordingSchedulerEngine(
         streamManager.updateRecordingState(session.cameraId, false)
 
         val file = File(session.filePath)
-        val camera = session.cameraSnapshot
-        val isDemo = camera != null && streamManager.isDemoCamera(camera)
-        val detachedRecorder = if (!isDemo) {
-            cameraStreamRecorder.detachRecorder(session.cameraId, expectedClipId = session.clipId)
-        } else {
-            null
-        }
+        val detachedRecorder = cameraStreamRecorder.detachRecorder(session.cameraId, expectedClipId = session.clipId)
 
         val endTimestamp = System.currentTimeMillis()
         val durationSeconds = ((endTimestamp - session.startTimestamp) / 1000).toInt().coerceAtLeast(1)
@@ -218,8 +185,15 @@ class RecordingSchedulerEngine(
             try {
                 if (detachedRecorder != null) {
                     cameraStreamRecorder.finalizeRecorder(detachedRecorder)
-                } else if (isDemo && (!file.exists() || file.length() == 0L)) {
-                    copyDemoVideoPayload(file)
+                }
+
+                if (!StorageTimelineEngine.isPlayableClipFile(file)) {
+                    runCatching {
+                        if (file.exists()) file.delete()
+                    }
+                    Log.w("RecordingScheduler", "No real video frames decoded for ${session.cameraName}; discarded empty file")
+                    _recordingErrors.tryEmit(session.cameraName)
+                    return@launch
                 }
 
                 val actualSizeMb = (file.length().toFloat() / (1024f * 1024f)).coerceAtLeast(0.1f)

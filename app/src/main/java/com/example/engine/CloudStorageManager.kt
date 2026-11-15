@@ -19,13 +19,18 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.Credentials
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.asRequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 import java.net.URI
+import java.net.URLEncoder
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -136,25 +141,49 @@ class CloudStorageManager(
                     try {
                         when {
                             config.provider == CloudProviderType.SMB_CIFS -> {
-                                if (config.safFolderUri.isNotBlank()) {
-                                    _syncProgress.value = AppLocaleManager.getString(
-                                        context,
-                                        R.string.cloud_uploading_kb,
-                                        (file.length() / 1024).toInt(),
-                                        "SMB/SAF"
-                                    )
-                                    val safRes = DeviceStorageExporter.exportClipToSafTree(
-                                        context = context,
-                                        sourceFile = file,
-                                        treeUriString = config.safFolderUri
-                                    )
-                                    val uri = safRes.getOrThrow()
-                                    uploadedUrl = uri.toString()
-                                    statusLabel = "SAF-SMB"
-                                } else {
-                                    throw IllegalStateException(
-                                        "SMB direct file write requires selecting your mounted SMB share folder via Android Files (SAF), or switching NAS protocol to FTP / WebDAV."
-                                    )
+                                when {
+                                    ext.smbHost.isNotBlank() -> {
+                                        _syncProgress.value = AppLocaleManager.getString(
+                                            context,
+                                            R.string.cloud_uploading_kb,
+                                            (file.length() / 1024).toInt(),
+                                            "SMB"
+                                        )
+                                        val smbRes = RemoteStorageProtocolClient.uploadViaSmb(
+                                            host = ext.smbHost,
+                                            port = ext.smbPort,
+                                            share = ext.smbShare,
+                                            subfolder = ext.smbSubfolder,
+                                            workgroup = ext.smbWorkgroup,
+                                            username = ext.smbUsername,
+                                            password = ext.smbPassword,
+                                            relativePath = relativePath,
+                                            file = file
+                                        )
+                                        uploadedUrl = smbRes.getOrThrow()
+                                        statusLabel = "SMB OK"
+                                    }
+                                    config.safFolderUri.isNotBlank() -> {
+                                        _syncProgress.value = AppLocaleManager.getString(
+                                            context,
+                                            R.string.cloud_uploading_kb,
+                                            (file.length() / 1024).toInt(),
+                                            "SMB/SAF"
+                                        )
+                                        val safRes = DeviceStorageExporter.exportClipToSafTree(
+                                            context = context,
+                                            sourceFile = file,
+                                            treeUriString = config.safFolderUri
+                                        )
+                                        val uri = safRes.getOrThrow()
+                                        uploadedUrl = uri.toString()
+                                        statusLabel = "SAF-SMB"
+                                    }
+                                    else -> {
+                                        throw IllegalStateException(
+                                            "Enter SMB host, share, and credentials, or select a mounted SMB folder via Android Files (SAF)."
+                                        )
+                                    }
                                 }
                             }
 
@@ -182,12 +211,42 @@ class CloudStorageManager(
 
                             config.provider == CloudProviderType.FTP_NAS_STORAGE &&
                                 ext.nasSubProtocol == NasSubProtocol.SFTP_PROBE -> {
-                                throw IllegalStateException(
-                                    "SFTP key/SSH stream requires FTP, WebDAV, S3, or mounted SAF share for unattended uploads."
+                                val host = ext.nasHost.ifBlank { RemoteStorageProtocolClient.extractHost(config.endpointUrl) }
+                                val port = if (ext.nasPort == 21) 22 else ext.nasPort
+                                _syncProgress.value = AppLocaleManager.getString(
+                                    context,
+                                    R.string.cloud_uploading_kb,
+                                    (file.length() / 1024).toInt(),
+                                    "SFTP"
                                 )
+                                val sftpRes = RemoteStorageProtocolClient.uploadViaSftp(
+                                    host = host,
+                                    port = port,
+                                    username = config.nasUsername,
+                                    password = config.nasPassword,
+                                    baseDir = ext.nasRemotePath,
+                                    relativePath = relativePath,
+                                    file = file
+                                )
+                                uploadedUrl = sftpRes.getOrThrow()
+                                statusLabel = "SFTP OK"
+                            }
+
+                            config.provider == CloudProviderType.GOOGLE_DRIVE -> {
+                                _syncProgress.value = AppLocaleManager.getString(
+                                    context,
+                                    R.string.cloud_uploading_kb,
+                                    (file.length() / 1024).toInt(),
+                                    "Google Drive"
+                                )
+                                uploadedUrl = uploadToGoogleDrive(config, file)
+                                statusLabel = "HTTP 200"
                             }
 
                             else -> {
+                                if (config.provider == CloudProviderType.WEBDAV) {
+                                    ensureWebDavDirectories(config, relativePath)
+                                }
                                 val request = buildUploadRequest(config, ext, clip, file, relativePath)
                                 _syncProgress.value = AppLocaleManager.getString(
                                     context,
@@ -278,6 +337,10 @@ class CloudStorageManager(
                 if (ext.nasSubProtocol == NasSubProtocol.HTTP_GATEWAY) {
                     val base = config.endpointUrl.trim().trimEnd('/')
                     "$base/$relativePath"
+                } else if (ext.nasSubProtocol == NasSubProtocol.SFTP_PROBE) {
+                    val host = ext.nasHost.ifBlank { RemoteStorageProtocolClient.extractHost(config.endpointUrl) }
+                    val port = if (ext.nasPort == 21) 22 else ext.nasPort
+                    "sftp://$host:$port/${ext.nasRemotePath.trim('/')}/$relativePath"
                 } else {
                     val host = ext.nasHost.ifBlank { RemoteStorageProtocolClient.extractHost(config.endpointUrl) }
                     "ftp://$host:${ext.nasPort}/${ext.nasRemotePath.trim('/')}/$relativePath"
@@ -448,7 +511,13 @@ class CloudStorageManager(
                             }
                             NasSubProtocol.SFTP_PROBE -> {
                                 val port = if (ext.nasPort == 21) 22 else ext.nasPort
-                                val res = RemoteStorageProtocolClient.testSftpBanner(host = host, port = port)
+                                val res = RemoteStorageProtocolClient.testSftpConnection(
+                                    host = host,
+                                    port = port,
+                                    username = config.nasUsername,
+                                    password = config.nasPassword,
+                                    baseDir = ext.nasRemotePath
+                                )
                                 _detailedConnectionResult.value = res
                                 _lastConnectionTestResult.value = if (res.success) {
                                     "Handshake OK: ${res.summary}\n${res.details}"
@@ -480,10 +549,13 @@ class CloudStorageManager(
                 }
 
                 val reqBuilder = Request.Builder().url(testUrl)
-                if (config.provider == CloudProviderType.GOOGLE_DRIVE) {
-                    reqBuilder.get()
-                } else {
-                    reqBuilder.head()
+                when (config.provider) {
+                    CloudProviderType.GOOGLE_DRIVE -> reqBuilder.get()
+                    CloudProviderType.WEBDAV -> {
+                        reqBuilder.method("PROPFIND", ByteArray(0).toRequestBody("application/xml".toMediaType()))
+                        reqBuilder.addHeader("Depth", "0")
+                    }
+                    else -> reqBuilder.head()
                 }
 
                 when (config.provider) {
@@ -586,6 +658,135 @@ class CloudStorageManager(
             } finally {
                 _isTestingConnection.value = false
             }
+        }
+    }
+
+    private fun ensureWebDavDirectories(config: CloudConfigEntity, relativePath: String) {
+        val baseUrl = config.endpointUrl.trim().trimEnd('/')
+        if (baseUrl.isBlank() || !baseUrl.startsWith("http")) return
+        val dirParts = relativePath.trim('/').split('/').dropLast(1).filter { it.isNotBlank() }
+        if (dirParts.isEmpty()) return
+
+        var currentUrl = baseUrl
+        for (seg in dirParts) {
+            currentUrl = "$currentUrl/$seg"
+            val reqBuilder = Request.Builder()
+                .url(currentUrl)
+                .method("MKCOL", null)
+            if (config.webdavUsername.isNotBlank() || config.webdavPassword.isNotBlank()) {
+                reqBuilder.addHeader(
+                    "Authorization",
+                    Credentials.basic(config.webdavUsername.trim(), config.webdavPassword.trim())
+                )
+            } else if (config.apiKeyOrToken.isNotBlank()) {
+                reqBuilder.addHeader("Authorization", "Bearer ${config.apiKeyOrToken.trim()}")
+            }
+            httpClient.newCall(reqBuilder.build()).execute().use { resp ->
+                if (resp.code == 401 || resp.code == 403) {
+                    throw IllegalStateException("WebDAV MKCOL auth failed HTTP ${resp.code}: ${resp.message}")
+                }
+            }
+        }
+    }
+
+    private fun uploadToGoogleDrive(config: CloudConfigEntity, file: File): String {
+        val token = config.apiKeyOrToken.trim()
+        require(token.isNotBlank()) { "Google Drive OAuth 2.0 access token is required" }
+
+        val folderSpec = config.bucketOrFolderName.trim()
+        val parentFolderId = if (folderSpec.isNotBlank()) {
+            resolveOrCreateDriveFolder(token, folderSpec)
+        } else {
+            null
+        }
+
+        val metaJson = JSONObject().apply {
+            put("name", file.name)
+            if (!parentFolderId.isNullOrBlank()) {
+                put("parents", JSONArray().put(parentFolderId))
+            }
+        }.toString()
+
+        val multipartBody = MultipartBody.Builder()
+            .setType("multipart/related".toMediaType())
+            .addPart(metaJson.toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .addPart(file.asRequestBody("video/mp4".toMediaTypeOrNull()))
+            .build()
+
+        val uploadReq = Request.Builder()
+            .url("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink")
+            .addHeader("Authorization", "Bearer $token")
+            .post(multipartBody)
+            .build()
+
+        httpClient.newCall(uploadReq).execute().use { resp ->
+            val bodyStr = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                throw IllegalStateException("Google Drive HTTP ${resp.code}: ${resp.message} $bodyStr".trim())
+            }
+            val obj = runCatching { JSONObject(bodyStr) }.getOrNull()
+            val webLink = obj?.optString("webViewLink")?.takeIf { it.isNotBlank() }
+            val fileId = obj?.optString("id")?.takeIf { it.isNotBlank() }
+            return webLink
+                ?: fileId?.let { "https://drive.google.com/file/d/$it/view" }
+                ?: "https://www.googleapis.com/drive/v3/files/${file.name}"
+        }
+    }
+
+    private fun resolveOrCreateDriveFolder(token: String, folderNameOrId: String): String {
+        val escapedName = folderNameOrId.replace("'", "\\'")
+        val query = URLEncoder.encode(
+            "name = '$escapedName' and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
+            "UTF-8"
+        )
+        val searchReq = Request.Builder()
+            .url("https://www.googleapis.com/drive/v3/files?q=$query&fields=files(id,name)&pageSize=1")
+            .addHeader("Authorization", "Bearer $token")
+            .get()
+            .build()
+        httpClient.newCall(searchReq).execute().use { resp ->
+            if (resp.isSuccessful) {
+                val json = runCatching { JSONObject(resp.body?.string().orEmpty()) }.getOrNull()
+                val files = json?.optJSONArray("files")
+                if (files != null && files.length() > 0) {
+                    val foundId = files.optJSONObject(0)?.optString("id").orEmpty()
+                    if (foundId.isNotBlank()) return foundId
+                }
+            }
+        }
+
+        // If user entered a folder ID directly, verify if it exists before creating a named folder
+        if (folderNameOrId.none { it.isWhitespace() || it == '/' } && folderNameOrId.length >= 16) {
+            val checkIdReq = Request.Builder()
+                .url("https://www.googleapis.com/drive/v3/files/${URLEncoder.encode(folderNameOrId, "UTF-8")}?fields=id,mimeType")
+                .addHeader("Authorization", "Bearer $token")
+                .get()
+                .build()
+            httpClient.newCall(checkIdReq).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val obj = runCatching { JSONObject(resp.body?.string().orEmpty()) }.getOrNull()
+                    if (obj?.optString("mimeType") == "application/vnd.google-apps.folder") {
+                        return folderNameOrId
+                    }
+                }
+            }
+        }
+
+        val createMeta = JSONObject().apply {
+            put("name", folderNameOrId)
+            put("mimeType", "application/vnd.google-apps.folder")
+        }.toString()
+        val createReq = Request.Builder()
+            .url("https://www.googleapis.com/drive/v3/files?fields=id")
+            .addHeader("Authorization", "Bearer $token")
+            .post(createMeta.toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .build()
+        httpClient.newCall(createReq).execute().use { resp ->
+            val bodyStr = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                throw IllegalStateException("Google Drive folder creation HTTP ${resp.code}: $bodyStr")
+            }
+            return JSONObject(bodyStr).getString("id")
         }
     }
 

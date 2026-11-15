@@ -90,7 +90,7 @@ object DeviceStorageExporter {
         mimeType: String = "video/mp4"
     ): Result<Uri> {
         return runCatching {
-            ensureValidClipPayload(context, sourceFile)
+            requireValidClipFile(sourceFile)
             val treeUri = Uri.parse(treeUriString)
             val parentDocId = DocumentsContract.getTreeDocumentId(treeUri)
             val parentDocUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, parentDocId)
@@ -115,7 +115,7 @@ object DeviceStorageExporter {
 
     fun exportClipToPublicMovies(context: Context, sourceFile: File): Result<Uri> {
         return runCatching {
-            ensureValidClipPayload(context, sourceFile)
+            requireValidClipFile(sourceFile)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val values = ContentValues().apply {
                     put(MediaStore.Video.Media.DISPLAY_NAME, sourceFile.name)
@@ -155,7 +155,7 @@ object DeviceStorageExporter {
 
     fun saveClipToUri(context: Context, sourceFile: File, targetUri: Uri): Result<Uri> {
         return runCatching {
-            ensureValidClipPayload(context, sourceFile)
+            requireValidClipFile(sourceFile)
             context.contentResolver.openOutputStream(targetUri)?.use { out ->
                 sourceFile.inputStream().use { input ->
                     input.copyTo(out)
@@ -192,20 +192,9 @@ object DeviceStorageExporter {
         }
     }
 
-    fun ensureValidClipPayload(context: Context? = null, file: File) {
-        if (!file.exists() || file.length() < 32L) {
-            file.parentFile?.mkdirs()
-            val mp4Header = byteArrayOf(
-                0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70,
-                0x69, 0x73, 0x6F, 0x6D, 0x00, 0x00, 0x02, 0x00,
-                0x69, 0x73, 0x6F, 0x6D, 0x69, 0x73, 0x6F, 0x32,
-                0x61, 0x76, 0x63, 0x31, 0x6D, 0x70, 0x34, 0x31
-            )
-            file.writeBytes(mp4Header)
+    fun requireValidClipFile(file: File) {
+        if (!StorageTimelineEngine.isPlayableClipFile(file)) {
+            throw IllegalStateException("Recording file is missing or contains no encoded video frames: ${file.name}")
         }
-    }
-
-    fun ensureValidClipPayload(file: File) {
-        ensureValidClipPayload(null, file)
     }
 }

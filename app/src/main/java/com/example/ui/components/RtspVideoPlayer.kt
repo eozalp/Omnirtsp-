@@ -648,30 +648,38 @@ fun RtspVideoPlayer(
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                text = "${telemetry.fps} FPS",
-                                color = NeonCyan,
-                                fontSize = 10.sp,
-                                fontFamily = FontFamily.Monospace
-                            )
-                            Text(
-                                text = "${telemetry.bitrateKbps} kbps",
-                                color = Color.White.copy(alpha = 0.8f),
-                                fontSize = 10.sp,
-                                fontFamily = FontFamily.Monospace
-                            )
-                            Text(
-                                text = telemetry.resolution,
-                                color = Color.White.copy(alpha = 0.8f),
-                                fontSize = 10.sp,
-                                fontFamily = FontFamily.Monospace
-                            )
-                            Text(
-                                text = "${telemetry.latencyMs}ms",
-                                color = Color.White.copy(alpha = 0.8f),
-                                fontSize = 10.sp,
-                                fontFamily = FontFamily.Monospace
-                            )
+                            if (telemetry.fps > 0) {
+                                Text(
+                                    text = "${telemetry.fps} FPS",
+                                    color = NeonCyan,
+                                    fontSize = 10.sp,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+                            if (telemetry.bitrateKbps > 0) {
+                                Text(
+                                    text = "${telemetry.bitrateKbps} kbps",
+                                    color = Color.White.copy(alpha = 0.8f),
+                                    fontSize = 10.sp,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+                            if (telemetry.resolution.isNotBlank()) {
+                                Text(
+                                    text = telemetry.resolution,
+                                    color = Color.White.copy(alpha = 0.8f),
+                                    fontSize = 10.sp,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+                            if (telemetry.latencyMs > 0L) {
+                                Text(
+                                    text = "${telemetry.latencyMs}ms",
+                                    color = Color.White.copy(alpha = 0.8f),
+                                    fontSize = 10.sp,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
                         }
 
                         Text(

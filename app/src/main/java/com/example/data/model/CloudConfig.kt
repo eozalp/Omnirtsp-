@@ -22,7 +22,7 @@ enum class LocalSaveDestination {
 data class CloudConfigEntity(
     @PrimaryKey val id: String = "primary_cloud_config",
     val provider: CloudProviderType = CloudProviderType.GOOGLE_DRIVE,
-    val endpointUrl: String = "https://cloud.surveillance.storage/v1/sync",
+    val endpointUrl: String = "",
     val bucketOrFolderName: String = "OmniView-RTSP-Clips",
     val apiKeyOrToken: String = "",
     // Local / System File Manager destination options
@@ -46,8 +46,8 @@ data class CloudConfigEntity(
     val customHeaderName: String = "Authorization",
     val customHeaderValue: String = "",
     // Policies & Rolling Storage Limit
-    val autoSyncRecordings: Boolean = true,
-    val autoSyncMotionSnapshots: Boolean = true,
+    val autoSyncRecordings: Boolean = false,
+    val autoSyncMotionSnapshots: Boolean = false,
     val wifiOnly: Boolean = true,
     val retentionEnabled: Boolean = true,
     val retentionDays: Int = 3,
@@ -58,7 +58,7 @@ data class CloudConfigEntity(
     val chunkDurationMinutes: Int = 5,
     val keepAppAlive: Boolean = true,
     val lastSyncTimestamp: Long = 0L,
-    val isConnected: Boolean = true
+    val isConnected: Boolean = false
 ) {
     fun totalRetentionMillis(): Long {
         if (!retentionEnabled) return 0L

@@ -26,7 +26,6 @@ data class CameraEntity(
     val isMotionDetectionEnabled: Boolean = true,
     val motionSensitivity: Int = 65, // 1 to 100
     val motionCooldownSeconds: Int = 10,
-    val isDemoCamera: Boolean = false,
     val location: String = "Entrance",
     val isEnabled: Boolean = true,
     val rotationDegrees: Float = 0f,
@@ -35,12 +34,12 @@ data class CameraEntity(
 )
 
 data class StreamTelemetry(
-    val fps: Int = 30,
-    val bitrateKbps: Int = 2450,
-    val resolution: String = "1920x1080",
-    val codec: String = "H.264 / AAC",
-    val latencyMs: Long = 120,
-    val isLive: Boolean = true,
+    val fps: Int = 0,
+    val bitrateKbps: Int = 0,
+    val resolution: String = "",
+    val codec: String = "",
+    val latencyMs: Long = 0L,
+    val isLive: Boolean = false,
     val isReconnecting: Boolean = false,
     val isRecording: Boolean = false,
     val isMotionDetected: Boolean = false,

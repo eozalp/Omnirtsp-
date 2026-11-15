@@ -583,7 +583,7 @@
     <string name="storage_smb_saf_attached">Mounted SAF Share: %1$s</string>
     <string name="storage_nas_proto_label">NAS Transfer Protocol:</string>
     <string name="storage_nas_proto_ftp">FTP</string>
-    <string name="storage_nas_proto_sftp">SFTP (Probe)</string>
+    <string name="storage_nas_proto_sftp">SFTP (SSH)</string>
     <string name="storage_nas_proto_http">HTTP Gateway</string>
     <string name="storage_nas_host_label">NAS Host / IP</string>
     <string name="storage_nas_port_label">Port</string>

@@ -4,6 +4,19 @@ import android.content.Context
 import android.net.Uri
 import android.provider.DocumentsContract
 import com.example.data.model.CloudProviderType
+import com.hierynomus.msdtyp.AccessMask
+import com.hierynomus.mssmb2.SMB2CreateDisposition
+import com.hierynomus.mssmb2.SMB2ShareAccess
+import com.hierynomus.smbj.SMBClient
+import com.hierynomus.smbj.SmbConfig
+import com.hierynomus.smbj.auth.AuthenticationContext
+import com.hierynomus.smbj.share.DiskShare
+import com.jcraft.jsch.ChannelSftp
+import com.jcraft.jsch.JSch
+import com.jcraft.jsch.Session
+import com.jcraft.jsch.SftpException
+import com.jcraft.jsch.UIKeyboardInteractive
+import com.jcraft.jsch.UserInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -23,7 +36,10 @@ import java.net.Socket
 import java.nio.charset.StandardCharsets
 import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.EnumSet
 import java.util.Locale
+import java.util.Properties
+import java.util.concurrent.TimeUnit
 
 enum class NasSubProtocol {
     FTP,
@@ -387,6 +403,36 @@ object RemoteStorageProtocolClient {
         return null
     }
 
+    fun probeSmb2Negotiate(host: String, port: Int): SmbNegotiateInfo? {
+        Socket().use { sock ->
+            sock.soTimeout = 4_000
+            sock.connect(InetSocketAddress(host, port), 4_000)
+            val out = sock.getOutputStream()
+            val input = BufferedInputStream(sock.getInputStream())
+            out.write(buildSmb2NegotiatePacket())
+            out.flush()
+
+            val nbHeader = ByteArray(4)
+            val readHdr = readFully(input, nbHeader, 4)
+            if (readHdr == 4) {
+                val payloadLen = ((nbHeader[1].toInt() and 0xFF) shl 16) or
+                    ((nbHeader[2].toInt() and 0xFF) shl 8) or
+                    (nbHeader[3].toInt() and 0xFF)
+                if (payloadLen in 68..32768) {
+                    val payload = ByteArray(payloadLen)
+                    val readBody = readFully(input, payload, payloadLen)
+                    if (readBody > 0) {
+                        val combined = ByteArray(4 + readBody)
+                        System.arraycopy(nbHeader, 0, combined, 0, 4)
+                        System.arraycopy(payload, 0, combined, 4, readBody)
+                        return parseSmb2NegotiateResponse(combined)
+                    }
+                }
+            }
+        }
+        return null
+    }
+
     suspend fun testSmbConnection(
         context: Context?,
         host: String,
@@ -399,8 +445,9 @@ object RemoteStorageProtocolClient {
         safTreeUri: String
     ): StorageConnectionTestResult = withContext(Dispatchers.IO) {
         val start = System.currentTimeMillis()
-        val cleanHost = host.trim()
+        val cleanHost = extractHost(host)
         val safePort = port.coerceIn(1, 65535)
+        val cleanShare = share.trim().trim('/', '\\')
         if (cleanHost.isBlank()) {
             return@withContext StorageConnectionTestResult(
                 success = false,
@@ -410,68 +457,169 @@ object RemoteStorageProtocolClient {
                 latencyMs = 0
             )
         }
+        if (cleanShare.isBlank()) {
+            return@withContext StorageConnectionTestResult(
+                success = false,
+                protocolLabel = "SMB / CIFS",
+                summary = "Missing SMB share name",
+                details = "Enter the exported Windows/Samba share name (e.g. recordings).",
+                latencyMs = 0
+            )
+        }
 
         try {
-            var negotiateInfo: SmbNegotiateInfo? = null
-            Socket().use { sock ->
-                sock.soTimeout = 4_000
-                sock.connect(InetSocketAddress(cleanHost, safePort), 4_000)
-                val out = sock.getOutputStream()
-                val input = BufferedInputStream(sock.getInputStream())
-                out.write(buildSmb2NegotiatePacket())
-                out.flush()
+            val negotiateInfo = probeSmb2Negotiate(cleanHost, safePort)
+            val smbConfig = SmbConfig.builder()
+                .withTimeout(8, TimeUnit.SECONDS)
+                .withSoTimeout(10, TimeUnit.SECONDS)
+                .build()
 
-                val nbHeader = ByteArray(4)
-                val readHdr = readFully(input, nbHeader, 4)
-                if (readHdr == 4) {
-                    val payloadLen = ((nbHeader[1].toInt() and 0xFF) shl 16) or
-                        ((nbHeader[2].toInt() and 0xFF) shl 8) or
-                        (nbHeader[3].toInt() and 0xFF)
-                    if (payloadLen in 68..32768) {
-                        val payload = ByteArray(payloadLen)
-                        val readBody = readFully(input, payload, payloadLen)
-                        if (readBody > 0) {
-                            val combined = ByteArray(4 + readBody)
-                            System.arraycopy(nbHeader, 0, combined, 0, 4)
-                            System.arraycopy(payload, 0, combined, 4, readBody)
-                            negotiateInfo = parseSmb2NegotiateResponse(combined)
+            SMBClient(smbConfig).use { client ->
+                client.connect(cleanHost, safePort).use { connection ->
+                    val auth = buildSmbAuthContext(username, password, workgroup)
+                    connection.authenticate(auth).use { session ->
+                        val connectedShare = session.connectShare(cleanShare)
+                        val diskShare = connectedShare as? DiskShare
+                            ?: throw IllegalStateException("'$cleanShare' is not a writable SMB disk share")
+                        diskShare.use { ds ->
+                            val cleanSub = subfolder.replace('/', '\\').trim('\\')
+                            val subExists = if (cleanSub.isBlank()) true else ds.folderExists(cleanSub)
+                            val latency = (System.currentTimeMillis() - start).toInt().coerceAtLeast(1)
+                            val dialect = negotiateInfo?.dialectLabel ?: "SMB2/3"
+                            val signingText = when {
+                                negotiateInfo?.signingRequired == true -> "Signing Required"
+                                negotiateInfo?.signingEnabled == true -> "Signing Supported"
+                                else -> "Standard Auth"
+                            }
+                            val authHint = if (username.isBlank()) "Anonymous" else "User '${username.trim()}'"
+                            val subNote = if (cleanSub.isBlank()) {
+                                "Share root writable"
+                            } else if (subExists) {
+                                "Subfolder '$cleanSub' exists"
+                            } else {
+                                "Subfolder '$cleanSub' will be created on upload"
+                            }
+                            val safWriteOk = checkSafTreeAccessible(context, safTreeUri)
+                            val safHint = if (safWriteOk) " • SAF Share mounted ✓" else ""
+
+                            StorageConnectionTestResult(
+                                success = true,
+                                protocolLabel = "SMB / CIFS",
+                                summary = "SMB Share Verified ($dialect • ${latency}ms)",
+                                details = "//$cleanHost/$cleanShare • $signingText • $authHint • $subNote$safHint",
+                                latencyMs = latency
+                            )
                         }
                     }
                 }
             }
-
-            val latency = (System.currentTimeMillis() - start).toInt().coerceAtLeast(1)
-            val safWriteOk = checkSafTreeAccessible(context, safTreeUri)
-            val signingText = when {
-                negotiateInfo?.signingRequired == true -> "Signing Required"
-                negotiateInfo?.signingEnabled == true -> "Signing Supported"
-                else -> "Signing Optional"
-            }
-            val dialect = negotiateInfo?.dialectLabel ?: "TCP Reachable ($safePort)"
-            val shareDesc = "//${cleanHost}/${share.trim().ifBlank { "share" }}/${subfolder.trim()}"
-            val authHint = if (username.isBlank()) "Guest / Anonymous" else "User '${username.trim()}' (${workgroup.ifBlank { "WORKGROUP" }})"
-            val safHint = if (safTreeUri.isNotBlank()) {
-                if (safWriteOk) " • Android Mounted SMB Folder: WRITABLE ✓" else " • Mounted Folder permission expired"
-            } else {
-                " • Tip: You can also attach an Android Files/SMB Document Provider or enable WebDAV/FTP on your NAS for direct auto-sync"
-            }
-
-            StorageConnectionTestResult(
-                success = true,
-                protocolLabel = "SMB / CIFS",
-                summary = "SMB Handshake OK ($dialect • ${latency}ms)",
-                details = "Target: $shareDesc • $signingText • $authHint$safHint",
-                latencyMs = latency
-            )
         } catch (e: Exception) {
             val latency = (System.currentTimeMillis() - start).toInt().coerceAtLeast(1)
             StorageConnectionTestResult(
                 success = false,
                 protocolLabel = "SMB / CIFS",
-                summary = "SMB Connection Failed (${latency}ms)",
-                details = "Could not reach $cleanHost:$safePort — ${e.localizedMessage ?: e.javaClass.simpleName}",
+                summary = "SMB Login / Share Failed (${latency}ms)",
+                details = "//$cleanHost:$safePort/$cleanShare — ${e.localizedMessage ?: e.javaClass.simpleName}",
                 latencyMs = latency
             )
+        }
+    }
+
+    suspend fun uploadViaSmb(
+        host: String,
+        port: Int,
+        share: String,
+        subfolder: String,
+        workgroup: String,
+        username: String,
+        password: String,
+        relativePath: String,
+        file: File
+    ): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cleanHost = extractHost(host)
+            val safePort = port.coerceIn(1, 65535)
+            val cleanShare = share.trim().trim('/', '\\')
+            require(cleanHost.isNotBlank()) { "SMB host is empty" }
+            require(cleanShare.isNotBlank()) { "SMB share name is empty" }
+            require(file.exists() && file.length() > 0L) { "Clip file missing or empty" }
+
+            val smbConfig = SmbConfig.builder()
+                .withTimeout(15, TimeUnit.SECONDS)
+                .withSoTimeout(30, TimeUnit.SECONDS)
+                .build()
+
+            SMBClient(smbConfig).use { client ->
+                client.connect(cleanHost, safePort).use { connection ->
+                    val auth = buildSmbAuthContext(username, password, workgroup)
+                    connection.authenticate(auth).use { session ->
+                        val connectedShare = session.connectShare(cleanShare)
+                        val diskShare = connectedShare as? DiskShare
+                            ?: throw IllegalStateException("'$cleanShare' is not a writable SMB disk share")
+                        diskShare.use { ds ->
+                            val cleanSub = subfolder.replace('\\', '/').trim('/')
+                            val cleanRel = relativePath.replace('\\', '/').trim('/')
+                            val fullRelUnix = listOf(cleanSub, cleanRel)
+                                .filter { it.isNotBlank() }
+                                .joinToString("/")
+                            val fullRelSmb = fullRelUnix.replace('/', '\\')
+                            val parentSmb = fullRelSmb.substringBeforeLast('\\', "")
+                            if (parentSmb.isNotBlank()) {
+                                ensureSmbDirectory(ds, parentSmb)
+                            }
+
+                            ds.openFile(
+                                fullRelSmb,
+                                EnumSet.of(AccessMask.GENERIC_WRITE, AccessMask.GENERIC_READ),
+                                null,
+                                SMB2ShareAccess.ALL,
+                                SMB2CreateDisposition.FILE_OVERWRITE_IF,
+                                null
+                            ).use { remoteFile ->
+                                remoteFile.outputStream.use { out ->
+                                    BufferedInputStream(file.inputStream()).use { input ->
+                                        input.copyTo(out)
+                                    }
+                                    out.flush()
+                                }
+                            }
+
+                            val remoteSize = ds.getFileInformation(fullRelSmb).standardInformation.endOfFile
+                            if (remoteSize != file.length()) {
+                                throw IllegalStateException(
+                                    "SMB upload size mismatch (local=${file.length()}, remote=$remoteSize)"
+                                )
+                            }
+
+                            "smb://$cleanHost:$safePort/$cleanShare/$fullRelUnix"
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun buildSmbAuthContext(
+        username: String,
+        password: String,
+        workgroup: String
+    ): AuthenticationContext {
+        val cleanUser = username.trim()
+        val domain = workgroup.trim().ifBlank { null }
+        return if (cleanUser.isBlank() && password.isBlank()) {
+            AuthenticationContext.anonymous()
+        } else {
+            AuthenticationContext(cleanUser, password.toCharArray(), domain)
+        }
+    }
+
+    private fun ensureSmbDirectory(share: DiskShare, smbRelativeDir: String) {
+        var current = ""
+        for (segment in smbRelativeDir.split('\\').filter { it.isNotBlank() }) {
+            current = if (current.isEmpty()) segment else "$current\\$segment"
+            if (!share.folderExists(current)) {
+                share.mkdir(current)
+            }
         }
     }
 
@@ -659,7 +807,7 @@ object RemoteStorageProtocolClient {
                         success = true,
                         protocolLabel = "SFTP / SSH",
                         summary = "SSH/SFTP Endpoint Reachable (${latency}ms)",
-                        details = "Server banner: $sshBanner (use WebDAV/FTP/S3/SAF for unattended auto-sync)",
+                        details = "Server banner: $sshBanner",
                         latencyMs = latency
                     )
                 } else {
@@ -682,6 +830,229 @@ object RemoteStorageProtocolClient {
                 latencyMs = latency
             )
         }
+    }
+
+    suspend fun testSftpConnection(
+        host: String,
+        port: Int,
+        username: String,
+        password: String,
+        baseDir: String
+    ): StorageConnectionTestResult = withContext(Dispatchers.IO) {
+        val start = System.currentTimeMillis()
+        val cleanHost = extractHost(host)
+        val safePort = port.coerceIn(1, 65535)
+        val cleanUser = username.trim()
+        if (cleanHost.isBlank()) {
+            return@withContext StorageConnectionTestResult(
+                success = false,
+                protocolLabel = "SFTP (SSH)",
+                summary = "Missing SFTP host or IP",
+                details = "Enter your NAS/server IP for SSH/SFTP port $safePort",
+                latencyMs = 0
+            )
+        }
+        if (cleanUser.isBlank()) {
+            return@withContext StorageConnectionTestResult(
+                success = false,
+                protocolLabel = "SFTP (SSH)",
+                summary = "Missing SFTP username",
+                details = "Enter SSH username and password (or PEM private key) for $cleanHost:$safePort",
+                latencyMs = 0
+            )
+        }
+
+        var session: Session? = null
+        var sftp: ChannelSftp? = null
+        try {
+            session = openSshSession(
+                host = cleanHost,
+                port = safePort,
+                username = cleanUser,
+                passwordOrKey = password,
+                timeoutMs = 8_000
+            )
+            sftp = (session.openChannel("sftp") as ChannelSftp).apply {
+                connect(8_000)
+            }
+            val pwd = runCatching { sftp.pwd() }.getOrDefault("/")
+            val targetNote = if (baseDir.isNotBlank()) " • Target: $baseDir" else ""
+            val latency = (System.currentTimeMillis() - start).toInt().coerceAtLeast(1)
+            StorageConnectionTestResult(
+                success = true,
+                protocolLabel = "SFTP (SSH)",
+                summary = "SFTP Login Verified (${latency}ms)",
+                details = "User '$cleanUser' • Home: $pwd$targetNote • SFTP v${sftp.serverVersion}",
+                latencyMs = latency
+            )
+        } catch (e: Exception) {
+            val latency = (System.currentTimeMillis() - start).toInt().coerceAtLeast(1)
+            StorageConnectionTestResult(
+                success = false,
+                protocolLabel = "SFTP (SSH)",
+                summary = "SFTP Login Failed (${latency}ms)",
+                details = "$cleanHost:$safePort — ${e.localizedMessage ?: e.javaClass.simpleName}",
+                latencyMs = latency
+            )
+        } finally {
+            runCatching { sftp?.disconnect() }
+            runCatching { session?.disconnect() }
+        }
+    }
+
+    suspend fun uploadViaSftp(
+        host: String,
+        port: Int,
+        username: String,
+        password: String,
+        baseDir: String,
+        relativePath: String,
+        file: File
+    ): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cleanHost = extractHost(host)
+            val safePort = port.coerceIn(1, 65535)
+            val cleanUser = username.trim()
+            require(cleanHost.isNotBlank()) { "SFTP host is empty" }
+            require(cleanUser.isNotBlank()) { "SFTP username is required" }
+            require(file.exists() && file.length() > 0L) { "Clip file missing or empty" }
+
+            var session: Session? = null
+            var sftp: ChannelSftp? = null
+            try {
+                session = openSshSession(
+                    host = cleanHost,
+                    port = safePort,
+                    username = cleanUser,
+                    passwordOrKey = password,
+                    timeoutMs = 20_000
+                )
+                sftp = (session.openChannel("sftp") as ChannelSftp).apply {
+                    connect(15_000)
+                }
+
+                val homeDir = runCatching { sftp.pwd() }.getOrDefault("/")
+                val cleanRel = relativePath.trim('/')
+                val relParts = cleanRel.split('/').filter { it.isNotBlank() }
+                val fileName = relParts.lastOrNull() ?: file.name
+                val relDirs = relParts.dropLast(1)
+
+                ensureAndEnterSftpDirectory(
+                    sftp = sftp,
+                    homeDir = homeDir,
+                    baseDir = baseDir.trim(),
+                    subDirs = relDirs
+                )
+
+                val finalDir = runCatching { sftp.pwd() }.getOrDefault("")
+                BufferedInputStream(file.inputStream()).use { input ->
+                    sftp.put(input, fileName, ChannelSftp.OVERWRITE)
+                }
+
+                val remoteSize = runCatching { sftp.lstat(fileName).size }.getOrNull()
+                if (remoteSize != null && remoteSize != file.length()) {
+                    throw IllegalStateException(
+                        "SFTP upload size mismatch (local=${file.length()}, remote=$remoteSize)"
+                    )
+                }
+
+                val remoteFullPath = "${finalDir.trimEnd('/')}/$fileName".trimStart('/')
+                "sftp://$cleanHost:$safePort/$remoteFullPath"
+            } finally {
+                runCatching { sftp?.disconnect() }
+                runCatching { session?.disconnect() }
+            }
+        }
+    }
+
+    private fun openSshSession(
+        host: String,
+        port: Int,
+        username: String,
+        passwordOrKey: String,
+        timeoutMs: Int
+    ): Session {
+        val jsch = JSch()
+        val trimmedSecret = passwordOrKey.trim()
+        val isPemKey = trimmedSecret.startsWith("-----BEGIN ")
+        if (isPemKey) {
+            jsch.addIdentity(
+                "omniview_sftp",
+                trimmedSecret.toByteArray(StandardCharsets.UTF_8),
+                null,
+                null
+            )
+        }
+
+        val session = jsch.getSession(username, host, port).apply {
+            if (!isPemKey) {
+                setPassword(passwordOrKey)
+            }
+            val cfg = Properties().apply {
+                put("StrictHostKeyChecking", "no")
+                put("PreferredAuthentications", if (isPemKey) "publickey,password,keyboard-interactive" else "password,keyboard-interactive,publickey")
+            }
+            setConfig(cfg)
+            userInfo = object : UserInfo, UIKeyboardInteractive {
+                override fun getPassphrase(): String? = null
+                override fun getPassword(): String = if (isPemKey) "" else passwordOrKey
+                override fun promptPassword(message: String?): Boolean = !isPemKey
+                override fun promptPassphrase(message: String?): Boolean = false
+                override fun promptYesNo(message: String?): Boolean = true
+                override fun showMessage(message: String?) {}
+                override fun promptKeyboardInteractive(
+                    destination: String?,
+                    name: String?,
+                    instruction: String?,
+                    prompt: Array<out String>?,
+                    echo: BooleanArray?
+                ): Array<String> = Array(prompt?.size ?: 0) { if (isPemKey) "" else passwordOrKey }
+            }
+            timeout = timeoutMs
+        }
+        session.connect(timeoutMs)
+        return session
+    }
+
+    private fun ensureAndEnterSftpDirectory(
+        sftp: ChannelSftp,
+        homeDir: String,
+        baseDir: String,
+        subDirs: List<String>
+    ) {
+        val baseSegments = baseDir.trim('/').split('/').filter { it.isNotBlank() }
+        val isAbsoluteBase = baseDir.startsWith("/")
+
+        fun walkCreating(startRoot: String?, segments: List<String>) {
+            if (startRoot != null) {
+                sftp.cd(startRoot)
+            }
+            for (seg in segments) {
+                val entered = try {
+                    sftp.cd(seg)
+                    true
+                } catch (_: SftpException) {
+                    false
+                }
+                if (!entered) {
+                    sftp.mkdir(seg)
+                    sftp.cd(seg)
+                }
+            }
+        }
+
+        if (isAbsoluteBase) {
+            try {
+                walkCreating("/", baseSegments + subDirs)
+                return
+            } catch (e: SftpException) {
+                // Non-chrooted SSH accounts often deny mkdir at OS root "/"; fall back inside user's homeDir.
+                if (e.id != ChannelSftp.SSH_FX_PERMISSION_DENIED && e.id != ChannelSftp.SSH_FX_FAILURE) {
+                    throw e
+                }
+            }
+        }
+        walkCreating(homeDir.ifBlank { "." }, baseSegments + subDirs)
     }
 
     fun parsePasvEndpoint(pasvResponse: String, fallbackHost: String): Pair<String, Int>? {

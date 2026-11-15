@@ -2,10 +2,6 @@ package com.example.engine
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.Rect
 import android.media.Image
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
@@ -35,9 +31,6 @@ import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -178,17 +171,17 @@ class CameraStreamRecorder(
                         }
                     }
 
-                    frameBitmap = liveBitmap ?: generateCameraFrame(
-                        camera = camera,
-                        width = width,
-                        height = height,
-                        frameIndex = frameIndex,
-                        backdrop = recorder.lastLiveFrame
-                    )
+                    val cachedFrame = recorder.lastLiveFrame
+                    frameBitmap = when {
+                        liveBitmap != null && !liveBitmap.isRecycled -> liveBitmap
+                        recorder.frameCount > 0 && cachedFrame != null && !cachedFrame.isRecycled ->
+                            runCatching { cachedFrame.copy(Bitmap.Config.ARGB_8888, false) }.getOrNull()
+                        else -> null
+                    }
 
                     val codec = recorder.codec
                     val muxer = recorder.muxer
-                    if (!recorder.initFailed && codec != null && muxer != null && !recorder.isStopping.get()) {
+                    if (frameBitmap != null && !recorder.initFailed && codec != null && muxer != null && !recorder.isStopping.get()) {
                         if (frameIndex == 0) {
                             runCatching {
                                 val syncBundle = Bundle().apply {
@@ -212,9 +205,6 @@ class CameraStreamRecorder(
                         )
                         frameIndex++
                         recorder.frameCount = frameIndex
-                    } else if (recorder.initFailed) {
-                        // Track elapsed frames even if hardware codec refused initialization
-                        frameIndex++
                     }
                 } catch (t: Throwable) {
                     Log.w("CameraStreamRecorder", "Record loop frame error for ${camera.id}: ${t.message}")
@@ -384,47 +374,36 @@ class CameraStreamRecorder(
 
                 if (!recorder.initFailed && codec != null && muxer != null) {
                     try {
-                        var safetyFrames = recorder.frameCount
-                        while (safetyFrames < 3) {
-                            val fallbackBmp = generateCameraFrame(
-                                camera = recorder.camera,
-                                width = recorder.width,
-                                height = recorder.height,
-                                frameIndex = safetyFrames,
-                                backdrop = recorder.lastLiveFrame
-                            )
-                            val pts = maxOf(0L, recorder.lastPresentationTimeUs + 100_000L)
-                            recorder.lastPresentationTimeUs = pts
-                            if (safetyFrames == 0) {
-                                runCatching {
-                                    codec.setParameters(Bundle().apply {
-                                        putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
-                                    })
+                        val lastReal = recorder.lastLiveFrame
+                        if (recorder.frameCount > 0 && lastReal != null && !lastReal.isRecycled) {
+                            var safetyFrames = recorder.frameCount
+                            while (safetyFrames < 3) {
+                                val pts = maxOf(0L, recorder.lastPresentationTimeUs + 100_000L)
+                                recorder.lastPresentationTimeUs = pts
+                                encodeFrame(codec, muxer, lastReal, recorder.width, recorder.height, pts, recorder)
+                                safetyFrames++
+                                recorder.frameCount = safetyFrames
+                            }
+                        }
+
+                        if (recorder.frameCount > 0) {
+                            if (recorder.glInputSurface != null && recorder.inputSurface != null) {
+                                codec.signalEndOfInputStream()
+                            } else {
+                                val inputIndex = codec.dequeueInputBuffer(20_000)
+                                if (inputIndex >= 0) {
+                                    val eosPts = (recorder.lastPresentationTimeUs + 100_000L).coerceAtLeast(0L)
+                                    codec.queueInputBuffer(
+                                        inputIndex,
+                                        0,
+                                        0,
+                                        eosPts,
+                                        MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                                    )
                                 }
                             }
-                            encodeFrame(codec, muxer, fallbackBmp, recorder.width, recorder.height, pts, recorder)
-                            if (!fallbackBmp.isRecycled) fallbackBmp.recycle()
-                            safetyFrames++
-                            recorder.frameCount = safetyFrames
+                            drainCodec(codec, muxer, recorder, endOfStream = true)
                         }
-
-                        if (recorder.glInputSurface != null && recorder.inputSurface != null) {
-                            codec.signalEndOfInputStream()
-                        } else {
-                            val inputIndex = codec.dequeueInputBuffer(20_000)
-                            if (inputIndex >= 0) {
-                                val eosPts = (recorder.lastPresentationTimeUs + 100_000L).coerceAtLeast(0L)
-                                codec.queueInputBuffer(
-                                    inputIndex,
-                                    0,
-                                    0,
-                                    eosPts,
-                                    MediaCodec.BUFFER_FLAG_END_OF_STREAM
-                                )
-                            }
-                        }
-
-                        drainCodec(codec, muxer, recorder, endOfStream = true)
 
                         if (recorder.isMuxerStarted) {
                             muxer.stop()
@@ -449,8 +428,17 @@ class CameraStreamRecorder(
                 }
                 recorder.lastLiveFrame = null
 
-                ensurePlayableClipFile(recorder.outputFile)
-                recorder.outputFile.length()
+                if (recorder.frameCount > 0 &&
+                    recorder.isMuxerStarted &&
+                    StorageTimelineEngine.isPlayableClipFile(recorder.outputFile)
+                ) {
+                    recorder.outputFile.length()
+                } else {
+                    runCatching {
+                        if (recorder.outputFile.exists()) recorder.outputFile.delete()
+                    }
+                    0L
+                }
             }
         } finally {
             runCatching { recorder.encoderDispatcher.close() }
@@ -606,74 +594,6 @@ class CameraStreamRecorder(
         }
     }
 
-    private fun generateCameraFrame(
-        camera: CameraEntity,
-        width: Int,
-        height: Int,
-        frameIndex: Int,
-        backdrop: Bitmap?
-    ): Bitmap {
-        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bitmap)
-
-        if (backdrop != null && !backdrop.isRecycled) {
-            canvas.drawBitmap(backdrop, null, Rect(0, 0, width, height), null)
-            canvas.drawColor(Color.argb(95, 6, 12, 20))
-        } else {
-            canvas.drawColor(Color.rgb(10, 16, 26))
-        }
-
-        val paint = Paint().apply {
-            isAntiAlias = true
-        }
-
-        paint.color = Color.rgb(0, 229, 255)
-        paint.textSize = 22f
-        paint.isFakeBoldText = true
-        canvas.drawText("CAM: ${camera.name}", 24f, 44f, paint)
-
-        paint.color = Color.rgb(0, 230, 118)
-        paint.textSize = 15f
-        paint.isFakeBoldText = false
-        val ipText = extractHostFromUrl(camera.rtspUrl)
-        canvas.drawText("● REC  IP: $ipText", 24f, 74f, paint)
-
-        val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
-        paint.color = Color.WHITE
-        canvas.drawText("TIME: ${dateFormat.format(Date())}", 24f, 102f, paint)
-
-        paint.color = Color.rgb(176, 190, 197)
-        canvas.drawText("FRAME: #$frameIndex", 24f, 128f, paint)
-
-        return bitmap
-    }
-
-    private fun extractHostFromUrl(rawUrl: String): String {
-        return try {
-            if (rawUrl.contains("@")) {
-                rawUrl.substringAfter("@").substringBefore("/").substringBefore(":")
-            } else if (rawUrl.contains("://")) {
-                rawUrl.substringAfter("://").substringBefore("/").substringBefore(":")
-            } else {
-                rawUrl
-            }
-        } catch (_: Exception) {
-            "192.168.1.148"
-        }
-    }
-
-    private fun ensurePlayableClipFile(outputFile: File) {
-        if (!outputFile.exists() || outputFile.length() == 0L) {
-            outputFile.parentFile?.mkdirs()
-            val mp4Header = byteArrayOf(
-                0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70,
-                0x69, 0x73, 0x6F, 0x6D, 0x00, 0x00, 0x02, 0x00,
-                0x69, 0x73, 0x6F, 0x6D, 0x69, 0x73, 0x6F, 0x32,
-                0x61, 0x76, 0x63, 0x31, 0x6D, 0x70, 0x34, 0x31
-            )
-            outputFile.writeBytes(mp4Header)
-        }
-    }
 
     /**
      * Dedicated OpenGL ES 2.0 + EGL14 renderer bound to MediaCodec's hardware input Surface.

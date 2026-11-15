@@ -188,14 +188,6 @@ fun MotionAlertsScreen(
                             color = Color.White.copy(alpha = 0.7f),
                             fontSize = 14.sp
                         )
-                        Spacer(modifier = Modifier.height(12.dp))
-                        TextButton(
-                            onClick = {
-                                cameras.firstOrNull()?.let { viewModel.triggerMotionAlertManually(it) }
-                            }
-                        ) {
-                            Text(stringResource(R.string.alerts_trigger_test), color = NeonCyan)
-                        }
                     }
                 }
             } else {

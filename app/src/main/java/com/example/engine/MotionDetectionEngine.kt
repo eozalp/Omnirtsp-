@@ -3,11 +3,14 @@ package com.example.engine
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import androidx.core.app.NotificationCompat
 import com.example.MainActivity
 import com.example.R
@@ -76,19 +79,26 @@ class MotionDetectionEngine(
         }
     }
 
+    fun processVideoFrame(camera: CameraEntity, frameBitmap: Bitmap) {
+        if (!camera.isMotionDetectionEnabled) return
+        scope.launch {
+            processVideoFrameSuspend(camera, frameBitmap)
+        }
+    }
+
     /**
      * Real-time Computer Vision Frame Differencing Algorithm:
      * Analyzes video frames pixel-by-pixel using luminance delta comparison.
      */
-    fun processVideoFrame(camera: CameraEntity, frameBitmap: Bitmap) {
-        if (!camera.isMotionDetectionEnabled) return
-
-        scope.launch {
+    suspend fun processVideoFrameSuspend(camera: CameraEntity, frameBitmap: Bitmap) {
+        if (!camera.isMotionDetectionEnabled || frameBitmap.isRecycled) return
+        withContext(Dispatchers.Default) {
+            var scaled: Bitmap? = null
             try {
                 // Downscale to 64x36 for high-performance low-overhead pixel differencing
                 val width = 64
                 val height = 36
-                val scaled = Bitmap.createScaledBitmap(frameBitmap, width, height, false)
+                scaled = Bitmap.createScaledBitmap(frameBitmap, width, height, false)
                 val totalPixels = width * height
                 val currentLuminance = IntArray(totalPixels)
                 val pixels = IntArray(totalPixels)
@@ -137,22 +147,67 @@ class MotionDetectionEngine(
                         )
                     }
                 }
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 // Frame processing error handling
+            } finally {
+                val createdScaled = scaled
+                if (createdScaled != null && createdScaled !== frameBitmap && !createdScaled.isRecycled) {
+                    createdScaled.recycle()
+                }
             }
         }
+    }
+
+    fun saveManualSnapshot(camera: CameraEntity, bitmap: Bitmap, exportToGallery: Boolean = true): File? {
+        if (bitmap.isRecycled) return null
+        val file = saveSnapshotToFile(camera.id, bitmap) ?: return null
+        if (exportToGallery) {
+            exportSnapshotToDevicePictures(file)
+        }
+        return file
     }
 
     private fun saveSnapshotToFile(cameraId: String, bitmap: Bitmap): File? {
         return try {
             val file = File(ensureSnapshotsDirectory(), "snap_${cameraId}_${System.currentTimeMillis()}.jpg")
             FileOutputStream(file).use { out ->
-                bitmap.compress(Bitmap.CompressFormat.JPEG, 85, out)
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
+                out.flush()
             }
-            file
-        } catch (e: Exception) {
+            file.takeIf { it.exists() && it.length() > 0L }
+        } catch (_: Exception) {
             null
         }
+    }
+
+    private fun exportSnapshotToDevicePictures(sourceFile: File) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.Images.Media.DISPLAY_NAME, sourceFile.name)
+                    put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                    put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/OmniView")
+                    put(MediaStore.Images.Media.IS_PENDING, 1)
+                }
+                val resolver = context.contentResolver
+                val collection = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                val uri = resolver.insert(collection, values) ?: return
+                resolver.openOutputStream(uri)?.use { out ->
+                    sourceFile.inputStream().use { input -> input.copyTo(out) }
+                    out.flush()
+                }
+                values.clear()
+                values.put(MediaStore.Images.Media.IS_PENDING, 0)
+                resolver.update(uri, values, null, null)
+            } else {
+                val dir = File(
+                    context.getExternalFilesDir(Environment.DIRECTORY_PICTURES) ?: context.filesDir,
+                    "OmniView"
+                )
+                if (!dir.exists()) dir.mkdirs()
+                sourceFile.copyTo(File(dir, sourceFile.name), overwrite = true)
+            }
+        } catch (_: Exception) {}
     }
 
     fun triggerMotionAlert(
