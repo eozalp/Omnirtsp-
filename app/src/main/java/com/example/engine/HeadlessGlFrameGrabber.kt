@@ -70,6 +70,21 @@ class HeadlessGlFrameGrabber(
         private set
 
     private val texMatrix = FloatArray(16)
+    private val quadCoords: FloatBuffer = ByteBuffer.allocateDirect(16 * 4)
+        .order(ByteOrder.nativeOrder())
+        .asFloatBuffer()
+        .apply {
+            // x, y, u, v (triangle strip)
+            put(
+                floatArrayOf(
+                    -1f, -1f, 0f, 0f,
+                    1f, -1f, 1f, 0f,
+                    -1f, 1f, 0f, 1f,
+                    1f, 1f, 1f, 1f
+                )
+            )
+            position(0)
+        }
     private var readBuffer: ByteBuffer? = null
     private var flippedRowBuffer: ByteArray? = null
     private var initError: Throwable? = null
@@ -126,12 +141,13 @@ class HeadlessGlFrameGrabber(
             val drawLatch = CountDownLatch(1)
             glHandler.post {
                 try {
-                    if (!released.get() && hasQueuedNewFrame) {
+                    if (!released.get() && hasQueuedNewFrame && eglDisplay != EGL14.EGL_NO_DISPLAY) {
+                        EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
                         surfaceTexture?.updateTexImage()
                         hasQueuedNewFrame = false
                         renderAndReadPixelsLocked()
                     }
-                } catch (_: Exception) {
+                } catch (_: Throwable) {
                 } finally {
                     drawLatch.countDown()
                 }
@@ -157,7 +173,7 @@ class HeadlessGlFrameGrabber(
                 snapshotCopy.recycle()
             }
             scaled
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
             snapshotCopy
         }
     }
@@ -257,7 +273,9 @@ class HeadlessGlFrameGrabber(
 
     private fun onFrameAvailableOnGlThread() {
         val st = surfaceTexture ?: return
+        if (released.get() || eglDisplay == EGL14.EGL_NO_DISPLAY) return
         try {
+            EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
             st.updateTexImage()
             val now = System.currentTimeMillis()
             val hasFirst = hasReceivedFirstFrame
@@ -276,7 +294,7 @@ class HeadlessGlFrameGrabber(
             } else {
                 hasQueuedNewFrame = true
             }
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
         }
     }
 
@@ -284,6 +302,7 @@ class HeadlessGlFrameGrabber(
         val st = surfaceTexture ?: return
         val buf = readBuffer ?: return
         val dstBytes = flippedRowBuffer ?: return
+        if (eglDisplay == EGL14.EGL_NO_DISPLAY) return
 
         EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
         st.getTransformMatrix(texMatrix)
@@ -298,12 +317,12 @@ class HeadlessGlFrameGrabber(
         GLES20.glUniform1i(uTextureLoc, 0)
         GLES20.glUniformMatrix4fv(uTexMatrixLoc, 1, false, texMatrix, 0)
 
-        QUAD_COORDS.position(0)
-        GLES20.glVertexAttribPointer(aPositionLoc, 2, GLES20.GL_FLOAT, false, 4 * 4, QUAD_COORDS)
+        quadCoords.position(0)
+        GLES20.glVertexAttribPointer(aPositionLoc, 2, GLES20.GL_FLOAT, false, 4 * 4, quadCoords)
         GLES20.glEnableVertexAttribArray(aPositionLoc)
 
-        QUAD_COORDS.position(2)
-        GLES20.glVertexAttribPointer(aTexCoordLoc, 2, GLES20.GL_FLOAT, false, 4 * 4, QUAD_COORDS)
+        quadCoords.position(2)
+        GLES20.glVertexAttribPointer(aTexCoordLoc, 2, GLES20.GL_FLOAT, false, 4 * 4, quadCoords)
         GLES20.glEnableVertexAttribArray(aTexCoordLoc)
 
         GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
@@ -381,22 +400,6 @@ class HeadlessGlFrameGrabber(
     companion object {
         private const val CONSUMER_ACTIVE_WINDOW_MS = 6_000L
         private const val MIN_CAPTURE_INTERVAL_MS = 85L
-
-        private val QUAD_COORDS: FloatBuffer = ByteBuffer.allocateDirect(16 * 4)
-            .order(ByteOrder.nativeOrder())
-            .asFloatBuffer()
-            .apply {
-                // x, y, u, v (triangle strip)
-                put(
-                    floatArrayOf(
-                        -1f, -1f, 0f, 0f,
-                        1f, -1f, 1f, 0f,
-                        -1f, 1f, 0f, 1f,
-                        1f, 1f, 1f, 1f
-                    )
-                )
-                position(0)
-            }
 
         private const val VERTEX_SHADER = """
             attribute vec4 aPosition;

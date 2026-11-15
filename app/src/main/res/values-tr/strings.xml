@@ -603,4 +603,14 @@
     <string name="storage_delete_after_upload_sub">Uzak yükleme HTTP/FTP OK ile bittiğinde telefon depolamasını boşaltır</string>
     <string name="storage_save_options_btn">Depolama Seçeneklerini Kaydet</string>
     <string name="storage_options_saved_msg">Uzak depolama seçenekleri kaydedildi</string>
+
+    <!-- Uygulamayı Tamamen Kapatma ve Aktif Kayıt Uyarısı -->
+    <string name="exit_app_btn_desc">Uygulamayı tamamen kapat</string>
+    <string name="exit_app_btn_label">Uygulamayı Tamamen Kapat</string>
+    <string name="exit_app_dialog_title">Uygulama Tamamen Kapatılsın mı?</string>
+    <string name="exit_app_dialog_body">Tüm canlı kamera yayınları, Uzak Merkez ve arka plan izleme servisleri tamamen durdurulacaktır.</string>
+    <string name="exit_app_recording_warning">Uyarı: Şu anda %1$d kamerada kayıt devam ediyor! Şimdi kapatırsanız aktif kayıtlar durdurulup kaydedilecektir. Kapatmak istediğinize emin misiniz?</string>
+    <string name="exit_app_confirm_btn">Uygulamayı Kapat</string>
+    <string name="exit_app_closing_progress">Kayıtlar kaydediliyor ve kapatılıyor…</string>
+    <string name="keepalive_notif_active_rec">Arka plan izleme etkin • %1$d kayıt devam ediyor</string>
 </resources>

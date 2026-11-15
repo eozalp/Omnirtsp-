@@ -216,49 +216,62 @@ class CameraDiscoveryEngine(
 
     private fun runWsDiscovery(localIpv4s: List<String>): List<DiscoveredCamera> {
         val found = LinkedHashMap<String, DiscoveredCamera>()
-        val probeXml = buildWsDiscoveryProbeXml(UUID.randomUUID().toString())
-        val payload = probeXml.toByteArray(Charsets.UTF_8)
+        val payload = buildWsDiscoveryProbeXml(UUID.randomUUID().toString()).toByteArray(Charsets.UTF_8)
         val multicastAddr = InetAddress.getByName("239.255.255.250")
 
-        for (localIp in localIpv4s) {
-            var socket: DatagramSocket? = null
-            try {
-                socket = DatagramSocket(0, InetAddress.getByName(localIp)).apply {
-                    soTimeout = 450
-                    broadcast = true
-                }
-                val packet = DatagramPacket(payload, payload.size, multicastAddr, 3702)
-                socket.send(packet)
-
-                // Send also subnet broadcast on 3702 as some cameras answer broadcast instead of multicast
-                val parts = localIp.split(".")
-                if (parts.size == 4) {
-                    runCatching {
-                        val bcast = InetAddress.getByName("${parts[0]}.${parts[1]}.${parts[2]}.255")
-                        socket.send(DatagramPacket(payload, payload.size, bcast, 3702))
-                    }
-                }
-
-                val deadline = System.currentTimeMillis() + 1800L
-                val buf = ByteArray(16384)
-                while (System.currentTimeMillis() < deadline) {
-                    val recv = DatagramPacket(buf, buf.size)
-                    try {
-                        socket.receive(recv)
-                        val senderIp = recv.address?.hostAddress ?: continue
-                        val xml = String(recv.data, 0, recv.length, Charsets.UTF_8)
-                        parseWsDiscoveryResponse(xml, senderIp)?.let { cam ->
-                            found[cam.ipAddress] = cam
-                        }
-                    } catch (_: SocketTimeoutException) {
-                        // Continue until overall deadline expires
-                    }
-                }
-            } catch (_: Exception) {
-                // Interface may disallow multicast UDP
-            } finally {
-                runCatching { socket?.close() }
+        var socket: DatagramSocket? = null
+        try {
+            // Wildcard UDP socket ensures replies from all subnet cameras arrive on Android Wi-Fi
+            socket = DatagramSocket(0).apply {
+                soTimeout = 350
+                broadcast = true
             }
+
+            fun sendProbesOnce() {
+                runCatching {
+                    socket.send(DatagramPacket(payload, payload.size, multicastAddr, 3702))
+                }
+                for (localIp in localIpv4s) {
+                    val parts = localIp.split(".")
+                    if (parts.size == 4) {
+                        runCatching {
+                            val bcast = InetAddress.getByName("${parts[0]}.${parts[1]}.${parts[2]}.255")
+                            socket.send(DatagramPacket(payload, payload.size, bcast, 3702))
+                        }
+                    }
+                }
+                runCatching {
+                    val globalBcast = InetAddress.getByName("255.255.255.255")
+                    socket.send(DatagramPacket(payload, payload.size, globalBcast, 3702))
+                }
+            }
+
+            sendProbesOnce()
+            var secondProbeSent = false
+            val start = System.currentTimeMillis()
+            val deadline = start + 2200L
+            val buf = ByteArray(16384)
+            while (System.currentTimeMillis() < deadline) {
+                if (!secondProbeSent && System.currentTimeMillis() - start >= 350L) {
+                    sendProbesOnce()
+                    secondProbeSent = true
+                }
+                val recv = DatagramPacket(buf, buf.size)
+                try {
+                    socket.receive(recv)
+                    val senderIp = recv.address?.hostAddress ?: continue
+                    val xml = String(recv.data, 0, recv.length, Charsets.UTF_8)
+                    parseWsDiscoveryResponse(xml, senderIp)?.let { cam ->
+                        found[cam.ipAddress] = cam
+                    }
+                } catch (_: SocketTimeoutException) {
+                    // Continue until overall deadline expires
+                }
+            }
+        } catch (_: Exception) {
+            // Network may disallow multicast UDP
+        } finally {
+            runCatching { socket?.close() }
         }
         return found.values.toList()
     }
@@ -269,7 +282,7 @@ class CameraDiscoveryEngine(
             .distinct()
             .take(512)
 
-        val semaphore = Semaphore(48)
+        val semaphore = Semaphore(64)
         hostsToScan.map { ip ->
             async(Dispatchers.IO) {
                 semaphore.withPermit {
@@ -281,12 +294,13 @@ class CameraDiscoveryEngine(
 
     private fun probeHostTcp(ip: String): DiscoveredCamera? {
         val openRtspPort = when {
-            isTcpPortOpen(ip, 554, 240) -> 554
-            isTcpPortOpen(ip, 8554, 240) -> 8554
+            isTcpPortOpen(ip, 554, 320) -> 554
+            isTcpPortOpen(ip, 8554, 300) -> 8554
+            isTcpPortOpen(ip, 10554, 260) -> 10554
             else -> null
         }
 
-        // Check ONVIF HTTP ports only if RTSP port is open OR check standard ONVIF port 8000/80 quickly if RTSP was closed
+        // Check ONVIF HTTP ports when RTSP is open, or probe ONVIF SOAP endpoints for non-standard RTSP ports
         var discoveredOnvifPort: Int? = null
         var bannerHint: BrandHint? = null
 
@@ -294,15 +308,14 @@ class CameraDiscoveryEngine(
             val banner = readRtspOptionsBanner(ip, openRtspPort)
             bannerHint = detectBrandHint(banner)
             for (port in listOf(80, 8000, 8080, 2020, 8899)) {
-                if (isTcpPortOpen(ip, port, 180)) {
+                if (isTcpPortOpen(ip, port, 240)) {
                     discoveredOnvifPort = port
                     break
                 }
             }
         } else {
-            // Some cameras expose ONVIF on 8000 or 2020 even if RTSP uses non-standard port
-            for (port in listOf(8000, 2020, 8899)) {
-                if (isTcpPortOpen(ip, port, 180)) {
+            for (port in listOf(8000, 2020, 8899, 80, 8080)) {
+                if (isTcpPortOpen(ip, port, 220)) {
                     if (looksLikeOnvifEndpoint(ip, port)) {
                         discoveredOnvifPort = port
                         break

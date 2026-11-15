@@ -1,7 +1,10 @@
 package com.example
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -9,7 +12,9 @@ import androidx.activity.compose.LocalActivityResultRegistryOwner
 import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -43,6 +48,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -52,6 +58,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -79,6 +86,9 @@ class MainActivity : ComponentActivity() {
     private val viewModel: CameraViewModel by viewModels()
     private var isSystemPiP by mutableStateOf(false)
 
+    private val notificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { _ -> }
+
     override fun attachBaseContext(newBase: Context) {
         super.attachBaseContext(AppLocaleManager.wrapContext(newBase))
     }
@@ -96,100 +106,121 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        requestNotificationPermissionIfNeeded()
 
         setContent {
             val selectedLanguageTag by viewModel.selectedLanguageTag.collectAsState()
             val baseConfig = LocalConfiguration.current
-            val localizedConfig = remember(selectedLanguageTag, baseConfig) {
-                AppLocaleManager.applyLocaleToResources(this@MainActivity, selectedLanguageTag)
+            val localizedContext = remember(selectedLanguageTag, baseConfig) {
+                AppLocaleManager.createLocalizedContextWrapper(this@MainActivity, selectedLanguageTag)
+            }
+            val localizedConfig = remember(localizedContext) {
+                Configuration(localizedContext.resources.configuration)
             }
 
             CompositionLocalProvider(
+                LocalContext provides localizedContext,
                 LocalConfiguration provides localizedConfig,
                 LocalActivityResultRegistryOwner provides this@MainActivity,
                 LocalOnBackPressedDispatcherOwner provides this@MainActivity
             ) {
                 MyApplicationTheme {
-                    if (isSystemPiP) {
-                    // System PiP minimal viewer: shows active floating cameras (or fullscreen/first camera)
-                    val cameras by viewModel.cameras.collectAsState()
-                    val floatingWindows by viewModel.floatingWindows.collectAsState()
-                    val selectedFullscreen by viewModel.selectedFullscreenCamera.collectAsState()
+                    key(selectedLanguageTag) {
+                        if (isSystemPiP) {
+                            // System PiP minimal viewer: shows active floating cameras (or fullscreen/first camera)
+                            val cameras by viewModel.cameras.collectAsState()
+                            val floatingWindows by viewModel.floatingWindows.collectAsState()
+                            val selectedFullscreen by viewModel.selectedFullscreenCamera.collectAsState()
 
-                    val pipCameras = remember(cameras, floatingWindows, selectedFullscreen) {
-                        if (floatingWindows.isNotEmpty()) {
-                            floatingWindows
-                                .sortedBy { it.zIndex }
-                                .mapNotNull { win -> cameras.find { it.id == win.cameraId } }
-                        } else {
-                            listOfNotNull(selectedFullscreen ?: cameras.firstOrNull())
-                        }
-                    }
+                            val pipCameras = remember(cameras, floatingWindows, selectedFullscreen) {
+                                if (floatingWindows.isNotEmpty()) {
+                                    floatingWindows
+                                        .sortedBy { it.zIndex }
+                                        .mapNotNull { win -> cameras.find { it.id == win.cameraId } }
+                                } else {
+                                    listOfNotNull(selectedFullscreen ?: cameras.firstOrNull())
+                                }
+                            }
 
-                    if (pipCameras.size == 1) {
-                        val targetCamera = pipCameras.first()
-                        val initialPlayer = remember(targetCamera.id) {
-                            viewModel.streamManager.getOrCreatePlayer(targetCamera)
-                        }
-                        val reactivePlayer by viewModel.streamManager.getPlayerFlow(targetCamera.id).collectAsState()
-                        val player = reactivePlayer ?: initialPlayer
-                        val telemetry by viewModel.streamManager.getTelemetryFlow(targetCamera.id).collectAsState()
-                        RtspVideoPlayer(
-                            camera = targetCamera,
-                            player = player,
-                            telemetry = telemetry,
-                            rotationDegrees = targetCamera.rotationDegrees,
-                            showControlsOverlay = false,
-                            showTechnicalDetails = false,
-                            compactMode = true,
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    } else if (pipCameras.size > 1) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .background(Color.Black)
-                        ) {
-                            pipCameras.chunked(2).forEach { rowCams ->
-                                Row(
+                            if (pipCameras.size == 1) {
+                                val targetCamera = pipCameras.first()
+                                val player by viewModel.streamManager.getPlayerFlow(targetCamera.id).collectAsState()
+                                LaunchedEffect(targetCamera.id, targetCamera.rtspUrl) {
+                                    viewModel.streamManager.getOrCreatePlayer(targetCamera)
+                                }
+                                val telemetry by viewModel.streamManager.getTelemetryFlow(targetCamera.id).collectAsState()
+                                RtspVideoPlayer(
+                                    camera = targetCamera,
+                                    player = player,
+                                    telemetry = telemetry,
+                                    rotationDegrees = targetCamera.rotationDegrees,
+                                    showControlsOverlay = false,
+                                    showTechnicalDetails = false,
+                                    compactMode = true,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            } else if (pipCameras.size > 1) {
+                                Column(
                                     modifier = Modifier
-                                        .weight(1f)
-                                        .fillMaxWidth()
+                                        .fillMaxSize()
+                                        .background(Color.Black)
                                 ) {
-                                    rowCams.forEach { cam ->
-                                        key(cam.id) {
-                                            val initialPlayer = remember(cam.id) {
-                                                viewModel.streamManager.getOrCreatePlayer(cam)
-                                            }
-                                            val reactivePlayer by viewModel.streamManager.getPlayerFlow(cam.id).collectAsState()
-                                            val player = reactivePlayer ?: initialPlayer
-                                            val telemetry by viewModel.streamManager.getTelemetryFlow(cam.id).collectAsState()
-                                            Box(
-                                                modifier = Modifier
-                                                    .weight(1f)
-                                                    .fillMaxHeight()
-                                            ) {
-                                                RtspVideoPlayer(
-                                                    camera = cam,
-                                                    player = player,
-                                                    telemetry = telemetry,
-                                                    rotationDegrees = cam.rotationDegrees,
-                                                    showControlsOverlay = false,
-                                                    showTechnicalDetails = false,
-                                                    compactMode = true,
-                                                    modifier = Modifier.fillMaxSize()
-                                                )
+                                    pipCameras.chunked(2).forEach { rowCams ->
+                                        Row(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .fillMaxWidth()
+                                        ) {
+                                            rowCams.forEach { cam ->
+                                                key(cam.id) {
+                                                    val player by viewModel.streamManager.getPlayerFlow(cam.id).collectAsState()
+                                                    LaunchedEffect(cam.id, cam.rtspUrl) {
+                                                        viewModel.streamManager.getOrCreatePlayer(cam)
+                                                    }
+                                                    val telemetry by viewModel.streamManager.getTelemetryFlow(cam.id).collectAsState()
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .weight(1f)
+                                                            .fillMaxHeight()
+                                                    ) {
+                                                        RtspVideoPlayer(
+                                                            camera = cam,
+                                                            player = player,
+                                                            telemetry = telemetry,
+                                                            rotationDegrees = cam.rotationDegrees,
+                                                            showControlsOverlay = false,
+                                                            showTechnicalDetails = false,
+                                                            compactMode = true,
+                                                            modifier = Modifier.fillMaxSize()
+                                                        )
+                                                    }
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
+                        } else {
+                            OmniViewApp(viewModel = viewModel)
                         }
                     }
-                } else {
-                    OmniViewApp(viewModel = viewModel)
                 }
             }
+        }
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+        val prefs = getSharedPreferences("omniview_perm_prefs", Context.MODE_PRIVATE)
+        if (!prefs.getBoolean("asked_post_notifications", false)) {
+            prefs.edit().putBoolean("asked_post_notifications", true).apply()
+            runCatching {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
             }
         }
     }
@@ -452,9 +483,10 @@ fun OmniViewApp(viewModel: CameraViewModel) {
                 val cam = cameras.find { it.id == winState.cameraId }
                 if (cam != null) {
                     key(cam.id) {
-                        val initialPlayer = remember(cam.id) { viewModel.streamManager.getOrCreatePlayer(cam) }
-                        val reactivePlayer by viewModel.streamManager.getPlayerFlow(cam.id).collectAsState()
-                        val player = reactivePlayer ?: initialPlayer
+                        val player by viewModel.streamManager.getPlayerFlow(cam.id).collectAsState()
+                        LaunchedEffect(cam.id, cam.rtspUrl) {
+                            viewModel.streamManager.getOrCreatePlayer(cam)
+                        }
                         val telemetry by viewModel.streamManager.getTelemetryFlow(cam.id).collectAsState()
 
                         FloatingCameraWindow(

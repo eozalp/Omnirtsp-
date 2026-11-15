@@ -2,7 +2,10 @@ package com.example.i18n
 
 import android.app.LocaleManager
 import android.content.Context
+import android.content.ContextWrapper
+import android.content.res.AssetManager
 import android.content.res.Configuration
+import android.content.res.Resources
 import android.os.Build
 import android.os.LocaleList
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -85,14 +88,32 @@ object AppLocaleManager {
         return Configuration(res.configuration)
     }
 
-    fun getEffectiveLocale(context: Context): Locale {
-        val tag = getSelectedTag(context)
+    fun createLocalizedContextWrapper(base: Context, tag: String = getSelectedTag(base)): Context {
+        val systemLang = readSystemLanguage(base)
+        val effectiveLang = resolveEffectiveLanguage(tag, systemLang)
+        val locale = Locale(effectiveLang)
+        Locale.setDefault(locale)
+        val config = Configuration(base.resources.configuration).apply {
+            setLocale(locale)
+            setLayoutDirection(locale)
+        }
+        val localizedRes = base.createConfigurationContext(config).resources
+        // Also keep base activity resources synced for callers using Resources directly
+        applyLocaleToResources(base, tag)
+        return object : ContextWrapper(base) {
+            override fun getResources(): Resources = localizedRes
+            override fun getAssets(): AssetManager = localizedRes.assets
+        }
+    }
+
+    fun getEffectiveLocale(context: Context, tag: String = getSelectedTag(context)): Locale {
         val systemLang = readSystemLanguage(context)
         val effective = resolveEffectiveLanguage(tag, systemLang)
         return Locale(effective)
     }
 
-    fun isTurkish(context: Context): Boolean = getEffectiveLocale(context).language == LANG_TURKISH
+    fun isTurkish(context: Context, tag: String = getSelectedTag(context)): Boolean =
+        getEffectiveLocale(context, tag).language == LANG_TURKISH
 
     fun getString(context: Context, resId: Int, vararg formatArgs: Any): String {
         val localized = getLocalizedContext(context)

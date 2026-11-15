@@ -13,6 +13,7 @@ import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.rtsp.RtspMediaSource
 import androidx.media3.exoplayer.source.MediaSource
@@ -225,7 +226,10 @@ class RtspStreamManager(private val context: Context) {
             .setBackBuffer(0, false)
             .build()
 
-        val player = ExoPlayer.Builder(context)
+        val renderersFactory = DefaultRenderersFactory(context)
+            .setEnableDecoderFallback(true)
+
+        val player = ExoPlayer.Builder(context, renderersFactory)
             .setLoadControl(loadControl)
             .setAudioAttributes(surveillanceAudioAttrs, /* handleAudioFocus = */ false)
             .build()
@@ -500,12 +504,25 @@ class RtspStreamManager(private val context: Context) {
     }
 
     fun captureFrame(cameraId: String, width: Int = 640, height: Int = 368): Bitmap? {
-        if (isAppInForeground && (attachedSurfaceCountMap[cameraId] ?: 0) > 0) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            val cam = activeCameraMap[cameraId] ?: return null
+            return captureFrameForBackgroundWorker(
+                camera = cam,
+                maxSide = maxOf(width, height),
+                alignTo = 2,
+                waitHeadlessFirstFrameMs = 200L
+            )
+        }
+
+        if (isAppInForeground &&
+            (attachedSurfaceCountMap[cameraId] ?: 0) > 0 &&
+            hasRenderedFrameMap[cameraId] == true
+        ) {
             val tv = activeTextureViews[cameraId]?.get()
             if (tv != null && tv.isAvailable && tv.width > 0 && tv.height > 0) {
                 return try {
                     tv.getBitmap(width, height)
-                } catch (_: Exception) {
+                } catch (_: Throwable) {
                     null
                 }
             }
@@ -527,6 +544,26 @@ class RtspStreamManager(private val context: Context) {
         alignTo: Int = 2,
         waitHeadlessFirstFrameMs: Long = 350L
     ): Bitmap? {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            val existing = playerMap[camera.id] ?: return null
+            val (w, h) = computeAspectPreservingDimensions(
+                videoWidth = existing.videoSize.width,
+                videoHeight = existing.videoSize.height,
+                maxSide = maxSide,
+                alignTo = alignTo
+            )
+            val tv = activeTextureViews[camera.id]?.get()
+            if (isAppInForeground &&
+                (attachedSurfaceCountMap[camera.id] ?: 0) > 0 &&
+                hasRenderedFrameMap[camera.id] == true &&
+                tv != null && tv.isAvailable && tv.width > 0 && tv.height > 0
+            ) {
+                return runCatching { tv.getBitmap(w, h) }.getOrNull()
+            }
+            return ensureHeadlessGrabberLocked(camera.id, existing, w, h)
+                ?.captureBitmap(w, h, waitIfEmptyMs = 0L)
+        }
+
         var directBitmap: Bitmap? = null
         var grabberRef: HeadlessGlFrameGrabber? = null
         var targetW = 640
@@ -548,14 +585,19 @@ class RtspStreamManager(private val context: Context) {
                 val tv = activeTextureViews[camera.id]?.get()
                 val canReadTextureView = isAppInForeground &&
                     (attachedSurfaceCountMap[camera.id] ?: 0) > 0 &&
+                    hasRenderedFrameMap[camera.id] == true &&
                     tv != null && tv.isAvailable && tv.width > 0 && tv.height > 0
 
                 if (canReadTextureView && tv != null) {
-                    directBitmap = runCatching { tv.getBitmap(w, h) }.getOrNull()
+                    directBitmap = try {
+                        tv.getBitmap(w, h)
+                    } catch (_: Throwable) {
+                        null
+                    }
                 } else {
                     grabberRef = ensureHeadlessGrabberLocked(camera.id, player, w, h)
                 }
-            } catch (_: Exception) {
+            } catch (_: Throwable) {
             } finally {
                 latch.countDown()
             }
@@ -646,6 +688,7 @@ class RtspStreamManager(private val context: Context) {
                 val now = System.currentTimeMillis()
 
                 for ((id, flow) in telemetryMap) {
+                    try {
                     val player = playerMap[id] ?: continue
                     val cam = activeCameraMap[id]
                     val isLiveRtsp = cam?.let { isLiveRtspCamera(it) } ?: false
@@ -773,6 +816,7 @@ class RtspStreamManager(private val context: Context) {
                             recoverCameraStream(cam)
                         }
                     }
+                    } catch (_: Throwable) {}
                 }
             }
         }

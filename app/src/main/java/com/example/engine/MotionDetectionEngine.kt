@@ -228,7 +228,7 @@ class MotionDetectionEngine(
         createNotificationChannel()
 
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setSmallIcon(R.drawable.ic_stat_omniview)
             .setContentTitle("🚨 ${AppLocaleManager.getString(context, R.string.alerts_notif_title, alert.cameraName)}")
             .setContentText(alert.description)
             .setPriority(NotificationCompat.PRIORITY_HIGH)

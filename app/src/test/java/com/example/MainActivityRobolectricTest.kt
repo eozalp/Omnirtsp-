@@ -2,6 +2,7 @@ package com.example
 
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -34,19 +35,22 @@ class MainActivityRobolectricTest {
         // Verify LiveMultiCamScreen mounted (with rememberLauncherForActivityResult) cleanly
         composeTestRule.onNodeWithTag("live_multicam_screen").assertIsDisplayed()
         composeTestRule.onNodeWithTag("quick_language_toggle_btn").assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Find Network Cameras").assertIsDisplayed()
 
         // Toggle live to Turkish via quick badge
         composeTestRule.onNodeWithTag("quick_language_toggle_btn").performClick()
         composeTestRule.waitForIdle()
 
-        // Turkish navigation item should now be visible without crashing or restarting
+        // Turkish navigation item and live screen content should both update immediately without restarting
         composeTestRule.onNodeWithText("Canlı").assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Ağdaki Kameraları Bul").assertIsDisplayed()
         composeTestRule.onNodeWithTag("live_multicam_screen").assertIsDisplayed()
 
         // Toggle back to English
         composeTestRule.onNodeWithTag("quick_language_toggle_btn").performClick()
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithText("Live").assertIsDisplayed()
+        composeTestRule.onNodeWithContentDescription("Find Network Cameras").assertIsDisplayed()
 
         // Toggle global mute from live header and verify shared FloatingOverlayStateHolder stays muted
         composeTestRule.onNodeWithTag("global_mute_toggle_btn").assertIsDisplayed()
@@ -60,5 +64,14 @@ class MainActivityRobolectricTest {
         composeTestRule.waitForIdle()
         org.junit.Assert.assertFalse(com.example.service.FloatingOverlayStateHolder.isGlobalMuted.value)
         composeTestRule.onNodeWithText("Sound").assertIsDisplayed()
+
+        // Complete app exit button opens confirmation dialog and can be cancelled safely
+        composeTestRule.onNodeWithTag("exit_app_btn").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("exit_app_btn").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("exit_app_confirm_dialog").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("confirm_exit_app_btn").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Cancel").performClick()
+        composeTestRule.waitForIdle()
     }
 }

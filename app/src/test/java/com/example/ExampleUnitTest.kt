@@ -14,6 +14,7 @@ import com.example.data.model.RtspTransport
 import com.example.data.model.StreamQuality
 import androidx.media3.common.Player
 import com.example.engine.CameraDiscoveryEngine
+import com.example.engine.CameraStreamRecorder
 import com.example.engine.DeviceStorageExporter
 import com.example.engine.EndpointKind
 import com.example.engine.HubAccessScope
@@ -39,6 +40,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
 import java.net.ServerSocket
+import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import java.util.Base64
 import com.example.service.FloatingOverlayStateHolder
@@ -1347,5 +1349,69 @@ class ExampleUnitTest {
       server.stop()
       runCatching { tempDir.deleteRecursively() }
     }
+  }
+
+  @Test
+  fun cameraStreamRecorder_yuv420BufferRespectsStrideAndSliceHeightPadding() {
+    val width = 4
+    val height = 4
+    val stride = 8
+    val sliceHeight = 6
+    val pureRed = 0xFFFF0000.toInt()
+    val pureBlue = 0xFF0000FF.toInt()
+    val argb = IntArray(width * height) { idx ->
+      val row = idx / width
+      if (row < 2) pureRed else pureBlue
+    }
+
+    // 1. Planar YUV420 (I420): Y = stride * sliceHeight (48), U = (stride/2) * (sliceHeight/2) (12), V = 12
+    val planarSize = stride * sliceHeight + 2 * (stride / 2) * (sliceHeight / 2)
+    val planarBuf = ByteBuffer.allocateDirect(planarSize)
+    val writtenPlanar = CameraStreamRecorder.writeArgbToYuv420Buffer(
+      argb = argb,
+      width = width,
+      height = height,
+      stride = stride,
+      sliceHeight = sliceHeight,
+      output = planarBuf,
+      isPlanar = true
+    )
+    assertEquals(planarSize, writtenPlanar)
+    val planarBytes = ByteArray(planarSize)
+    planarBuf.get(planarBytes)
+    // Top row pixels sit at offsets 0..3; padding bytes 4..7 remain zeroed, row 2 starts at offset 2 * stride
+    val expectedRedY = (((66 * 255 + 128) shr 8) + 16).toByte()
+    val expectedBlueY = (((25 * 255 + 128) shr 8) + 16).toByte()
+    assertEquals(expectedRedY, planarBytes[0])
+    assertEquals(expectedRedY, planarBytes[stride + 3])
+    assertEquals(0.toByte(), planarBytes[4]) // stride padding not corrupted
+    assertEquals(expectedBlueY, planarBytes[2 * stride])
+    assertEquals(expectedBlueY, planarBytes[3 * stride + 3])
+
+    // 2. Semi-planar YUV420 (NV12): UV plane starts at stride * sliceHeight with full stride per chroma row
+    val semiSize = stride * sliceHeight + stride * (sliceHeight / 2)
+    val semiBuf = ByteBuffer.allocateDirect(semiSize)
+    val writtenSemi = CameraStreamRecorder.writeArgbToYuv420Buffer(
+      argb = argb,
+      width = width,
+      height = height,
+      stride = stride,
+      sliceHeight = sliceHeight,
+      output = semiBuf,
+      isPlanar = false
+    )
+    assertEquals(semiSize, writtenSemi)
+    val semiBytes = ByteArray(semiSize)
+    semiBuf.get(semiBytes)
+    assertEquals(expectedRedY, semiBytes[0])
+    assertEquals(expectedBlueY, semiBytes[2 * stride])
+    // Red chroma has low U and high V; Blue chroma has high U and low V
+    val uvBase = stride * sliceHeight
+    val redU = semiBytes[uvBase].toInt() and 0xFF
+    val redV = semiBytes[uvBase + 1].toInt() and 0xFF
+    val blueU = semiBytes[uvBase + stride].toInt() and 0xFF
+    val blueV = semiBytes[uvBase + stride + 1].toInt() and 0xFF
+    assertTrue(redV > redU)
+    assertTrue(blueU > blueV)
   }
 }

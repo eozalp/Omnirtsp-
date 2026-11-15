@@ -22,9 +22,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.ContextWrapper
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
@@ -34,16 +36,20 @@ import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Language
+import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Smartphone
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Timer
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedButton
@@ -52,6 +58,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -107,7 +114,10 @@ fun CloudStorageScreen(
     val hubOneTimePassword by viewModel.hubOneTimeGeneratedPassword.collectAsState()
     val hubOneTimeApiKey by viewModel.hubOneTimeApiKey.collectAsState()
     val hubSelfTestResult by viewModel.hubSelfTestResult.collectAsState()
+    val recordingCameras by viewModel.recordingSchedulerEngine.currentlyRecordingCameras.collectAsState()
+    val isShuttingDown by viewModel.isShuttingDown.collectAsState()
     var hubCopyMessage by remember { mutableStateOf<String?>(null) }
+    var showExitAppDialog by remember { mutableStateOf(false) }
 
     val copyToClipboard: (String, String) -> Unit = { label, text ->
         try {
@@ -1002,6 +1012,164 @@ fun CloudStorageScreen(
                     viewModel.saveCloudConfig(updatedCloud)
                 }
             )
+
+            // Complete App Shutdown Card
+            Card(
+                colors = CardDefaults.cardColors(containerColor = SurveillanceCardBg),
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.PowerSettingsNew, contentDescription = null, tint = NeonRed, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Column {
+                            Text(
+                                text = stringResource(R.string.exit_app_btn_label),
+                                color = Color.White,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = stringResource(R.string.exit_app_dialog_body),
+                                color = Color.Gray,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+
+                    Button(
+                        onClick = { showExitAppDialog = true },
+                        enabled = !isShuttingDown,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFF4A1822),
+                            contentColor = NeonRed
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("settings_exit_app_btn")
+                    ) {
+                        Icon(Icons.Default.PowerSettingsNew, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = stringResource(R.string.exit_app_btn_label),
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+                }
+            }
+        }
+
+        if (showExitAppDialog) {
+            val activeRecCount = recordingCameras.size
+            AlertDialog(
+                onDismissRequest = { if (!isShuttingDown) showExitAppDialog = false },
+                containerColor = SurveillanceCardBg,
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.testTag("settings_exit_app_confirm_dialog"),
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = if (activeRecCount > 0) Icons.Default.Warning else Icons.Default.PowerSettingsNew,
+                            contentDescription = null,
+                            tint = NeonRed
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = stringResource(R.string.exit_app_dialog_title),
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(
+                            text = stringResource(R.string.exit_app_dialog_body),
+                            color = Color.White.copy(alpha = 0.85f),
+                            fontSize = 13.sp
+                        )
+                        if (activeRecCount > 0) {
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = NeonRed.copy(alpha = 0.16f),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, NeonRed.copy(alpha = 0.75f)),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Warning,
+                                        contentDescription = null,
+                                        tint = NeonRed,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Text(
+                                        text = stringResource(R.string.exit_app_recording_warning, activeRecCount),
+                                        color = Color.White,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            viewModel.shutdownAppCompletely {
+                                context.findSettingsHostActivity()?.finishAndRemoveTask()
+                            }
+                        },
+                        enabled = !isShuttingDown,
+                        colors = ButtonDefaults.buttonColors(containerColor = NeonRed, contentColor = Color.White),
+                        modifier = Modifier.testTag("settings_confirm_exit_app_btn")
+                    ) {
+                        if (isShuttingDown) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(14.dp),
+                                strokeWidth = 2.dp,
+                                color = Color.White
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = stringResource(R.string.exit_app_closing_progress),
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        } else {
+                            Text(
+                                text = stringResource(R.string.exit_app_confirm_btn),
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = { showExitAppDialog = false },
+                        enabled = !isShuttingDown
+                    ) {
+                        Text(stringResource(R.string.common_cancel), color = Color.Gray, maxLines = 1, softWrap = false)
+                    }
+                }
+            )
         }
     }
+}
+
+private tailrec fun Context.findSettingsHostActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findSettingsHostActivity()
+    else -> null
 }

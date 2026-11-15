@@ -603,4 +603,14 @@
     <string name="storage_delete_after_upload_sub">Frees phone storage once remote upload finishes with HTTP/FTP OK</string>
     <string name="storage_save_options_btn">Save Storage Choices</string>
     <string name="storage_options_saved_msg">Remote storage choices saved</string>
+
+    <!-- Complete App Exit & Active Recording Warning -->
+    <string name="exit_app_btn_desc">Close app completely</string>
+    <string name="exit_app_btn_label">Close App Completely</string>
+    <string name="exit_app_dialog_title">Close OmniView Completely?</string>
+    <string name="exit_app_dialog_body">All live camera streams, Remote Hub, and background keep-alive services will be stopped.</string>
+    <string name="exit_app_recording_warning">Warning: %1$d active recording(s) in progress! Closing now will stop and save active recordings. Are you sure you want to close?</string>
+    <string name="exit_app_confirm_btn">Close App</string>
+    <string name="exit_app_closing_progress">Saving recordings and closing…</string>
+    <string name="keepalive_notif_active_rec">Background monitoring active • %1$d recording(s) in progress</string>
 </resources>

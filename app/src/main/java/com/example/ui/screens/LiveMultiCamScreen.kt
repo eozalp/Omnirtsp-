@@ -1,8 +1,10 @@
 package com.example.ui.screens
 
+import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
@@ -51,6 +53,7 @@ import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MotionPhotosOn
 import androidx.compose.material.icons.filled.PictureInPictureAlt
+import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.Router
@@ -83,6 +86,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -146,6 +150,7 @@ fun LiveMultiCamScreen(
     val selectedLanguageTag by viewModel.selectedLanguageTag.collectAsState()
     val isGlobalMuted by viewModel.isGlobalMuted.collectAsState()
     val hubState by viewModel.hubServerState.collectAsState()
+    val isShuttingDown by viewModel.isShuttingDown.collectAsState()
 
     var showCameraDialog by remember { mutableStateOf(false) }
     var cameraToEdit by remember { mutableStateOf<CameraEntity?>(null) }
@@ -156,6 +161,7 @@ fun LiveMultiCamScreen(
     var cameraToDelete by remember { mutableStateOf<CameraEntity?>(null) }
     var cameraToRotateId by remember { mutableStateOf<String?>(null) }
     var showOverlayPermissionDialog by remember { mutableStateOf(false) }
+    var showExitAppDialog by remember { mutableStateOf(false) }
     var canDrawOverlays by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
 
     val overlayPermissionLauncher = rememberLauncherForActivityResult(
@@ -184,7 +190,7 @@ fun LiveMultiCamScreen(
 
     val recentAlert = alerts.firstOrNull { !it.isRead }
     val floatingIds = remember(floatingWindows) { floatingWindows.map { it.cameraId }.toSet() }
-    val isTurkishActive = remember(selectedLanguageTag) { AppLocaleManager.isTurkish(context) }
+    val isTurkishActive = remember(selectedLanguageTag) { AppLocaleManager.isTurkish(context, selectedLanguageTag) }
 
     Box(
         modifier = modifier
@@ -494,6 +500,32 @@ fun LiveMultiCamScreen(
                             modifier = Modifier.size(19.dp)
                         )
                     }
+
+                    // Complete App Exit / Shutdown Button
+                    Box(
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clip(CircleShape)
+                            .clickable(enabled = !isShuttingDown) { showExitAppDialog = true }
+                            .testTag("exit_app_btn"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Surface(
+                            shape = CircleShape,
+                            color = Color(0xFF3D161D),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, NeonRed.copy(alpha = 0.65f)),
+                            modifier = Modifier.size(40.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    Icons.Default.PowerSettingsNew,
+                                    contentDescription = stringResource(R.string.exit_app_btn_desc),
+                                    tint = NeonRed,
+                                    modifier = Modifier.size(19.dp)
+                                )
+                            }
+                        }
+                    }
                 }
             }
 
@@ -694,9 +726,10 @@ fun LiveMultiCamScreen(
                             }
                         }
                     ) { camera ->
-                        val initialPlayer = remember(camera.id) { viewModel.streamManager.getOrCreatePlayer(camera) }
-                        val reactivePlayer by viewModel.streamManager.getPlayerFlow(camera.id).collectAsState()
-                        val player = reactivePlayer ?: initialPlayer
+                        val player by viewModel.streamManager.getPlayerFlow(camera.id).collectAsState()
+                        LaunchedEffect(camera.id, camera.rtspUrl) {
+                            viewModel.streamManager.getOrCreatePlayer(camera)
+                        }
                         val telemetry by viewModel.streamManager.getTelemetryFlow(camera.id).collectAsState()
                         val isRecording = recordingCameras.contains(camera.id)
                         val isFloating = floatingIds.contains(camera.id)
@@ -1280,7 +1313,117 @@ fun LiveMultiCamScreen(
                 )
             }
         }
+
+        // Complete App Exit Confirmation Dialog (warns when recording is active)
+        if (showExitAppDialog) {
+            val activeRecCount = recordingCameras.size
+            AlertDialog(
+                onDismissRequest = { if (!isShuttingDown) showExitAppDialog = false },
+                containerColor = SurveillanceCardBg,
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.testTag("exit_app_confirm_dialog"),
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = if (activeRecCount > 0) Icons.Default.Warning else Icons.Default.PowerSettingsNew,
+                            contentDescription = null,
+                            tint = NeonRed
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = stringResource(R.string.exit_app_dialog_title),
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(
+                            text = stringResource(R.string.exit_app_dialog_body),
+                            color = Color.White.copy(alpha = 0.85f),
+                            fontSize = 13.sp
+                        )
+                        if (activeRecCount > 0) {
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = NeonRed.copy(alpha = 0.16f),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, NeonRed.copy(alpha = 0.75f)),
+                                modifier = Modifier.fillMaxWidth().testTag("exit_app_recording_warning_box")
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Warning,
+                                        contentDescription = null,
+                                        tint = NeonRed,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Text(
+                                        text = stringResource(R.string.exit_app_recording_warning, activeRecCount),
+                                        color = Color.White,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            viewModel.shutdownAppCompletely {
+                                context.findHostActivity()?.finishAndRemoveTask()
+                            }
+                        },
+                        enabled = !isShuttingDown,
+                        colors = ButtonDefaults.buttonColors(containerColor = NeonRed, contentColor = Color.White),
+                        modifier = Modifier.testTag("confirm_exit_app_btn")
+                    ) {
+                        if (isShuttingDown) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(14.dp),
+                                strokeWidth = 2.dp,
+                                color = Color.White
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = stringResource(R.string.exit_app_closing_progress),
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        } else {
+                            Text(
+                                text = stringResource(R.string.exit_app_confirm_btn),
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = { showExitAppDialog = false },
+                        enabled = !isShuttingDown
+                    ) {
+                        Text(stringResource(R.string.common_cancel), color = Color.Gray, maxLines = 1, softWrap = false)
+                    }
+                }
+            )
+        }
     }
+}
+
+private tailrec fun Context.findHostActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findHostActivity()
+    else -> null
 }
 
 @Composable

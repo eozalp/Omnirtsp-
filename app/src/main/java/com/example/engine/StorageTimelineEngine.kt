@@ -120,8 +120,9 @@ object StorageTimelineEngine {
         var prevEndMs: Long? = null
 
         for (clip in sorted) {
-            val uri = resolvePlayableUri(context, clip)
-            if (requirePlayable && uri == null) {
+            val uri = runCatching { resolvePlayableUri(context, clip) }.getOrNull()
+            val isPlayable = uri != null || isPlayableClipFile(File(clip.filePath))
+            if (requirePlayable && !isPlayable) {
                 continue
             }
             val durationMs = clip.durationSeconds.coerceAtLeast(1) * 1000L

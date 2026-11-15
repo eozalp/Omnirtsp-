@@ -44,6 +44,8 @@ class SurveillanceKeepAliveService : Service() {
         startForegroundNotification()
     }
 
+    private var currentActiveRecordings: Int = 0
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
             releaseLocks()
@@ -52,6 +54,7 @@ class SurveillanceKeepAliveService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+        currentActiveRecordings = intent?.getIntExtra(EXTRA_ACTIVE_REC_COUNT, currentActiveRecordings) ?: 0
         acquireLocks()
         _isRunning.value = true
         startForegroundNotification()
@@ -120,6 +123,7 @@ class SurveillanceKeepAliveService : Service() {
             ).apply {
                 description = AppLocaleManager.getString(this@SurveillanceKeepAliveService, R.string.keepalive_channel_desc)
                 setShowBadge(false)
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
             }
             manager.createNotificationChannel(channel)
         }
@@ -142,12 +146,23 @@ class SurveillanceKeepAliveService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
+        val bodyText = if (currentActiveRecordings > 0) {
+            AppLocaleManager.getString(this, R.string.keepalive_notif_active_rec, currentActiveRecordings)
+        } else {
+            AppLocaleManager.getString(this, R.string.keepalive_notif_text)
+        }
+
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_stat_omniview)
             .setContentTitle(AppLocaleManager.getString(this, R.string.keepalive_notif_title))
-            .setContentText(AppLocaleManager.getString(this, R.string.keepalive_notif_text))
+            .setContentText(bodyText)
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setShowWhen(false)
             .setSilent(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setContentIntent(openAppIntent)
             .addAction(0, AppLocaleManager.getString(this, R.string.keepalive_notif_stop), stopIntent)
             .build()
@@ -169,14 +184,16 @@ class SurveillanceKeepAliveService : Service() {
         private const val NOTIFICATION_ID = 4402
         const val ACTION_START = "com.example.action.START_KEEP_ALIVE"
         const val ACTION_STOP = "com.example.action.STOP_KEEP_ALIVE"
+        const val EXTRA_ACTIVE_REC_COUNT = "extra_active_rec_count"
 
         private val _isRunning = MutableStateFlow(false)
         val isRunning: StateFlow<Boolean> = _isRunning.asStateFlow()
 
-        fun start(context: Context) {
+        fun start(context: Context, activeRecordingCount: Int = 0) {
             try {
                 val intent = Intent(context, SurveillanceKeepAliveService::class.java).apply {
                     action = ACTION_START
+                    putExtra(EXTRA_ACTIVE_REC_COUNT, activeRecordingCount)
                 }
                 ContextCompat.startForegroundService(context, intent)
             } catch (_: Exception) {}

@@ -55,8 +55,10 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
+import java.util.UUID
 
 enum class CornerPosition {
     TOP_LEFT,
@@ -118,8 +120,6 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 withFeed
             }
         }
-        FloatingOverlayStateHolder.updateCameras(sanitized)
-        cameraDiscoveryEngine.markExistingCameras(sanitized)
         sanitized
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -180,6 +180,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private val _localExportStatus = MutableStateFlow<String?>(null)
     val localExportStatus: StateFlow<String?> = _localExportStatus.asStateFlow()
 
+    private val _isShuttingDown = MutableStateFlow(false)
+    val isShuttingDown: StateFlow<Boolean> = _isShuttingDown.asStateFlow()
+
     val extendedStorageConfig: StateFlow<ExtendedStorageConfig> = cloudStorageManager.extendedConfig
     val discoveredStorageEndpoints: StateFlow<List<DiscoveredStorageEndpoint>> = cloudStorageManager.discoveredEndpoints
     val isScanningStorage: StateFlow<Boolean> = cloudStorageManager.isScanningStorage
@@ -218,9 +221,19 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         FloatingOverlayStateHolder.initAudioSettings(application)
         initRemoteHubServer(application)
         seedInitialSurveillanceData()
+        observeCamerasSync()
         observeFloatingRotationPersistence()
         observeKeepAliveService()
         scanForNetworkCameras()
+    }
+
+    private fun observeCamerasSync() {
+        viewModelScope.launch {
+            cameras.collect { list ->
+                FloatingOverlayStateHolder.updateCameras(list)
+                cameraDiscoveryEngine.markExistingCameras(list)
+            }
+        }
     }
 
     private fun initRemoteHubServer(app: Application) {
@@ -249,13 +262,16 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             combine(
                 database.cloudConfigDao().getCloudConfig(),
                 recordingSchedulerEngine.currentlyRecordingCameras,
-                hubServerState
-            ) { cfg, activeRecs, hubState ->
-                (cfg?.keepAppAlive != false) || activeRecs.isNotEmpty() || hubState.isEnabled
-            }.collect { shouldKeepAlive ->
+                hubServerState,
+                _isShuttingDown
+            ) { cfg, activeRecs, hubState, shuttingDown ->
+                val shouldKeepAlive = !shuttingDown &&
+                    ((cfg?.keepAppAlive != false) || activeRecs.isNotEmpty() || hubState.isEnabled)
+                shouldKeepAlive to activeRecs.size
+            }.collect { (shouldKeepAlive, activeRecCount) ->
                 val app = getApplication<Application>()
                 if (shouldKeepAlive) {
-                    SurveillanceKeepAliveService.start(app)
+                    SurveillanceKeepAliveService.start(app, activeRecCount)
                 } else {
                     SurveillanceKeepAliveService.stop(app)
                 }
@@ -590,9 +606,10 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         password: String = "",
         rtspUrlOverride: String? = null
     ) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
+            val safeIpKey = discovered.ipAddress.replace(".", "_").replace(":", "_")
             val entity = CameraEntity(
-                id = "cam_${discovered.ipAddress.replace(".", "_")}_${System.currentTimeMillis() % 1000}",
+                id = "cam_${safeIpKey}_${UUID.randomUUID().toString().take(8)}",
                 name = customName?.takeIf { it.isNotBlank() } ?: discovered.name,
                 rtspUrl = rtspUrlOverride?.takeIf { it.isNotBlank() } ?: discovered.suggestedRtspUrl,
                 username = username.trim(),
@@ -736,8 +753,28 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun addOrUpdateCamera(camera: CameraEntity) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             database.cameraDao().insertCamera(camera)
+        }
+    }
+
+    fun shutdownAppCompletely(onComplete: () -> Unit) {
+        if (_isShuttingDown.value) return
+        _isShuttingDown.value = true
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    recordingSchedulerEngine.stopAllRecordingsAndFlush(timeoutMs = 6_000L)
+                }
+            } catch (_: Throwable) {}
+            val app = getApplication<Application>()
+            runCatching { FloatingOverlayStateHolder.closeAll() }
+            runCatching { FloatingCameraOverlayService.stop(app) }
+            runCatching { SurveillanceKeepAliveService.stop(app) }
+            runCatching { remoteHubServer.stop() }
+            runCatching { motionDetectionEngine.release() }
+            runCatching { streamManager.releaseAll() }
+            onComplete()
         }
     }
 

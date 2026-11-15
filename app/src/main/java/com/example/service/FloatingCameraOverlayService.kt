@@ -194,10 +194,12 @@ class FloatingCameraOverlayService : Service() {
         )
 
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_stat_omniview)
             .setContentTitle(AppLocaleManager.getString(this, R.string.overlay_notif_title))
             .setContentText(AppLocaleManager.getString(this, R.string.overlay_notif_text))
             .setOngoing(true)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setContentIntent(openAppIntent)
             .addAction(0, AppLocaleManager.getString(this, R.string.overlay_notif_close_all), closeAllIntent)
             .build()
@@ -510,9 +512,10 @@ private fun SystemOverlayCameraCard(
     onOpenApp: () -> Unit,
     onClose: () -> Unit
 ) {
-    val initialPlayer = remember(camera.id) { streamManager.getOrCreatePlayer(camera) }
-    val reactivePlayer by streamManager.getPlayerFlow(camera.id).collectAsState()
-    val player = reactivePlayer ?: initialPlayer
+    val player by streamManager.getPlayerFlow(camera.id).collectAsState()
+    LaunchedEffect(camera.id, camera.rtspUrl) {
+        streamManager.getOrCreatePlayer(camera)
+    }
     val telemetry by streamManager.getTelemetryFlow(camera.id).collectAsState()
     val isGlobalMuted by FloatingOverlayStateHolder.isGlobalMuted.collectAsState()
     val overlayContext = LocalContext.current

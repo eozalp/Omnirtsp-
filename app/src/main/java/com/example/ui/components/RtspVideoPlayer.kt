@@ -128,20 +128,22 @@ fun RtspVideoPlayer(
             if (event == Lifecycle.Event.ON_RESUME) {
                 playerViewRef?.let { pv ->
                     if (player != null) {
-                        val tv = (pv.videoSurfaceView as? TextureView)
-                            ?: (0 until pv.childCount).mapNotNull { pv.getChildAt(it) as? TextureView }.firstOrNull()
-                        if (tv != null) {
-                            sharedStreamManager.reattachTextureView(camera.id, tv)
-                        }
-                        if (pv.player !== player) {
-                            pv.player = player
-                        }
-                        pv.onResume()
-                        if (player.playWhenReady &&
-                            (player.playbackState == Player.STATE_IDLE || player.playbackState == Player.STATE_ENDED)
-                        ) {
-                            onRetry?.invoke()
-                        }
+                        try {
+                            val tv = (pv.videoSurfaceView as? TextureView)
+                                ?: (0 until pv.childCount).mapNotNull { pv.getChildAt(it) as? TextureView }.firstOrNull()
+                            if (tv != null) {
+                                sharedStreamManager.reattachTextureView(camera.id, tv)
+                            }
+                            if (pv.player !== player) {
+                                pv.player = player
+                            }
+                            pv.onResume()
+                            if (player.playWhenReady &&
+                                (player.playbackState == Player.STATE_IDLE || player.playbackState == Player.STATE_ENDED)
+                            ) {
+                                onRetry?.invoke()
+                            }
+                        } catch (_: Exception) {}
                     }
                 }
             }
@@ -156,22 +158,24 @@ fun RtspVideoPlayer(
         delay(90)
         val pv = playerViewRef ?: return@LaunchedEffect
         if (player != null) {
-            val tv = pv.videoSurfaceView as? android.view.TextureView
-            if (tv != null) {
-                var waits = 0
-                while (!tv.isAvailable && waits < 10) {
-                    delay(80)
-                    waits++
-                }
-                if (pv.player !== player) {
+            try {
+                val tv = pv.videoSurfaceView as? android.view.TextureView
+                if (tv != null) {
+                    var waits = 0
+                    while (!tv.isAvailable && waits < 10) {
+                        delay(80)
+                        waits++
+                    }
+                    if (pv.player !== player) {
+                        pv.player = player
+                    } else if (tv.isAvailable) {
+                        player.setVideoTextureView(tv)
+                    }
+                } else if (pv.player !== player) {
                     pv.player = player
-                } else if (tv.isAvailable) {
-                    player.setVideoTextureView(tv)
                 }
-            } else if (pv.player !== player) {
-                pv.player = player
-            }
-            pv.onResume()
+                pv.onResume()
+            } catch (_: Exception) {}
         }
     }
 
