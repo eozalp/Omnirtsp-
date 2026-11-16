@@ -1628,4 +1628,25 @@ class ExampleUnitTest {
 
     assertEquals(listOf(expiredPath1, expiredPath2), filtered)
   }
+
+  @Test
+  fun cameraStreamRecorder_adaptiveFrameInterval_reducesForegroundUiLoad() {
+    // Offscreen / headless GL capture keeps full 10fps without touching Main Thread
+    assertEquals(100L, CameraStreamRecorder.computeTargetFrameIntervalMs(activeRecorderCount = 1, isForegroundCapture = false))
+    assertEquals(100L, CameraStreamRecorder.computeTargetFrameIntervalMs(activeRecorderCount = 4, isForegroundCapture = false))
+
+    // Foreground UI capture scales down frame rate cleanly as simultaneous recordings increase
+    assertEquals(125L, CameraStreamRecorder.computeTargetFrameIntervalMs(activeRecorderCount = 1, isForegroundCapture = true))
+    assertEquals(175L, CameraStreamRecorder.computeTargetFrameIntervalMs(activeRecorderCount = 2, isForegroundCapture = true))
+    assertEquals(210L, CameraStreamRecorder.computeTargetFrameIntervalMs(activeRecorderCount = 3, isForegroundCapture = true))
+  }
+
+  @Test
+  fun streamManager_quantizeLatencyMs_absorbsJitterRecompositions() {
+    assertEquals(0L, RtspStreamManager.quantizeLatencyMs(0L))
+    assertEquals(0L, RtspStreamManager.quantizeLatencyMs(-25L))
+    assertEquals(300L, RtspStreamManager.quantizeLatencyMs(312L))
+    assertEquals(300L, RtspStreamManager.quantizeLatencyMs(318L))
+    assertEquals(350L, RtspStreamManager.quantizeLatencyMs(340L))
+  }
 }

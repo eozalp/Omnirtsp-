@@ -1,6 +1,11 @@
 package com.example.engine
 
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
+import android.graphics.Rect
 import android.graphics.SurfaceTexture
 import android.opengl.EGL14
 import android.opengl.EGLConfig
@@ -70,6 +75,8 @@ class HeadlessGlFrameGrabber(
         private set
 
     private val texMatrix = FloatArray(16)
+    // Flip V (0 <-> 1) in GL so glReadPixels outputs rows top-to-bottom for Android Bitmap
+    // directly on the GPU without a per-frame CPU row-flip copy.
     private val quadCoords: FloatBuffer = ByteBuffer.allocateDirect(16 * 4)
         .order(ByteOrder.nativeOrder())
         .asFloatBuffer()
@@ -77,16 +84,19 @@ class HeadlessGlFrameGrabber(
             // x, y, u, v (triangle strip)
             put(
                 floatArrayOf(
-                    -1f, -1f, 0f, 0f,
-                    1f, -1f, 1f, 0f,
-                    -1f, 1f, 0f, 1f,
-                    1f, 1f, 1f, 1f
+                    -1f, -1f, 0f, 1f,
+                    1f, -1f, 1f, 1f,
+                    -1f, 1f, 0f, 0f,
+                    1f, 1f, 1f, 0f
                 )
             )
             position(0)
         }
     private var readBuffer: ByteBuffer? = null
-    private var flippedRowBuffer: ByteArray? = null
+    private var cachedBitmap: Bitmap? = null
+    private val copyPaint = Paint(Paint.FILTER_BITMAP_FLAG).apply {
+        xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC)
+    }
     private var initError: Throwable? = null
 
     private val firstFrameLock = Object()
@@ -119,7 +129,8 @@ class HeadlessGlFrameGrabber(
     fun captureBitmap(
         targetWidth: Int,
         targetHeight: Int,
-        waitIfEmptyMs: Long = 0L
+        waitIfEmptyMs: Long = 0L,
+        reuseBitmap: Bitmap? = null
     ): Bitmap? {
         if (released.get() || !isReady) return null
         val now = System.currentTimeMillis()
@@ -153,6 +164,33 @@ class HeadlessGlFrameGrabber(
                 }
             }
             runCatching { drawLatch.await(160, TimeUnit.MILLISECONDS) }
+        }
+
+        if (reuseBitmap != null &&
+            !reuseBitmap.isRecycled &&
+            reuseBitmap.isMutable &&
+            reuseBitmap.config == Bitmap.Config.ARGB_8888 &&
+            targetWidth > 0 &&
+            targetHeight > 0 &&
+            reuseBitmap.width == targetWidth &&
+            reuseBitmap.height == targetHeight
+        ) {
+            val copied = synchronized(bitmapLock) {
+                val cached = latestBitmap
+                if (cached == null || cached.isRecycled) {
+                    false
+                } else {
+                    val canvas = Canvas(reuseBitmap)
+                    canvas.drawBitmap(
+                        cached,
+                        Rect(0, 0, cached.width, cached.height),
+                        Rect(0, 0, targetWidth, targetHeight),
+                        copyPaint
+                    )
+                    true
+                }
+            }
+            if (copied) return reuseBitmap
         }
 
         val snapshotCopy = synchronized(bitmapLock) {
@@ -197,7 +235,11 @@ class HeadlessGlFrameGrabber(
             latestBitmap?.let { bmp ->
                 if (!bmp.isRecycled) bmp.recycle()
             }
+            cachedBitmap?.let { bmp ->
+                if (!bmp.isRecycled) bmp.recycle()
+            }
             latestBitmap = null
+            cachedBitmap = null
         }
         runCatching { glThread.quitSafely() }
     }
@@ -258,7 +300,7 @@ class HeadlessGlFrameGrabber(
         uTextureLoc = GLES20.glGetUniformLocation(programId, "uTexture")
 
         readBuffer = ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.nativeOrder())
-        flippedRowBuffer = ByteArray(width * height * 4)
+        cachedBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
 
         val st = SurfaceTexture(oesTextureId).apply {
             setDefaultBufferSize(width, height)
@@ -301,7 +343,6 @@ class HeadlessGlFrameGrabber(
     private fun renderAndReadPixelsLocked() {
         val st = surfaceTexture ?: return
         val buf = readBuffer ?: return
-        val dstBytes = flippedRowBuffer ?: return
         if (eglDisplay == EGL14.EGL_NO_DISPLAY) return
 
         EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
@@ -335,27 +376,12 @@ class HeadlessGlFrameGrabber(
         GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buf)
         buf.rewind()
 
-        // glReadPixels returns rows bottom-to-top; flip vertically for upright Bitmap
-        val rowStride = width * 4
-        var srcOffset = (height - 1) * rowStride
-        var dstOffset = 0
-        for (y in 0 until height) {
-            buf.position(srcOffset)
-            buf.get(dstBytes, dstOffset, rowStride)
-            srcOffset -= rowStride
-            dstOffset += rowStride
-        }
-
-        val frameBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        frameBitmap.copyPixelsFromBuffer(ByteBuffer.wrap(dstBytes))
-
         synchronized(bitmapLock) {
-            val prev = latestBitmap
-            latestBitmap = frameBitmap
+            val target = cachedBitmap?.takeIf { !it.isRecycled }
+                ?: Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { cachedBitmap = it }
+            target.copyPixelsFromBuffer(buf)
+            latestBitmap = target
             lastCaptureAtMs = System.currentTimeMillis()
-            if (prev != null && prev !== frameBitmap && !prev.isRecycled) {
-                prev.recycle()
-            }
         }
     }
 

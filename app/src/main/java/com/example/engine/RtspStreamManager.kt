@@ -53,6 +53,13 @@ class RtspStreamManager(private val context: Context) {
         val isReconnecting: Boolean
     )
 
+    data class CapturedVideoFrame(
+        val bitmap: Bitmap?,
+        val renderedFrameToken: Int = -1,
+        val unchanged: Boolean = false,
+        val isFromHeadless: Boolean = false
+    )
+
     private val playerMap = ConcurrentHashMap<String, ExoPlayer>()
     private val playerFlowMap = ConcurrentHashMap<String, MutableStateFlow<ExoPlayer?>>()
     private val telemetryMap = ConcurrentHashMap<String, MutableStateFlow<StreamTelemetry>>()
@@ -445,9 +452,10 @@ class RtspStreamManager(private val context: Context) {
             latencyMs = 0L
         )
 
-        if (player == null || forceRebuild || attempt >= 2) {
+        if (player == null || forceRebuild || attempt >= 3) {
             playerMap.remove(camera.id)?.let { old ->
                 try {
+                    old.clearVideoSurface()
                     old.stop()
                     old.release()
                 } catch (_: Exception) {}
@@ -503,7 +511,21 @@ class RtspStreamManager(private val context: Context) {
     private val activeTextureViews = ConcurrentHashMap<String, WeakReference<TextureView>>()
 
     fun registerTextureView(cameraId: String, textureView: TextureView) {
-        activeTextureViews[cameraId] = WeakReference(textureView)
+        val existing = activeTextureViews[cameraId]?.get()
+        if (existing !== textureView) {
+            activeTextureViews[cameraId] = WeakReference(textureView)
+        }
+    }
+
+    fun hasHeadlessGrabber(cameraId: String): Boolean {
+        return headlessGrabbers[cameraId]?.isReady == true
+    }
+
+    fun isForegroundCaptureActive(cameraId: String): Boolean {
+        val tv = activeTextureViews[cameraId]?.get()
+        return isAppInForeground &&
+            (attachedSurfaceCountMap[cameraId] ?: 0) > 0 &&
+            tv != null && tv.isAvailable && tv.width > 0 && tv.height > 0
     }
 
     fun unregisterTextureView(cameraId: String, textureView: TextureView) {
@@ -586,7 +608,7 @@ class RtspStreamManager(private val context: Context) {
     }
 
     /**
-     * Thread-safe capture helper intended for IO workers (RemoteHubServer, CameraStreamRecorder).
+     * Thread-safe capture helper intended for IO workers (RemoteHubServer, snapshot export).
      * Never blocks the Main thread waiting for GPU frames: attaches a HeadlessGlFrameGrabber on Main
      * only when no foreground UI TextureView is active, then awaits the first GL frame on the caller's IO thread.
      */
@@ -596,8 +618,36 @@ class RtspStreamManager(private val context: Context) {
         alignTo: Int = 2,
         waitHeadlessFirstFrameMs: Long = 350L
     ): Bitmap? {
+        return captureFrameForRecording(
+            camera = camera,
+            maxSide = maxSide,
+            alignTo = alignTo,
+            waitHeadlessFirstFrameMs = waitHeadlessFirstFrameMs,
+            reuseBitmap = null,
+            previousRenderedToken = Int.MIN_VALUE
+        ).bitmap
+    }
+
+    /**
+     * Low-overhead recording capture helper that deduplicates unchanged ExoPlayer decoded frames
+     * and reuses caller-provided mutable ARGB_8888 Bitmaps to avoid Main-Thread GPU stalls and GC churn.
+     */
+    fun captureFrameForRecording(
+        camera: CameraEntity,
+        maxSide: Int = 640,
+        alignTo: Int = 16,
+        waitHeadlessFirstFrameMs: Long = 0L,
+        reuseBitmap: Bitmap? = null,
+        previousRenderedToken: Int = Int.MIN_VALUE
+    ): CapturedVideoFrame {
+        val validReuse = reuseBitmap?.takeIf {
+            !it.isRecycled && it.isMutable && it.config == Bitmap.Config.ARGB_8888
+        }
+
         if (Looper.myLooper() == Looper.getMainLooper()) {
-            val existing = playerMap[camera.id] ?: return null
+            val existing = playerMap[camera.id] ?: return CapturedVideoFrame(null)
+            runCatching { existing.videoDecoderCounters?.ensureUpdated() }
+            val renderedCount = existing.videoDecoderCounters?.renderedOutputBufferCount ?: -1
             val (w, h) = computeAspectPreservingDimensions(
                 videoWidth = existing.videoSize.width,
                 videoHeight = existing.videoSize.height,
@@ -608,26 +658,59 @@ class RtspStreamManager(private val context: Context) {
             val foregroundSurfaceMounted = isAppInForeground &&
                 (attachedSurfaceCountMap[camera.id] ?: 0) > 0 &&
                 tv != null && tv.isAvailable && tv.width > 0 && tv.height > 0
-            if (foregroundSurfaceMounted) {
-                return if (hasRenderedFrameMap[camera.id] == true) {
-                    runCatching { tv?.getBitmap(w, h) }.getOrNull()
-                } else {
-                    null
+            if (foregroundSurfaceMounted && tv != null) {
+                if (previousRenderedToken != Int.MIN_VALUE &&
+                    renderedCount > 0 &&
+                    renderedCount == previousRenderedToken
+                ) {
+                    return CapturedVideoFrame(
+                        bitmap = null,
+                        renderedFrameToken = renderedCount,
+                        unchanged = true
+                    )
                 }
+                val canReadSurface = hasRenderedFrameMap[camera.id] == true ||
+                    renderedCount > 0 ||
+                    (existing.videoSize.width > 0 && existing.playbackState == Player.STATE_READY)
+                if (!canReadSurface) {
+                    return CapturedVideoFrame(null, renderedFrameToken = renderedCount)
+                }
+                val bmp = readTextureViewBitmap(tv, w, h, validReuse)
+                return CapturedVideoFrame(
+                    bitmap = bmp,
+                    renderedFrameToken = renderedCount,
+                    unchanged = false
+                )
             }
-            return ensureHeadlessGrabberLocked(camera.id, existing, w, h)
-                ?.captureBitmap(w, h, waitIfEmptyMs = 0L)
+            val bmp = ensureHeadlessGrabberLocked(camera.id, existing, w, h)
+                ?.captureBitmap(w, h, waitIfEmptyMs = 0L, reuseBitmap = validReuse)
+            return CapturedVideoFrame(
+                bitmap = bmp,
+                renderedFrameToken = renderedCount,
+                isFromHeadless = true
+            )
         }
 
         var directBitmap: Bitmap? = null
         var grabberRef: HeadlessGlFrameGrabber? = null
         var targetW = 640
         var targetH = 368
+        var renderedToken = -1
+        var isUnchanged = false
 
+        val cancelled = java.util.concurrent.atomic.AtomicBoolean(false)
         val latch = CountDownLatch(1)
         mainHandler.post {
+            if (cancelled.get()) {
+                latch.countDown()
+                return@post
+            }
             try {
-                val player = getOrCreatePlayer(camera)
+                val player = playerMap[camera.id] ?: getOrCreatePlayer(camera)
+                runCatching { player.videoDecoderCounters?.ensureUpdated() }
+                val renderedCount = player.videoDecoderCounters?.renderedOutputBufferCount ?: -1
+                renderedToken = renderedCount
+
                 val (w, h) = computeAspectPreservingDimensions(
                     videoWidth = player.videoSize.width,
                     videoHeight = player.videoSize.height,
@@ -643,11 +726,17 @@ class RtspStreamManager(private val context: Context) {
                     tv != null && tv.isAvailable && tv.width > 0 && tv.height > 0
 
                 if (foregroundSurfaceMounted && tv != null) {
-                    if (hasRenderedFrameMap[camera.id] == true) {
-                        directBitmap = try {
-                            tv.getBitmap(w, h)
-                        } catch (_: Throwable) {
-                            null
+                    if (previousRenderedToken != Int.MIN_VALUE &&
+                        renderedCount > 0 &&
+                        renderedCount == previousRenderedToken
+                    ) {
+                        isUnchanged = true
+                    } else {
+                        val canReadSurface = hasRenderedFrameMap[camera.id] == true ||
+                            renderedCount > 0 ||
+                            (player.videoSize.width > 0 && player.playbackState == Player.STATE_READY)
+                        if (canReadSurface) {
+                            directBitmap = readTextureViewBitmap(tv, w, h, validReuse)
                         }
                     }
                 } else {
@@ -660,11 +749,54 @@ class RtspStreamManager(private val context: Context) {
         }
 
         try {
-            latch.await(450, TimeUnit.MILLISECONDS)
-        } catch (_: Exception) {}
+            if (!latch.await(220, TimeUnit.MILLISECONDS)) {
+                cancelled.set(true)
+            }
+        } catch (_: Exception) {
+            cancelled.set(true)
+        }
 
-        directBitmap?.let { return it }
-        return grabberRef?.captureBitmap(targetW, targetH, waitIfEmptyMs = waitHeadlessFirstFrameMs)
+        if (isUnchanged) {
+            return CapturedVideoFrame(
+                bitmap = null,
+                renderedFrameToken = renderedToken,
+                unchanged = true
+            )
+        }
+        directBitmap?.let { bmp ->
+            return CapturedVideoFrame(
+                bitmap = bmp,
+                renderedFrameToken = renderedToken
+            )
+        }
+        val headlessBmp = grabberRef?.captureBitmap(
+            targetWidth = targetW,
+            targetHeight = targetH,
+            waitIfEmptyMs = waitHeadlessFirstFrameMs,
+            reuseBitmap = validReuse
+        )
+        return CapturedVideoFrame(
+            bitmap = headlessBmp,
+            renderedFrameToken = renderedToken,
+            isFromHeadless = grabberRef != null
+        )
+    }
+
+    private fun readTextureViewBitmap(
+        tv: TextureView,
+        width: Int,
+        height: Int,
+        reuseBitmap: Bitmap?
+    ): Bitmap? {
+        return try {
+            if (reuseBitmap != null && reuseBitmap.width == width && reuseBitmap.height == height) {
+                tv.getBitmap(reuseBitmap)
+            } else {
+                tv.getBitmap(width, height)
+            }
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     fun getAspectPreservingTargetSize(
@@ -748,7 +880,8 @@ class RtspStreamManager(private val context: Context) {
 
                     val format = player.videoFormat
                     val rawBuffered = player.totalBufferedDuration
-                    val safeLatency = sanitizeBufferedLatencyMs(rawBuffered)
+                    val safeLatency = quantizeLatencyMs(sanitizeBufferedLatencyMs(rawBuffered))
+                    runCatching { player.videoDecoderCounters?.ensureUpdated() }
                     val renderedFrames = player.videoDecoderCounters?.renderedOutputBufferCount ?: -1
                     val previousRendered = lastRenderedFramesMap[id] ?: -1
                     if (renderedFrames >= 0) {
@@ -810,7 +943,7 @@ class RtspStreamManager(private val context: Context) {
                         0
                     }
                     val realFps = if (format?.frameRate != null && format.frameRate > 0) {
-                        if (eval.healthyProgress || updatedStalled < 3) format.frameRate.toInt() else 0
+                        if (eval.healthyProgress || updatedStalled < 4) format.frameRate.toInt() else 0
                     } else if (eval.healthyProgress) {
                         measuredFps
                     } else {
@@ -818,24 +951,24 @@ class RtspStreamManager(private val context: Context) {
                     }
 
                     val realBitrate = if (format?.bitrate != null && format.bitrate > 0) {
-                        if (eval.healthyProgress || updatedStalled < 3) format.bitrate / 1000 else 0
+                        if (eval.healthyProgress || updatedStalled < 4) format.bitrate / 1000 else 0
                     } else {
                         0
                     }
 
                     val realCodec = format?.sampleMimeType ?: flow.value.codec.takeIf { !flow.value.hasError } ?: ""
-                    val showLiveBadge = !flow.value.hasError && (eval.isLive && updatedStalled < 3)
+                    val showLiveBadge = !flow.value.hasError && (eval.isLive && updatedStalled < 4)
                     val attemptCount = recoveryAttemptsMap[id] ?: 0
                     val showReconnectingBadge = !flow.value.hasError && when {
                         eval.healthyProgress -> false
-                        inStartupGrace -> attemptCount > 0
-                        else -> (eval.isReconnecting && updatedStalled >= 2) ||
-                            updatedStalled >= 3 ||
+                        inStartupGrace || inSurfaceGrace -> attemptCount > 0
+                        else -> (eval.isReconnecting && updatedStalled >= 3) ||
+                            updatedStalled >= 5 ||
                             isAbnormalBufferSentinel(rawBuffered, isLiveRtsp) ||
                             player.playbackState == Player.STATE_ENDED
                     }
 
-                    flow.value = flow.value.copy(
+                    val nextTelemetry = flow.value.copy(
                         fps = realFps,
                         bitrateKbps = realBitrate,
                         codec = realCodec,
@@ -843,6 +976,9 @@ class RtspStreamManager(private val context: Context) {
                         isLive = showLiveBadge,
                         isReconnecting = showReconnectingBadge
                     )
+                    if (nextTelemetry != flow.value) {
+                        flow.value = nextTelemetry
+                    }
 
                     // Automatic Watchdog: recover from frozen frames, TIME_END_OF_SOURCE, track loss, or errors
                     if (cam != null) {
@@ -856,12 +992,12 @@ class RtspStreamManager(private val context: Context) {
                             flow.value.hasError -> canRetryError
                             isAbnormalBufferSentinel(rawBuffered, isLiveRtsp) -> updatedStalled >= 2 && canRetryEos
                             player.playbackState == Player.STATE_ENDED -> updatedStalled >= 2 && canRetryEos
-                            inStartupGrace -> false
-                            player.playbackState == Player.STATE_IDLE -> updatedStalled >= 3 && canRetryNormal
+                            inStartupGrace || inSurfaceGrace -> false
+                            player.playbackState == Player.STATE_IDLE -> updatedStalled >= 4 && canRetryNormal
                             isLiveRtsp && player.playbackState == Player.STATE_READY && !hasSelectedVideo ->
-                                updatedStalled >= 4 && canRetryNormal
-                            player.isPlaying && !eval.healthyProgress -> updatedStalled >= 6 && canRetryNormal
-                            else -> updatedStalled >= 10 && canRetryNormal
+                                updatedStalled >= 5 && canRetryNormal
+                            player.isPlaying && !eval.healthyProgress -> updatedStalled >= 9 && canRetryNormal
+                            else -> updatedStalled >= 12 && canRetryNormal
                         }
 
                         if (shouldRecover) {
@@ -1103,6 +1239,11 @@ class RtspStreamManager(private val context: Context) {
         ): Boolean {
             val foregroundUiMounted = isAppInForeground && attachedSurfaceCount > 0 && hasAvailableTextureView
             return !foregroundUiMounted
+        }
+
+        fun quantizeLatencyMs(latencyMs: Long, bucketMs: Long = 50L): Long {
+            if (latencyMs <= 0L) return 0L
+            return ((latencyMs + bucketMs / 2L) / bucketMs) * bucketMs
         }
     }
 }

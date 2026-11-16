@@ -243,7 +243,7 @@ class RecordingSchedulerEngine(
         finishRecordingSession(
             session = existing,
             keepRecordingState = true,
-            emitErrorOnEmpty = true
+            emitErrorOnEmpty = false
         )
         val codecFinalizeJob = lastCodecFinalizeJobs[camera.id]
 

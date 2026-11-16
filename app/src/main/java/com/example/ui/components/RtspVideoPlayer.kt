@@ -155,26 +155,22 @@ fun RtspVideoPlayer(
     }
 
     LaunchedEffect(camera.id, player) {
-        delay(90)
+        delay(60)
         val pv = playerViewRef ?: return@LaunchedEffect
         if (player != null) {
             try {
-                val tv = pv.videoSurfaceView as? android.view.TextureView
+                val tv = (pv.videoSurfaceView as? TextureView)
+                    ?: (0 until pv.childCount).mapNotNull { pv.getChildAt(it) as? TextureView }.firstOrNull()
                 if (tv != null) {
-                    var waits = 0
-                    while (!tv.isAvailable && waits < 10) {
-                        delay(80)
-                        waits++
-                    }
-                    if (pv.player !== player) {
-                        pv.player = player
-                    } else if (tv.isAvailable) {
-                        player.setVideoTextureView(tv)
-                    }
-                } else if (pv.player !== player) {
-                    pv.player = player
+                    sharedStreamManager.registerTextureView(camera.id, tv)
                 }
-                pv.onResume()
+                if (pv.player !== player) {
+                    pv.player = player
+                    pv.onResume()
+                } else if (sharedStreamManager.hasHeadlessGrabber(camera.id) && tv != null && tv.isAvailable) {
+                    sharedStreamManager.reattachTextureView(camera.id, tv)
+                    pv.onResume()
+                }
             } catch (_: Exception) {}
         }
     }
@@ -189,27 +185,6 @@ fun RtspVideoPlayer(
             }
         }
     }
-
-    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
-    val recordingAlpha by infiniteTransition.animateFloat(
-        initialValue = 0.3f,
-        targetValue = 1.0f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(600, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "rec_alpha"
-    )
-
-    val motionBoxScale by infiniteTransition.animateFloat(
-        initialValue = 0.95f,
-        targetValue = 1.05f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(500, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "motion_box_pulse"
-    )
 
     val focusedOrTv = hasFocus || isTvFocused
 
@@ -277,8 +252,7 @@ fun RtspVideoPlayer(
             // Clean dark backdrop (shows subtle surveillance grid only when technical details or motion active)
             SurveillanceCanvas(
                 isMotionDetected = telemetry.isMotionDetected,
-                showGrid = showTechnicalDetails,
-                motionBoxScale = motionBoxScale
+                showGrid = showTechnicalDetails
             )
 
             // Video Stream View - Kept continuously mounted when player is present
@@ -302,19 +276,27 @@ fun RtspVideoPlayer(
                         }
                     },
                     update = { playerView ->
-                        playerViewRef = playerView
+                        if (playerViewRef !== playerView) {
+                            playerViewRef = playerView
+                        }
                         if (playerView.player !== player) {
                             playerView.player = player
                             playerView.onResume()
+                            val tv = (playerView.videoSurfaceView as? TextureView)
+                                ?: (0 until playerView.childCount).mapNotNull { playerView.getChildAt(it) as? TextureView }.firstOrNull()
+                            if (tv != null) {
+                                sharedStreamManager.registerTextureView(camera.id, tv)
+                            }
+                        } else {
+                            (playerView.videoSurfaceView as? TextureView)?.let { tv ->
+                                sharedStreamManager.registerTextureView(camera.id, tv)
+                            }
                         }
                         if (playerView.resizeMode != AspectRatioFrameLayout.RESIZE_MODE_ZOOM) {
                             playerView.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
                         }
-                        playerView.keepScreenOn = true
-                        val tv = (playerView.videoSurfaceView as? TextureView)
-                            ?: (0 until playerView.childCount).mapNotNull { playerView.getChildAt(it) as? TextureView }.firstOrNull()
-                        if (tv != null) {
-                            sharedStreamManager.registerTextureView(camera.id, tv)
+                        if (!playerView.keepScreenOn) {
+                            playerView.keepScreenOn = true
                         }
                     },
                     onRelease = { playerView ->
@@ -440,12 +422,7 @@ fun RtspVideoPlayer(
                     horizontalArrangement = Arrangement.spacedBy(5.dp)
                 ) {
                     if (telemetry.isRecording) {
-                        Box(
-                            modifier = Modifier
-                                .size(7.dp)
-                                .clip(CircleShape)
-                                .background(NeonRed.copy(alpha = recordingAlpha))
-                        )
+                        PulsingRecDot(size = 7.dp)
                     }
                     Text(
                         text = camera.name,
@@ -528,12 +505,7 @@ fun RtspVideoPlayer(
                                     .background(NeonRed.copy(alpha = 0.25f))
                                     .padding(horizontal = 6.dp, vertical = 2.dp)
                             ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(7.dp)
-                                        .clip(CircleShape)
-                                        .background(NeonRed.copy(alpha = recordingAlpha))
-                                )
+                                PulsingRecDot(size = 7.dp)
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text(
                                     text = stringResource(R.string.player_rec_badge),
@@ -695,11 +667,46 @@ fun RtspVideoPlayer(
 }
 
 @Composable
+private fun PulsingRecDot(size: androidx.compose.ui.unit.Dp) {
+    val transition = rememberInfiniteTransition(label = "rec_pulse")
+    val alphaState = transition.animateFloat(
+        initialValue = 0.35f,
+        targetValue = 1.0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(650, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "rec_alpha"
+    )
+    Box(
+        modifier = Modifier
+            .size(size)
+            .graphicsLayer { alpha = alphaState.value }
+            .clip(CircleShape)
+            .background(NeonRed)
+    )
+}
+
+@Composable
 fun SurveillanceCanvas(
     isMotionDetected: Boolean,
-    showGrid: Boolean,
-    motionBoxScale: Float
+    showGrid: Boolean
 ) {
+    val motionScaleState = if (isMotionDetected) {
+        val transition = rememberInfiniteTransition(label = "motion_pulse")
+        transition.animateFloat(
+            initialValue = 0.95f,
+            targetValue = 1.05f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(500, easing = FastOutSlowInEasing),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "motion_box_pulse"
+        )
+    } else {
+        null
+    }
+
     Canvas(modifier = Modifier.fillMaxSize()) {
         val w = size.width
         val h = size.height
@@ -738,6 +745,7 @@ fun SurveillanceCanvas(
         }
 
         if (isMotionDetected) {
+            val motionBoxScale = motionScaleState?.value ?: 1.0f
             val boxW = 110.dp.toPx() * motionBoxScale
             val boxH = 80.dp.toPx() * motionBoxScale
             val boxLeft = (w / 2f - boxW / 2f) + (w * 0.1f)

@@ -6,6 +6,7 @@ import com.example.R
 import com.example.data.model.CameraEntity
 import com.example.i18n.AppLocaleManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -71,8 +72,11 @@ class CameraDiscoveryEngine(
     private val _state = MutableStateFlow(DiscoveryScanState())
     val state: StateFlow<DiscoveryScanState> = _state.asStateFlow()
 
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val scanDispatcher = Dispatchers.IO.limitedParallelism(12)
+
     suspend fun scanLocalNetwork(existingCameras: List<CameraEntity>): List<DiscoveredCamera> =
-        withContext(Dispatchers.IO) {
+        withContext(scanDispatcher) {
             if (_state.value.isScanning) {
                 return@withContext _state.value.results
             }
@@ -282,9 +286,9 @@ class CameraDiscoveryEngine(
             .distinct()
             .take(512)
 
-        val semaphore = Semaphore(64)
+        val semaphore = Semaphore(12)
         hostsToScan.map { ip ->
-            async(Dispatchers.IO) {
+            async(scanDispatcher) {
                 semaphore.withPermit {
                     probeHostTcp(ip)
                 }

@@ -72,6 +72,7 @@ class CameraStreamRecorder(
         var frameCount: Int = 0,
         var lastPresentationTimeUs: Long = -1L,
         var lastLiveFrame: Bitmap? = null,
+        var captureScratchBitmap: Bitmap? = null,
         var initFailed: Boolean = false,
         val fatalError: AtomicBoolean = AtomicBoolean(false),
         @Volatile var consecutiveEncodeErrors: Int = 0,
@@ -153,23 +154,40 @@ class CameraStreamRecorder(
                 }
 
                 var frameIndex = 0
+                var lastCapturedToken = Int.MIN_VALUE
+                var lastEncodedWallMs = 0L
                 while (isActive && !recorder.isStopping.get()) {
                     val loopStart = System.currentTimeMillis()
                     var rawLiveBitmap: Bitmap? = null
                     var liveBitmap: Bitmap? = null
                     var frameBitmap: Bitmap? = null
                     var attemptingEncode = false
+                    var capturedFromHeadless = false
                     try {
-                        rawLiveBitmap = try {
-                            streamManager.captureFrameForBackgroundWorker(
+                        val reuseBuf = recorder.captureScratchBitmap?.takeIf {
+                            !it.isRecycled && it.width == width && it.height == height
+                        } ?: runCatching {
+                            Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                        }.getOrNull()?.also { recorder.captureScratchBitmap = it }
+
+                        val capture = try {
+                            streamManager.captureFrameForRecording(
                                 camera = camera,
                                 maxSide = maxOf(width, height),
                                 alignTo = 16,
-                                waitHeadlessFirstFrameMs = if (frameIndex == 0) 400L else 0L
+                                waitHeadlessFirstFrameMs = if (frameIndex == 0) 400L else 0L,
+                                reuseBitmap = reuseBuf,
+                                previousRenderedToken = lastCapturedToken
                             )
                         } catch (_: Throwable) {
-                            null
+                            RtspStreamManager.CapturedVideoFrame(null)
                         }
+
+                        capturedFromHeadless = capture.isFromHeadless
+                        if (capture.renderedFrameToken > 0) {
+                            lastCapturedToken = capture.renderedFrameToken
+                        }
+                        rawLiveBitmap = capture.bitmap
 
                         liveBitmap = if (rawLiveBitmap != null && !rawLiveBitmap.isRecycled) {
                             if (rawLiveBitmap.width == width && rawLiveBitmap.height == height &&
@@ -186,7 +204,10 @@ class CameraStreamRecorder(
                                             if (!scaled.isRecycled) scaled.recycle()
                                         }
                                     }
-                                    if (rawLiveBitmap !== argb && !rawLiveBitmap.isRecycled) {
+                                    if (rawLiveBitmap !== argb &&
+                                        rawLiveBitmap !== recorder.captureScratchBitmap &&
+                                        !rawLiveBitmap.isRecycled
+                                    ) {
                                         rawLiveBitmap.recycle()
                                     }
                                     argb
@@ -198,23 +219,14 @@ class CameraStreamRecorder(
                             null
                         }
 
-                        if (liveBitmap != null && !liveBitmap.isRecycled) {
-                            val copyForCache = runCatching {
-                                liveBitmap.copy(Bitmap.Config.ARGB_8888, false)
-                            }.getOrNull()
-                            if (copyForCache != null) {
-                                recorder.lastLiveFrame?.let { old ->
-                                    if (!old.isRecycled) old.recycle()
-                                }
-                                recorder.lastLiveFrame = copyForCache
-                            }
-                        }
-
+                        val needHeartbeatFrame = recorder.frameCount > 0 &&
+                            (loopStart - lastEncodedWallMs) >= 1_000L
                         val cachedFrame = recorder.lastLiveFrame
+
                         frameBitmap = when {
                             liveBitmap != null && !liveBitmap.isRecycled -> liveBitmap
-                            recorder.frameCount > 0 && cachedFrame != null && !cachedFrame.isRecycled ->
-                                runCatching { cachedFrame.copy(Bitmap.Config.ARGB_8888, false) }.getOrNull()
+                            !capture.unchanged && needHeartbeatFrame && cachedFrame != null && !cachedFrame.isRecycled -> cachedFrame
+                            capture.unchanged && needHeartbeatFrame && cachedFrame != null && !cachedFrame.isRecycled -> cachedFrame
                             else -> null
                         }
 
@@ -244,8 +256,24 @@ class CameraStreamRecorder(
                                 recorder = recorder
                             )
                             recorder.consecutiveEncodeErrors = 0
+                            lastEncodedWallMs = System.currentTimeMillis()
                             frameIndex++
                             recorder.frameCount = frameIndex
+
+                            // Ping-pong swap so lastLiveFrame always holds the latest encoded frame with 0 allocations
+                            if (liveBitmap != null && !liveBitmap.isRecycled) {
+                                if (liveBitmap === recorder.captureScratchBitmap) {
+                                    val oldCache = recorder.lastLiveFrame
+                                    recorder.lastLiveFrame = liveBitmap
+                                    recorder.captureScratchBitmap = oldCache
+                                } else if (liveBitmap !== recorder.lastLiveFrame) {
+                                    val oldCache = recorder.lastLiveFrame
+                                    recorder.lastLiveFrame = liveBitmap
+                                    if (oldCache != null && oldCache !== recorder.captureScratchBitmap && !oldCache.isRecycled) {
+                                        oldCache.recycle()
+                                    }
+                                }
+                            }
                         }
                     } catch (t: Throwable) {
                         Log.w("CameraStreamRecorder", "Record loop frame error for ${camera.id}: ${t.message}")
@@ -261,19 +289,28 @@ class CameraStreamRecorder(
                             }
                         }
                     } finally {
-                        if (rawLiveBitmap != null && rawLiveBitmap !== liveBitmap &&
-                            rawLiveBitmap !== frameBitmap && !rawLiveBitmap.isRecycled &&
-                            rawLiveBitmap !== recorder.lastLiveFrame
+                        if (rawLiveBitmap != null &&
+                            rawLiveBitmap !== liveBitmap &&
+                            rawLiveBitmap !== frameBitmap &&
+                            rawLiveBitmap !== recorder.lastLiveFrame &&
+                            rawLiveBitmap !== recorder.captureScratchBitmap &&
+                            !rawLiveBitmap.isRecycled
                         ) {
                             rawLiveBitmap.recycle()
                         }
-                        if (liveBitmap != null && liveBitmap !== frameBitmap &&
-                            !liveBitmap.isRecycled && liveBitmap !== recorder.lastLiveFrame
+                        if (liveBitmap != null &&
+                            liveBitmap !== frameBitmap &&
+                            liveBitmap !== recorder.lastLiveFrame &&
+                            liveBitmap !== recorder.captureScratchBitmap &&
+                            !liveBitmap.isRecycled
                         ) {
                             liveBitmap.recycle()
                         }
                         frameBitmap?.let { bmp ->
-                            if (!bmp.isRecycled && bmp !== recorder.lastLiveFrame) {
+                            if (bmp !== recorder.lastLiveFrame &&
+                                bmp !== recorder.captureScratchBitmap &&
+                                !bmp.isRecycled
+                            ) {
                                 bmp.recycle()
                             }
                         }
@@ -281,8 +318,13 @@ class CameraStreamRecorder(
 
                     if (recorder.isStopping.get() || recorder.fatalError.get()) break
 
+                    val isForeground = !capturedFromHeadless && streamManager.isForegroundCaptureActive(camera.id)
+                    val targetIntervalMs = computeTargetFrameIntervalMs(
+                        activeRecorderCount = activeRecorders.size,
+                        isForegroundCapture = isForeground
+                    )
                     val elapsed = System.currentTimeMillis() - loopStart
-                    val sleepMs = (100L - elapsed).coerceAtLeast(15L)
+                    val sleepMs = (targetIntervalMs - elapsed).coerceAtLeast(15L)
                     delay(sleepMs)
                 }
             } finally {
@@ -497,7 +539,11 @@ class CameraStreamRecorder(
                     recorder.lastLiveFrame?.let { bmp ->
                         if (!bmp.isRecycled) bmp.recycle()
                     }
+                    recorder.captureScratchBitmap?.let { bmp ->
+                        if (!bmp.isRecycled) bmp.recycle()
+                    }
                     recorder.lastLiveFrame = null
+                    recorder.captureScratchBitmap = null
                     recorder.yuvArgbScratch = null
                     recorder.yuvBytesScratch = null
 
@@ -528,7 +574,11 @@ class CameraStreamRecorder(
                 recorder.lastLiveFrame?.let { bmp ->
                     if (!bmp.isRecycled) bmp.recycle()
                 }
+                recorder.captureScratchBitmap?.let { bmp ->
+                    if (!bmp.isRecycled) bmp.recycle()
+                }
                 recorder.lastLiveFrame = null
+                recorder.captureScratchBitmap = null
                 if (recorder.frameCount > 0 &&
                     recorder.isMuxerStarted &&
                     StorageTimelineEngine.isPlayableClipFile(recorder.outputFile)
@@ -871,6 +921,18 @@ class CameraStreamRecorder(
     companion object {
         private const val EGL_RECORDABLE_ANDROID = 0x3142
         private const val MAX_CONSECUTIVE_ENCODE_ERRORS = 3
+
+        fun computeTargetFrameIntervalMs(
+            activeRecorderCount: Int,
+            isForegroundCapture: Boolean
+        ): Long {
+            if (!isForegroundCapture) return 100L
+            return when {
+                activeRecorderCount <= 1 -> 125L
+                activeRecorderCount == 2 -> 175L
+                else -> 210L
+            }
+        }
 
         private const val VS_SOURCE = """
             attribute vec4 aPosition;

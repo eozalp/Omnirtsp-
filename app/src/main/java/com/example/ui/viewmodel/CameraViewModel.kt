@@ -220,7 +220,13 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         observeFloatingRotationPersistence()
         observeKeepAliveService()
         observeRecordingErrors()
-        scanForNetworkCameras()
+        viewModelScope.launch {
+            delay(1_500L)
+            val existing = withContext(Dispatchers.IO) { database.cameraDao().getEnabledCameras() }
+            if (existing.isEmpty()) {
+                cameraDiscoveryEngine.scanLocalNetwork(existing)
+            }
+        }
     }
 
     private fun observeRecordingErrors() {
