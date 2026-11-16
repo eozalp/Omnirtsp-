@@ -101,6 +101,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -367,6 +369,7 @@ fun LiveMultiCamScreen(
                 ) {
                     // Auto-Discover Network Cameras
                     val unaddedFoundCount = discoveryState.results.count { !it.alreadyAdded }
+                    val findCamerasLabel = stringResource(R.string.live_find_network_cameras)
                     FilledIconButton(
                         onClick = {
                             showDiscoveryDialog = true
@@ -374,7 +377,10 @@ fun LiveMultiCamScreen(
                                 viewModel.scanForNetworkCameras()
                             }
                         },
-                        modifier = Modifier.size(40.dp).testTag("discover_cameras_btn"),
+                        modifier = Modifier
+                            .size(40.dp)
+                            .semantics { contentDescription = findCamerasLabel }
+                            .testTag("discover_cameras_btn"),
                         colors = IconButtonDefaults.filledIconButtonColors(
                             containerColor = if (unaddedFoundCount > 0 || discoveryState.isScanning) NeonCyan else SurveillanceSurface,
                             contentColor = if (unaddedFoundCount > 0 || discoveryState.isScanning) Color.Black else NeonCyan
@@ -389,7 +395,7 @@ fun LiveMultiCamScreen(
                         } else {
                             Icon(
                                 Icons.Default.Router,
-                                contentDescription = stringResource(R.string.live_find_network_cameras),
+                                contentDescription = null,
                                 modifier = Modifier.size(19.dp)
                             )
                         }
