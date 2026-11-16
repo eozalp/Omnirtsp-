@@ -69,7 +69,6 @@
     <string name="live_menu_ptz">Kamera PTZ (Yatay/Dikey/Yakınlaştır)</string>
     <string name="live_menu_reset_size">Boyutu Sıfırla</string>
     <string name="live_menu_camera_settings">Kamera Ayarları</string>
-    <string name="live_menu_test_motion">Hareket Uyarısını Test Et</string>
     <string name="live_menu_remove_camera">Kamerayı Kaldır</string>
     <string name="live_overlay_dialog_title">Diğer Uygulamaların Üzerinde Göster</string>
     <string name="live_overlay_dialog_body">OmniView uygulamasının YouTube ve diğer uygulamaların üzerinde yüzen kamera pencereleri göstermesine izin verin.</string>
@@ -111,6 +110,7 @@
     <string name="cam_name_label">Kamera Adı</string>
     <string name="cam_rtsp_url_label">RTSP Akış URL\'si</string>
     <string name="cam_rtsp_url_hint">örn. rtsp://192.168.1.120:554/live/ch0</string>
+    <string name="cam_rtsp_url_required">Geçerli bir RTSP akış URL\'si girin (örn. rtsp://...)</string>
     <string name="cam_credentials_title">RTSP Kamera Kimlik Bilgileri</string>
     <string name="cam_username_label">Kamera Kullanıcı Adı (örn. admin)</string>
     <string name="cam_password_label">Kamera Şifresi</string>
@@ -219,12 +219,10 @@
     <string name="alerts_filter_medium">Orta</string>
     <string name="alerts_filter_low">Düşük</string>
     <string name="alerts_empty_title">Henüz hareket olayı kaydedilmedi</string>
-    <string name="alerts_trigger_test">Test Hareket Uyarısı Tetikle</string>
     <string name="alerts_tap_to_view">Yayını izlemek için dokunun →</string>
     <string name="alerts_channel_name">Hareket Algılama Uyarıları</string>
     <string name="alerts_channel_desc">RTSP kamera hareket olaylarının tetiklediği anlık uyarılar</string>
     <string name="alerts_notif_title">Hareket Algılandı: %1$s</string>
-    <string name="alerts_manual_desc">Hareket algılandı (%%%1$d)</string>
     <string name="alerts_frame_var_desc">Hareket algılandı: %%%1$d kare değişimi (Eşik: %%%2$d)</string>
     <string name="alerts_desc_high">Birincil bölgede yüksek yoğunluklu hareket algılandı (%%%1$d)</string>
     <string name="alerts_desc_medium">Kare genelinde hareket algılandı (%%%1$d)</string>
@@ -613,4 +611,9 @@
     <string name="exit_app_confirm_btn">Uygulamayı Kapat</string>
     <string name="exit_app_closing_progress">Kayıtlar kaydediliyor ve kapatılıyor…</string>
     <string name="keepalive_notif_active_rec">Arka plan izleme etkin • %1$d kayıt devam ediyor</string>
+
+    <!-- Gerçek Anlık Görüntü ve Kayıt Hataları -->
+    <string name="snapshot_saved_status">Anlık görüntü kaydedildi (%1$s)</string>
+    <string name="snapshot_failed_status">Anlık görüntü alınamadı: %1$s kamerasından çözümlenmiş video karesi yok</string>
+    <string name="recording_no_frames_error">%1$s kaydı iptal edildi: canlı video karesi alınamadı</string>
 </resources>

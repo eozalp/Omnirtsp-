@@ -14,6 +14,9 @@ interface CameraDao {
     @Query("SELECT * FROM cameras ORDER BY name ASC")
     fun getAllCameras(): Flow<List<CameraEntity>>
 
+    @Query("SELECT * FROM cameras ORDER BY name ASC")
+    suspend fun getAllCamerasSync(): List<CameraEntity>
+
     @Query("SELECT * FROM cameras WHERE id = :id LIMIT 1")
     suspend fun getCameraById(id: String): CameraEntity?
 

@@ -632,9 +632,9 @@ fun StorageTimelinePlayer(
                                 )
                             )
                             .windowInsetsPadding(
-                                WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal)
+                                WindowInsets.navigationBars.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal)
                             )
-                            .padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 14.dp)
+                            .padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 4.dp)
                             .testTag("timeline_fullscreen_bottom_hud")
                     ) {
                         scrubPreviewFraction?.let { frac ->
@@ -648,15 +648,15 @@ fun StorageTimelinePlayer(
                                 Surface(
                                     shape = RoundedCornerShape(6.dp),
                                     color = NeonCyan,
-                                    modifier = Modifier.padding(bottom = 6.dp)
+                                    modifier = Modifier.padding(bottom = 4.dp)
                                 ) {
                                     Text(
                                         text = "${wallClockFormatter.format(Date(previewClock))} • ${previewSeg?.clip?.cameraName.orEmpty()}",
                                         color = Color.Black,
-                                        fontSize = 11.sp,
+                                        fontSize = 10.sp,
                                         fontWeight = FontWeight.Bold,
                                         fontFamily = FontFamily.Monospace,
-                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp)
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
                                     )
                                 }
                             }
@@ -670,12 +670,12 @@ fun StorageTimelinePlayer(
                             onScrubStateChanged = { scrubPreviewFraction = it }
                         )
 
-                        Spacer(modifier = Modifier.height(6.dp))
+                        Spacer(modifier = Modifier.height(4.dp))
 
-                        // Time + Speed & Mute row (always visible without horizontal clipping)
+                        // Compact Time + Speed & Mute row (always visible without pushing buttons down)
                         val speedLabel = if (playbackSpeed % 1f == 0f) "${playbackSpeed.toInt()}x" else "${playbackSpeed}x"
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier.fillMaxWidth().height(32.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
@@ -683,7 +683,7 @@ fun StorageTimelinePlayer(
                                 Text(
                                     text = "${StorageTimelineEngine.formatDurationHms(elapsedTotalMs)} / ${StorageTimelineEngine.formatDurationHms(timeline.totalFootageMs)}",
                                     color = Color.White,
-                                    fontSize = 12.sp,
+                                    fontSize = 11.sp,
                                     fontFamily = FontFamily.Monospace,
                                     fontWeight = FontWeight.Bold
                                 )
@@ -691,7 +691,7 @@ fun StorageTimelinePlayer(
                                     Text(
                                         text = "${activeSegment.clip.durationSeconds}s • ${activeSegment.clip.fileSizeMb} MB",
                                         color = Color.White.copy(alpha = 0.72f),
-                                        fontSize = 10.sp,
+                                        fontSize = 9.sp,
                                         fontFamily = FontFamily.Monospace
                                     )
                                 }
@@ -699,26 +699,25 @@ fun StorageTimelinePlayer(
 
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 Surface(
-                                    shape = RoundedCornerShape(8.dp),
+                                    shape = RoundedCornerShape(6.dp),
                                     color = SurveillanceSurface,
                                     border = BorderStroke(1.dp, NeonCyan.copy(alpha = 0.55f)),
                                     modifier = Modifier
-                                        .minimumInteractiveComponentSize()
-                                        .clip(RoundedCornerShape(8.dp))
+                                        .clip(RoundedCornerShape(6.dp))
                                         .clickable(onClick = cycleSpeed)
                                         .testTag("timeline_speed_btn")
                                 ) {
                                     Box(
                                         contentAlignment = Alignment.Center,
-                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                                     ) {
                                         Text(
                                             text = speedLabel,
                                             color = NeonCyan,
-                                            fontSize = 12.sp,
+                                            fontSize = 11.sp,
                                             fontWeight = FontWeight.Bold,
                                             fontFamily = FontFamily.Monospace
                                         )
@@ -730,12 +729,13 @@ fun StorageTimelinePlayer(
                                         isMuted = !isMuted
                                         timelinePlayer.volume = if (isMuted) 0f else 1f
                                     },
-                                    modifier = Modifier.minimumInteractiveComponentSize().testTag("timeline_mute_btn")
+                                    modifier = Modifier.size(32.dp).testTag("timeline_mute_btn")
                                 ) {
                                     Icon(
                                         imageVector = if (isMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
                                         contentDescription = stringResource(R.string.recordings_timeline_mute_toggle),
-                                        tint = if (isMuted) Color.Gray else NeonCyan
+                                        tint = if (isMuted) Color.Gray else NeonCyan,
+                                        modifier = Modifier.size(18.dp)
                                     )
                                 }
                             }
@@ -1514,14 +1514,14 @@ private fun FullscreenTimelineTransportRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .heightIn(min = 52.dp),
+            .height(42.dp),
         horizontalArrangement = Arrangement.SpaceEvenly,
         verticalAlignment = Alignment.CenterVertically
     ) {
         IconButton(
             onClick = onPrevMotion,
             enabled = hasPrevMotion,
-            modifier = Modifier.weight(1f).minimumInteractiveComponentSize().testTag("timeline_prev_motion_btn")
+            modifier = Modifier.weight(1f).height(42.dp).testTag("timeline_prev_motion_btn")
         ) {
             Icon(
                 Icons.Default.NotificationsActive,
@@ -1534,35 +1534,37 @@ private fun FullscreenTimelineTransportRow(
         IconButton(
             onClick = onPrevChunk,
             enabled = hasPrevChunk,
-            modifier = Modifier.weight(1f).minimumInteractiveComponentSize().testTag("timeline_prev_chunk_btn")
+            modifier = Modifier.weight(1f).height(42.dp).testTag("timeline_prev_chunk_btn")
         ) {
             Icon(
                 Icons.Default.SkipPrevious,
                 contentDescription = stringResource(R.string.recordings_timeline_prev_chunk),
-                tint = if (hasPrevChunk) Color.White else Color.Gray
+                tint = if (hasPrevChunk) Color.White else Color.Gray,
+                modifier = Modifier.size(20.dp)
             )
         }
 
         IconButton(
             onClick = onRewind10,
-            modifier = Modifier.weight(1f).minimumInteractiveComponentSize().testTag("timeline_rewind_btn")
+            modifier = Modifier.weight(1f).height(42.dp).testTag("timeline_rewind_btn")
         ) {
             Icon(
                 Icons.Default.Replay10,
                 contentDescription = stringResource(R.string.recordings_timeline_rewind),
-                tint = Color.White
+                tint = Color.White,
+                modifier = Modifier.size(20.dp)
             )
         }
 
         Box(
-            modifier = Modifier.weight(1.2f),
+            modifier = Modifier.weight(1.1f),
             contentAlignment = Alignment.Center
         ) {
             Surface(
                 shape = CircleShape,
                 color = NeonCyan,
                 modifier = Modifier
-                    .size(48.dp)
+                    .size(40.dp)
                     .clip(CircleShape)
                     .clickable(onClick = onTogglePlayPause)
                     .testTag("timeline_play_pause_btn")
@@ -1572,7 +1574,7 @@ private fun FullscreenTimelineTransportRow(
                         imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                         contentDescription = stringResource(R.string.recordings_timeline_play_pause),
                         tint = Color.Black,
-                        modifier = Modifier.size(26.dp)
+                        modifier = Modifier.size(22.dp)
                     )
                 }
             }
@@ -1580,31 +1582,33 @@ private fun FullscreenTimelineTransportRow(
 
         IconButton(
             onClick = onForward10,
-            modifier = Modifier.weight(1f).minimumInteractiveComponentSize().testTag("timeline_forward_btn")
+            modifier = Modifier.weight(1f).height(42.dp).testTag("timeline_forward_btn")
         ) {
             Icon(
                 Icons.Default.Forward10,
                 contentDescription = stringResource(R.string.recordings_timeline_forward),
-                tint = Color.White
+                tint = Color.White,
+                modifier = Modifier.size(20.dp)
             )
         }
 
         IconButton(
             onClick = onNextChunk,
             enabled = hasNextChunk,
-            modifier = Modifier.weight(1f).minimumInteractiveComponentSize().testTag("timeline_next_chunk_btn")
+            modifier = Modifier.weight(1f).height(42.dp).testTag("timeline_next_chunk_btn")
         ) {
             Icon(
                 Icons.Default.SkipNext,
                 contentDescription = stringResource(R.string.recordings_timeline_next_chunk),
-                tint = if (hasNextChunk) Color.White else Color.Gray
+                tint = if (hasNextChunk) Color.White else Color.Gray,
+                modifier = Modifier.size(20.dp)
             )
         }
 
         IconButton(
             onClick = onNextMotion,
             enabled = hasNextMotion,
-            modifier = Modifier.weight(1f).minimumInteractiveComponentSize().testTag("timeline_next_motion_btn")
+            modifier = Modifier.weight(1f).height(42.dp).testTag("timeline_next_motion_btn")
         ) {
             Icon(
                 Icons.Default.NotificationsActive,

@@ -42,6 +42,7 @@ import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Camera
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
@@ -51,7 +52,6 @@ import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.MotionPhotosOn
 import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Refresh
@@ -151,6 +151,7 @@ fun LiveMultiCamScreen(
     val isGlobalMuted by viewModel.isGlobalMuted.collectAsState()
     val hubState by viewModel.hubServerState.collectAsState()
     val isShuttingDown by viewModel.isShuttingDown.collectAsState()
+    val localExportStatus by viewModel.localExportStatus.collectAsState()
 
     var showCameraDialog by remember { mutableStateOf(false) }
     var cameraToEdit by remember { mutableStateOf<CameraEntity?>(null) }
@@ -674,6 +675,48 @@ fun LiveMultiCamScreen(
                 }
             }
 
+            // Snapshot / Recording Status Notification Banner
+            AnimatedVisibility(visible = !localExportStatus.isNullOrBlank()) {
+                localExportStatus?.let { statusMsg ->
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .testTag("live_status_banner"),
+                        color = NeonCyan.copy(alpha = 0.14f),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, NeonCyan.copy(alpha = 0.65f))
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.weight(1f).padding(end = 8.dp)
+                            ) {
+                                Icon(Icons.Default.Info, contentDescription = null, tint = NeonCyan, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = statusMsg,
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            IconButton(
+                                onClick = { viewModel.clearLocalExportStatus() },
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Icon(Icons.Default.Close, contentDescription = stringResource(R.string.common_close), tint = NeonCyan, modifier = Modifier.size(16.dp))
+                            }
+                        }
+                    }
+                }
+            }
+
             // Empty State or Camera Grid
             if (cameras.isEmpty()) {
                 Box(
@@ -974,11 +1017,11 @@ fun LiveMultiCamScreen(
                                                     }
                                                 )
                                                 DropdownMenuItem(
-                                                    text = { Text(stringResource(R.string.live_menu_test_motion), color = Color.White) },
-                                                    leadingIcon = { Icon(Icons.Default.MotionPhotosOn, contentDescription = null, tint = NeonAmber) },
+                                                    text = { Text(stringResource(R.string.fullscreen_snapshot), color = Color.White) },
+                                                    leadingIcon = { Icon(Icons.Default.Camera, contentDescription = null, tint = NeonCyan) },
                                                     onClick = {
                                                         menuExpanded = false
-                                                        viewModel.triggerMotionAlertManually(camera, level = 80)
+                                                        viewModel.captureCameraSnapshot(camera)
                                                     }
                                                 )
                                                 DropdownMenuItem(

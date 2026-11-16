@@ -106,21 +106,14 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         database.cameraDao().getAllCameras(),
         FloatingOverlayStateHolder.liveRotations
     ) { list, liveRotations ->
-        val localFeed = "android.resource://${getApplication<Application>().packageName}/${R.raw.surveillance_feed}"
-        val sanitized = list.map { cam ->
-            val withFeed = if (cam.rtspUrl.contains("commondatastorage.googleapis.com") || cam.rtspUrl.contains("wowzaec2demo")) {
-                cam.copy(rtspUrl = localFeed)
+        list.map { cam ->
+            val liveRot = liveRotations[cam.id]
+            if (liveRot != null && liveRot != cam.rotationDegrees) {
+                cam.copy(rotationDegrees = liveRot)
             } else {
                 cam
             }
-            val liveRot = liveRotations[withFeed.id]
-            if (liveRot != null && liveRot != withFeed.rotationDegrees) {
-                withFeed.copy(rotationDegrees = liveRot)
-            } else {
-                withFeed
-            }
         }
-        sanitized
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val alerts: StateFlow<List<MotionAlertEntity>> = database.motionAlertDao().getAllAlerts()
@@ -223,11 +216,23 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         AppLocaleManager.init(application)
         FloatingOverlayStateHolder.initAudioSettings(application)
         initRemoteHubServer(application)
-        seedInitialSurveillanceData()
         observeCamerasSync()
         observeFloatingRotationPersistence()
         observeKeepAliveService()
+        observeRecordingErrors()
         scanForNetworkCameras()
+    }
+
+    private fun observeRecordingErrors() {
+        viewModelScope.launch {
+            recordingSchedulerEngine.recordingErrors.collect { cameraName ->
+                _localExportStatus.value = AppLocaleManager.getString(
+                    getApplication(),
+                    R.string.recording_no_frames_error,
+                    cameraName
+                )
+            }
+        }
     }
 
     private fun observeCamerasSync() {
@@ -290,112 +295,6 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                     delay(120)
                     database.cameraDao().updateRotation(cameraId, degrees)
                 }
-            }
-        }
-    }
-
-    private fun seedInitialSurveillanceData() {
-        viewModelScope.launch {
-            val localFeedUri = "android.resource://${getApplication<Application>().packageName}/${R.raw.surveillance_feed}"
-            val existing = database.cameraDao().getEnabledCameras()
-            for (cam in existing) {
-                if (cam.rtspUrl.contains("commondatastorage.googleapis.com") ||
-                    cam.rtspUrl.contains("wowzaec2demo.streamlock.net")
-                ) {
-                    database.cameraDao().insertCamera(
-                        cam.copy(rtspUrl = localFeedUri)
-                    )
-                }
-            }
-            if (existing.isEmpty()) {
-                val seedCameras = listOf(
-                    CameraEntity(
-                        id = "cam_front_gate",
-                        name = "Front Gate",
-                        rtspUrl = localFeedUri,
-                        transport = RtspTransport.TCP,
-                        quality = StreamQuality.MAIN_HD,
-                        isMotionDetectionEnabled = true,
-                        motionSensitivity = 75,
-                        location = "Exterior Perimeter",
-                        isDemoCamera = false
-                    ),
-                    CameraEntity(
-                        id = "cam_driveway",
-                        name = "Driveway",
-                        rtspUrl = localFeedUri,
-                        transport = RtspTransport.TCP,
-                        quality = StreamQuality.MAIN_HD,
-                        isMotionDetectionEnabled = true,
-                        motionSensitivity = 60,
-                        location = "Driveway North",
-                        isDemoCamera = false
-                    ),
-                    CameraEntity(
-                        id = "cam_backyard",
-                        name = "Backyard",
-                        rtspUrl = localFeedUri,
-                        transport = RtspTransport.UDP,
-                        quality = StreamQuality.SUB_SD,
-                        isMotionDetectionEnabled = true,
-                        motionSensitivity = 80,
-                        location = "Garden South",
-                        isDemoCamera = false
-                    ),
-                    CameraEntity(
-                        id = "cam_living_room",
-                        name = "Main Entrance",
-                        rtspUrl = localFeedUri,
-                        transport = RtspTransport.TCP,
-                        quality = StreamQuality.MAIN_HD,
-                        isMotionDetectionEnabled = true,
-                        motionSensitivity = 70,
-                        location = "Foyer Indoor",
-                        isDemoCamera = false
-                    )
-                )
-                database.cameraDao().insertCameras(seedCameras)
-
-                val defaultSchedules = listOf(
-                    RecordingScheduleEntity(
-                        id = "sched_night_guard",
-                        name = "Night Perimeter Sentry",
-                        daysOfWeek = "MON,TUE,WED,THU,FRI,SAT,SUN",
-                        startHour = 22,
-                        startMinute = 0,
-                        endHour = 6,
-                        endMinute = 0,
-                        mode = RecordingMode.MOTION_ONLY,
-                        isEnabled = true,
-                        targetCameraIds = "ALL",
-                        cloudBackupOnFinish = true
-                    ),
-                    RecordingScheduleEntity(
-                        id = "sched_business_hours",
-                        name = "Daytime Continuous Surveillance",
-                        daysOfWeek = "MON,TUE,WED,THU,FRI",
-                        startHour = 8,
-                        startMinute = 30,
-                        endHour = 18,
-                        endMinute = 0,
-                        mode = RecordingMode.CONTINUOUS,
-                        isEnabled = true,
-                        targetCameraIds = "cam_front_gate,cam_driveway",
-                        cloudBackupOnFinish = true
-                    )
-                )
-                database.scheduleDao().insertSchedules(defaultSchedules)
-
-                database.cloudConfigDao().insertOrUpdateConfig(
-                    CloudConfigEntity(
-                        provider = CloudProviderType.GOOGLE_DRIVE,
-                        endpointUrl = "https://cloud.surveillance.storage/v1/sync",
-                        bucketOrFolderName = "OmniView-Surveillance-Drive",
-                        autoSyncRecordings = true,
-                        autoSyncMotionSnapshots = true,
-                        wifiOnly = false
-                    )
-                )
             }
         }
     }
@@ -620,8 +519,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 transport = RtspTransport.TCP,
                 quality = StreamQuality.MAIN_HD,
                 onvifPort = discovered.onvifPort,
-                location = AppLocaleManager.getString(getApplication(), R.string.cam_network_location, discovered.ipAddress),
-                isDemoCamera = false
+                location = AppLocaleManager.getString(getApplication(), R.string.cam_network_location, discovered.ipAddress)
             )
             database.cameraDao().insertCamera(entity)
         }
@@ -745,13 +643,34 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         _isTimelineFullscreen.value = fullscreen
     }
 
-    fun triggerMotionAlertManually(camera: CameraEntity, level: Int = 85) {
-        val app = getApplication<Application>()
-        motionDetectionEngine.triggerMotionAlert(
-            camera = camera,
-            motionLevel = level,
-            customDescription = AppLocaleManager.getString(app, R.string.alerts_manual_desc, level)
-        )
+    fun captureCameraSnapshot(camera: CameraEntity) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val app = getApplication<Application>()
+            val bmp = streamManager.captureFrameForBackgroundWorker(
+                camera = camera,
+                maxSide = 1280,
+                alignTo = 2,
+                waitHeadlessFirstFrameMs = 800L
+            )
+            if (bmp == null) {
+                _localExportStatus.value = AppLocaleManager.getString(
+                    app,
+                    R.string.snapshot_failed_status,
+                    camera.name
+                )
+                return@launch
+            }
+            val savedFile = try {
+                motionDetectionEngine.saveManualSnapshot(camera, bmp, exportToGallery = true)
+            } finally {
+                if (!bmp.isRecycled) bmp.recycle()
+            }
+            _localExportStatus.value = if (savedFile != null) {
+                AppLocaleManager.getString(app, R.string.snapshot_saved_status, savedFile.name)
+            } else {
+                AppLocaleManager.getString(app, R.string.snapshot_failed_status, camera.name)
+            }
+        }
     }
 
     fun startManualRecording(camera: CameraEntity) {

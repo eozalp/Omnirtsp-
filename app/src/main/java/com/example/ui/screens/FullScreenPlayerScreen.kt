@@ -33,7 +33,6 @@ import androidx.compose.material.icons.filled.Camera
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.MotionPhotosOn
 import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.Stop
@@ -106,6 +105,7 @@ fun FullScreenPlayerScreen(
     val recordingCameras by viewModel.recordingSchedulerEngine.currentlyRecordingCameras.collectAsState()
     val showTechnicalDetails by viewModel.showTechnicalDetails.collectAsState()
     val ptzStatus by viewModel.ptzStatus.collectAsState()
+    val localExportStatus by viewModel.localExportStatus.collectAsState()
     val isRecording = recordingCameras.contains(camera.id)
 
     var zoomScale by remember { mutableFloatStateOf(1.0f) }
@@ -120,6 +120,13 @@ fun FullScreenPlayerScreen(
     var showDeleteConfirm by remember { mutableStateOf(false) }
 
     val latestRotation by rememberUpdatedState(liveCamera.rotationDegrees)
+
+    LaunchedEffect(localExportStatus) {
+        if (localExportStatus != null) {
+            kotlinx.coroutines.delay(3500)
+            viewModel.clearLocalExportStatus()
+        }
+    }
 
     LaunchedEffect(isPtzVisible, liveCamera.id, liveCamera.onvifPort) {
         if (isPtzVisible) {
@@ -374,6 +381,40 @@ fun FullScreenPlayerScreen(
             }
         }
 
+        // Transient real snapshot / recording feedback banner (never covers video)
+        val statusMsg = localExportStatus
+        if (!statusMsg.isNullOrBlank()) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 2.dp),
+                shape = RoundedCornerShape(10.dp),
+                color = SurveillanceCardBg,
+                border = androidx.compose.foundation.BorderStroke(1.dp, NeonCyan.copy(alpha = 0.55f))
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = statusMsg,
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f).padding(end = 8.dp)
+                    )
+                    TextButton(
+                        onClick = { viewModel.clearLocalExportStatus() },
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                    ) {
+                        Text(stringResource(R.string.common_close), color = NeonCyan, fontSize = 11.sp)
+                    }
+                }
+            }
+        }
+
         // Dedicated Bottom Controls Bar (never covers video)
         Surface(
             modifier = Modifier
@@ -415,7 +456,7 @@ fun FullScreenPlayerScreen(
 
                 // Snapshot Button
                 FilledIconButton(
-                    onClick = { viewModel.triggerMotionAlertManually(liveCamera, level = 85) },
+                    onClick = { viewModel.captureCameraSnapshot(liveCamera) },
                     modifier = Modifier.size(44.dp).testTag("fullscreen_snapshot_button"),
                     colors = IconButtonDefaults.filledIconButtonColors(
                         containerColor = Color(0xFF26334D),
@@ -423,18 +464,6 @@ fun FullScreenPlayerScreen(
                     )
                 ) {
                     Icon(Icons.Default.Camera, contentDescription = stringResource(R.string.fullscreen_snapshot))
-                }
-
-                // Motion Trigger Test
-                FilledIconButton(
-                    onClick = { viewModel.triggerMotionAlertManually(liveCamera, level = 90) },
-                    modifier = Modifier.size(44.dp).testTag("fullscreen_motion_test_button"),
-                    colors = IconButtonDefaults.filledIconButtonColors(
-                        containerColor = Color(0xFF26334D),
-                        contentColor = NeonAmber
-                    )
-                ) {
-                    Icon(Icons.Default.MotionPhotosOn, contentDescription = stringResource(R.string.live_menu_test_motion))
                 }
 
                 // Hardware Camera PTZ Dock Toggle

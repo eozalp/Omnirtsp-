@@ -4,9 +4,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.Paint
 import android.media.MediaMetadataRetriever
 import android.os.BatteryManager
 import android.os.Build
@@ -42,8 +39,6 @@ import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.security.SecureRandom
-import java.text.SimpleDateFormat
-import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
@@ -1937,7 +1932,7 @@ class RemoteHubServer(
                       diag.className = 'diag';
                       if (clip.fileBytes && clip.fileBytes <= 256) {
                         diag.className = 'diag warn';
-                        diag.textContent = 'Clip has only ' + clip.fileBytes + ' bytes (header-only stub). Record a fresh clip to stream video frames.';
+                        diag.textContent = 'Clip has only ' + clip.fileBytes + ' bytes (empty or incomplete file). Record a fresh clip to stream video frames.';
                       } else {
                         diag.textContent = 'Loaded: ' + clip.cameraName + ' • ' + new Date(clip.timestamp).toLocaleTimeString();
                       }
@@ -2163,7 +2158,6 @@ class AndroidRemoteHubBackend(
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val lastFrameCache = ConcurrentHashMap<String, ByteArray>()
-    private val timeFmt = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
 
     override fun getSystemHealth(): HubSystemHealth {
         var batteryPct = 100
@@ -2238,8 +2232,7 @@ class AndroidRemoteHubBackend(
     override fun getClipFile(clipId: String): File? {
         val clip = clipsProvider().firstOrNull { it.id == clipId } ?: return null
         val file = File(clip.filePath)
-        DeviceStorageExporter.ensureValidClipPayload(context, file)
-        return file.takeIf { it.exists() && it.length() > 0L }
+        return file.takeIf { StorageTimelineEngine.isPlayableClipFile(it) }
     }
 
     override fun getAlerts(limit: Int): List<HubAlertSnapshot> {
@@ -2283,8 +2276,7 @@ class AndroidRemoteHubBackend(
             return clipJpeg
         }
 
-        lastFrameCache[cameraId]?.let { return it }
-        return renderStandbyTelemetryJpeg(cam)
+        return lastFrameCache[cameraId]
     }
 
     private fun extractLatestClipFrameJpeg(cameraId: String): ByteArray? {
@@ -2311,48 +2303,6 @@ class AndroidRemoteHubBackend(
             }
         }
         return null
-    }
-
-    private fun renderStandbyTelemetryJpeg(cam: CameraEntity): ByteArray {
-        val t = streamManager.getTelemetryFlow(cam.id).value
-        val isRec = recordingSchedulerEngine.currentlyRecordingCameras.value.contains(cam.id)
-        val bmp = Bitmap.createBitmap(640, 360, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bmp)
-        canvas.drawColor(Color.rgb(11, 17, 26))
-
-        val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.CYAN
-            textSize = 26f
-            isFakeBoldText = true
-        }
-        val bodyPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
-            textSize = 18f
-        }
-        val mutedPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.LTGRAY
-            textSize = 15f
-        }
-
-        canvas.drawText(cam.name, 32f, 64f, titlePaint)
-        canvas.drawText(
-            if (isRec) "● RECORDING ACTIVE (HEADLESS HUB)" else "HUB STANDBY (OPEN LIVE STREAM OR PRESS RECORD)",
-            32f,
-            110f,
-            bodyPaint
-        )
-        canvas.drawText(
-            "Stream: ${if (t.isLive) "LIVE" else "CONNECTING"} • ${t.fps} FPS • ${t.bitrateKbps} kbps • ${t.resolution}",
-            32f,
-            150f,
-            mutedPaint
-        )
-        canvas.drawText("Updated: ${timeFmt.format(Date())}", 32f, 185f, mutedPaint)
-
-        val baos = ByteArrayOutputStream()
-        bmp.compress(Bitmap.CompressFormat.JPEG, 80, baos)
-        bmp.recycle()
-        return baos.toByteArray()
     }
 
     override fun performPtz(
@@ -2382,7 +2332,16 @@ class AndroidRemoteHubBackend(
 
     override fun triggerSnapshot(cameraId: String): Boolean {
         val cam = camerasProvider().firstOrNull { it.id == cameraId } ?: return false
-        motionDetectionEngine.triggerMotionAlert(cam, motionLevel = 80, customDescription = "Remote Hub Snapshot")
-        return true
+        val bmp = streamManager.captureFrameForBackgroundWorker(
+            camera = cam,
+            maxSide = 1280,
+            alignTo = 2,
+            waitHeadlessFirstFrameMs = 800L
+        ) ?: return false
+        return try {
+            motionDetectionEngine.saveManualSnapshot(cam, bmp, exportToGallery = true) != null
+        } finally {
+            if (!bmp.isRecycled) bmp.recycle()
+        }
     }
 }

@@ -14,6 +14,9 @@ interface ScheduleDao {
     @Query("SELECT * FROM recording_schedules ORDER BY startHour ASC, startMinute ASC")
     fun getAllSchedules(): Flow<List<RecordingScheduleEntity>>
 
+    @Query("SELECT * FROM recording_schedules ORDER BY startHour ASC, startMinute ASC")
+    suspend fun getAllSchedulesSync(): List<RecordingScheduleEntity>
+
     @Query("SELECT * FROM recording_schedules WHERE isEnabled = 1")
     suspend fun getActiveSchedules(): List<RecordingScheduleEntity>
 

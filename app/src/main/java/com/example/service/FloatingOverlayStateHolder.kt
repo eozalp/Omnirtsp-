@@ -82,20 +82,28 @@ object FloatingOverlayStateHolder {
     fun updateCameras(list: List<CameraEntity>) {
         val validIds = list.map { it.id }.toSet()
         val currentRotations = _liveRotations.value.toMutableMap()
-        // Seed rotations from DB if not already in live map; prune deleted cameras
-        currentRotations.keys.retainAll(validIds)
+        var rotationsChanged = currentRotations.keys.retainAll(validIds)
         list.forEach { cam ->
             if (!currentRotations.containsKey(cam.id)) {
                 currentRotations[cam.id] = normalizeRotationDegrees(cam.rotationDegrees)
+                rotationsChanged = true
             }
         }
-        _liveRotations.value = currentRotations
+        if (rotationsChanged) {
+            _liveRotations.value = currentRotations
+        }
 
-        _cameras.value = list.map { cam ->
+        val updatedCameras = list.map { cam ->
             val rot = currentRotations[cam.id] ?: cam.rotationDegrees
             if (cam.rotationDegrees == rot) cam else cam.copy(rotationDegrees = rot)
         }
-        _floatingWindows.value = _floatingWindows.value.filter { it.cameraId in validIds }
+        if (_cameras.value != updatedCameras) {
+            _cameras.value = updatedCameras
+        }
+        val remainingWindows = _floatingWindows.value.filter { it.cameraId in validIds }
+        if (_floatingWindows.value != remainingWindows) {
+            _floatingWindows.value = remainingWindows
+        }
     }
 
     fun setTechnicalDetails(enabled: Boolean) {

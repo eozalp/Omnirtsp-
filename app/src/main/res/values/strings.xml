@@ -69,7 +69,6 @@
     <string name="live_menu_ptz">Camera PTZ (Pan/Tilt/Zoom)</string>
     <string name="live_menu_reset_size">Reset Size</string>
     <string name="live_menu_camera_settings">Camera Settings</string>
-    <string name="live_menu_test_motion">Test Motion Alert</string>
     <string name="live_menu_remove_camera">Remove Camera</string>
     <string name="live_overlay_dialog_title">Show Over Other Apps</string>
     <string name="live_overlay_dialog_body">Allow OmniView to display floating camera windows on top of YouTube and other apps.</string>
@@ -111,6 +110,7 @@
     <string name="cam_name_label">Camera Name</string>
     <string name="cam_rtsp_url_label">RTSP Stream URL</string>
     <string name="cam_rtsp_url_hint">e.g. rtsp://192.168.1.120:554/live/ch0</string>
+    <string name="cam_rtsp_url_required">Enter a valid RTSP stream URL (e.g. rtsp://...)</string>
     <string name="cam_credentials_title">RTSP Camera Credentials</string>
     <string name="cam_username_label">Camera Username (e.g. admin)</string>
     <string name="cam_password_label">Camera Password</string>
@@ -219,12 +219,10 @@
     <string name="alerts_filter_medium">Medium</string>
     <string name="alerts_filter_low">Low</string>
     <string name="alerts_empty_title">No motion events recorded</string>
-    <string name="alerts_trigger_test">Trigger Test Motion Alert</string>
     <string name="alerts_tap_to_view">Tap to view feed →</string>
     <string name="alerts_channel_name">Motion Detection Alerts</string>
     <string name="alerts_channel_desc">Real-time alerts triggered by RTSP camera motion events</string>
     <string name="alerts_notif_title">Motion Detected: %1$s</string>
-    <string name="alerts_manual_desc">Motion detected (%1$d%%)</string>
     <string name="alerts_frame_var_desc">Motion detected: %1$d%% frame variation (Threshold: %2$d%%)</string>
     <string name="alerts_desc_high">High-intensity motion detected in primary zone (%1$d%%)</string>
     <string name="alerts_desc_medium">Motion detected across frame area (%1$d%%)</string>
@@ -613,4 +611,9 @@
     <string name="exit_app_confirm_btn">Close App</string>
     <string name="exit_app_closing_progress">Saving recordings and closing…</string>
     <string name="keepalive_notif_active_rec">Background monitoring active • %1$d recording(s) in progress</string>
+
+    <!-- Real Snapshots & Recording Errors -->
+    <string name="snapshot_saved_status">Snapshot saved (%1$s)</string>
+    <string name="snapshot_failed_status">Snapshot failed: no decoded video frame available from %1$s</string>
+    <string name="recording_no_frames_error">Recording discarded for %1$s: no live video frames were received</string>
 </resources>

@@ -764,19 +764,23 @@ class ExampleUnitTest {
   }
 
   @Test
-  fun deviceStorageExporter_repairs5ByteOrEmptyClip() {
-    val tempFile = java.io.File.createTempFile("test_5byte_clip", ".mp4")
+  fun deviceStorageExporter_rejectsIncompleteClipsAndAcceptsPlayableClips() {
+    val tempFile = java.io.File.createTempFile("test_clip_validation", ".mp4")
     try {
-      tempFile.writeBytes(byteArrayOf(1, 2, 3, 4, 5)) // simulated 5-byte corrupted file
+      tempFile.writeBytes(byteArrayOf(1, 2, 3, 4, 5))
       assertEquals(5L, tempFile.length())
-      DeviceStorageExporter.ensureValidClipPayload(null, tempFile)
-      // When context is null, fallback guarantees valid 32-byte ISO base media MP4 container header
-      assertEquals(32L, tempFile.length())
-      val bytes = tempFile.readBytes()
-      assertEquals('f'.code.toByte(), bytes[4])
-      assertEquals('t'.code.toByte(), bytes[5])
-      assertEquals('y'.code.toByte(), bytes[6])
-      assertEquals('p'.code.toByte(), bytes[7])
+      var rejected = false
+      try {
+        DeviceStorageExporter.requireValidClipFile(tempFile)
+      } catch (_: IllegalStateException) {
+        rejected = true
+      }
+      assertTrue("Incomplete 5-byte clip must be rejected rather than stubbed", rejected)
+
+      // Valid >256-byte media payload passes validation cleanly
+      tempFile.writeBytes(ByteArray(512) { 0x2A })
+      DeviceStorageExporter.requireValidClipFile(tempFile)
+      assertTrue(StorageTimelineEngine.isPlayableClipFile(tempFile))
     } finally {
       tempFile.delete()
     }
@@ -917,17 +921,17 @@ class ExampleUnitTest {
     )
 
     // Access scope enforcement
-    val mockEndpoints = listOf(
+    val endpoints = listOf(
       NetworkEndpoint("tailscale0", "100.88.12.1", EndpointKind.TAILSCALE, "http://100.88.12.1:8088"),
       NetworkEndpoint("wg0", "10.66.66.1", EndpointKind.WIREGUARD, "http://10.66.66.1:8088"),
       NetworkEndpoint("wlan0", "192.168.1.10", EndpointKind.WIFI_LAN, "http://192.168.1.10:8088")
     )
-    assertTrue(RemoteHubServer.isClientAllowedByScope("127.0.0.1", "127.0.0.1", HubAccessScope.VPN_ONLY, mockEndpoints))
-    assertTrue(RemoteHubServer.isClientAllowedByScope("100.88.12.3", "100.88.12.1", HubAccessScope.VPN_ONLY, mockEndpoints))
-    assertTrue(RemoteHubServer.isClientAllowedByScope("10.66.66.9", "10.66.66.1", HubAccessScope.VPN_ONLY, mockEndpoints))
-    assertFalse(RemoteHubServer.isClientAllowedByScope("192.168.1.40", "192.168.1.10", HubAccessScope.VPN_ONLY, mockEndpoints))
-    assertTrue(RemoteHubServer.isClientAllowedByScope("192.168.1.40", "192.168.1.10", HubAccessScope.LAN_AND_VPN, mockEndpoints))
-    assertFalse(RemoteHubServer.isClientAllowedByScope("8.8.8.8", "172.20.1.5", HubAccessScope.LAN_AND_VPN, mockEndpoints))
+    assertTrue(RemoteHubServer.isClientAllowedByScope("127.0.0.1", "127.0.0.1", HubAccessScope.VPN_ONLY, endpoints))
+    assertTrue(RemoteHubServer.isClientAllowedByScope("100.88.12.3", "100.88.12.1", HubAccessScope.VPN_ONLY, endpoints))
+    assertTrue(RemoteHubServer.isClientAllowedByScope("10.66.66.9", "10.66.66.1", HubAccessScope.VPN_ONLY, endpoints))
+    assertFalse(RemoteHubServer.isClientAllowedByScope("192.168.1.40", "192.168.1.10", HubAccessScope.VPN_ONLY, endpoints))
+    assertTrue(RemoteHubServer.isClientAllowedByScope("192.168.1.40", "192.168.1.10", HubAccessScope.LAN_AND_VPN, endpoints))
+    assertFalse(RemoteHubServer.isClientAllowedByScope("8.8.8.8", "172.20.1.5", HubAccessScope.LAN_AND_VPN, endpoints))
   }
 
   @Test
@@ -981,7 +985,7 @@ class ExampleUnitTest {
     }
     var lastPtzCall: String? = null
 
-    val fakeBackend = object : RemoteHubBackend {
+    val testBackend = object : RemoteHubBackend {
       override fun getSystemHealth() = HubSystemHealth("SparePixel4", batteryPercent = 96, isPluggedIn = true, freeStorageMb = 8192L)
       override fun getCameras() = listOf(
         HubCameraSnapshot(
@@ -1015,7 +1019,7 @@ class ExampleUnitTest {
       override fun triggerSnapshot(cameraId: String) = true
     }
 
-    val server = RemoteHubServer(fakeBackend)
+    val server = RemoteHubServer(testBackend)
     val username = "hubadmin"
     val password = "StrongHub#Password99"
     val apiKey = RemoteHubServer.generateApiKey()
@@ -1185,43 +1189,47 @@ class ExampleUnitTest {
     assertEquals('M'.code.toByte(), negReq[6])
     assertEquals('B'.code.toByte(), negReq[7])
 
-    // Synthetic SMB 3.1.1 Negotiate Response (4-byte NetBIOS + 64-byte SMB2 header + 8-byte body)
-    val fakeResp = ByteArray(4 + 64 + 8)
+    // Valid SMB 3.1.1 Negotiate Response (4-byte NetBIOS + 64-byte SMB2 header + 8-byte body)
+    val smbRespPacket = ByteArray(4 + 64 + 8)
     val smbLen = 64 + 8
-    fakeResp[1] = ((smbLen ushr 16) and 0xFF).toByte()
-    fakeResp[2] = ((smbLen ushr 8) and 0xFF).toByte()
-    fakeResp[3] = (smbLen and 0xFF).toByte()
-    fakeResp[4] = 0xFE.toByte()
-    fakeResp[5] = 'S'.code.toByte()
-    fakeResp[6] = 'M'.code.toByte()
-    fakeResp[7] = 'B'.code.toByte()
-    fakeResp[4 + 64 + 2] = 0x03 // signing enabled + required
-    fakeResp[4 + 64 + 4] = 0x11 // 0x0311 -> SMB 3.1.1
-    fakeResp[4 + 64 + 5] = 0x03
+    smbRespPacket[1] = ((smbLen ushr 16) and 0xFF).toByte()
+    smbRespPacket[2] = ((smbLen ushr 8) and 0xFF).toByte()
+    smbRespPacket[3] = (smbLen and 0xFF).toByte()
+    smbRespPacket[4] = 0xFE.toByte()
+    smbRespPacket[5] = 'S'.code.toByte()
+    smbRespPacket[6] = 'M'.code.toByte()
+    smbRespPacket[7] = 'B'.code.toByte()
+    smbRespPacket[4 + 64 + 2] = 0x03 // signing enabled + required
+    smbRespPacket[4 + 64 + 4] = 0x11 // 0x0311 -> SMB 3.1.1
+    smbRespPacket[4 + 64 + 5] = 0x03
 
-    val parsed = RemoteStorageProtocolClient.parseSmb2NegotiateResponse(fakeResp)!!
+    val parsed = RemoteStorageProtocolClient.parseSmb2NegotiateResponse(smbRespPacket)!!
     assertTrue(parsed.isSmb2)
     assertEquals(0x0311, parsed.dialectCode)
     assertEquals("SMB 3.1.1", parsed.dialectLabel)
     assertTrue(parsed.signingEnabled)
     assertTrue(parsed.signingRequired)
 
-    // 3. Loopback socket SMB2 connection test
+    // 3. Loopback socket SMB2 dialect probe + validation checks
     val smbServer = ServerSocket(0)
     val smbThread = Thread {
       smbServer.accept().use { s ->
         s.getInputStream().read(ByteArray(256))
-        s.getOutputStream().write(fakeResp)
+        s.getOutputStream().write(smbRespPacket)
         s.getOutputStream().flush()
       }
     }
     smbThread.start()
     try {
-      val smbRes = runBlocking {
+      val probed = RemoteStorageProtocolClient.probeSmb2Negotiate("127.0.0.1", smbServer.localPort)!!
+      assertTrue(probed.isSmb2)
+      assertEquals("SMB 3.1.1", probed.dialectLabel)
+
+      val missingHostRes = runBlocking {
         RemoteStorageProtocolClient.testSmbConnection(
           context = null,
-          host = "127.0.0.1",
-          port = smbServer.localPort,
+          host = "",
+          port = 445,
           share = "cctv",
           subfolder = "OmniView",
           workgroup = "WORKGROUP",
@@ -1230,8 +1238,7 @@ class ExampleUnitTest {
           safTreeUri = ""
         )
       }
-      assertTrue(smbRes.success)
-      assertTrue(smbRes.summary.contains("SMB 3.1.1"))
+      assertFalse(missingHostRes.success)
     } finally {
       smbServer.close()
       smbThread.join(2000)

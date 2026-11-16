@@ -122,9 +122,10 @@ fun CameraSettingsDialog(
         mutableStateOf(
             camera?.rtspUrl
                 ?: initialSuggestedCamera?.suggestedRtspUrl
-                ?: "rtsp://192.168.1.100:554/h264Preview_01_main"
+                ?: ""
         )
     }
+    var rtspUrlError by remember { mutableStateOf<String?>(null) }
     var username by remember { mutableStateOf(camera?.username ?: "") }
     var password by remember { mutableStateOf(camera?.password ?: "") }
     var isPasswordVisible by remember { mutableStateOf(false) }
@@ -299,9 +300,18 @@ fun CameraSettingsDialog(
                 // RTSP Stream URL
                 OutlinedTextField(
                     value = rtspUrl,
-                    onValueChange = { rtspUrl = it },
+                    onValueChange = {
+                        rtspUrl = it
+                        if (rtspUrlError != null) rtspUrlError = null
+                    },
                     label = { Text(stringResource(R.string.cam_rtsp_url_label)) },
-                    supportingText = { Text(stringResource(R.string.cam_rtsp_url_hint)) },
+                    isError = rtspUrlError != null,
+                    supportingText = {
+                        Text(
+                            text = rtspUrlError ?: stringResource(R.string.cam_rtsp_url_hint),
+                            color = if (rtspUrlError != null) NeonRed else Color.Unspecified
+                        )
+                    },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth().testTag("cam_rtsp_url_input")
                 )
@@ -560,10 +570,15 @@ fun CameraSettingsDialog(
 
                     Button(
                         onClick = {
+                            val trimmedUrl = rtspUrl.trim()
+                            if (trimmedUrl.isBlank() || !trimmedUrl.contains("://")) {
+                                rtspUrlError = AppLocaleManager.getString(context, R.string.cam_rtsp_url_required)
+                                return@Button
+                            }
                             val parsedPort = (onvifPortText.toIntOrNull() ?: 80).coerceIn(1, 65535)
                             val entity = camera?.copy(
                                 name = name.ifBlank { defaultCamName },
-                                rtspUrl = rtspUrl.ifBlank { "rtsp://demo" },
+                                rtspUrl = trimmedUrl,
                                 username = username.trim(),
                                 password = password.trim(),
                                 location = location.ifBlank { defaultCamLocation },
@@ -574,7 +589,7 @@ fun CameraSettingsDialog(
                             ) ?: CameraEntity(
                                 id = UUID.randomUUID().toString(),
                                 name = name.ifBlank { defaultCamName },
-                                rtspUrl = rtspUrl.ifBlank { "rtsp://demo" },
+                                rtspUrl = trimmedUrl,
                                 username = username.trim(),
                                 password = password.trim(),
                                 location = location.ifBlank { defaultCamLocation },
