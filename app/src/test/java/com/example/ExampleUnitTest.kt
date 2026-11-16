@@ -25,6 +25,7 @@ import com.example.engine.HubSystemHealth
 import com.example.engine.NetworkEndpoint
 import com.example.engine.OnvifPtzClient
 import com.example.engine.PasswordStrength
+import com.example.engine.RecordingSchedulerEngine
 import com.example.engine.RemoteFolderLayout
 import com.example.engine.RemoteHubBackend
 import com.example.engine.RemoteHubServer
@@ -1477,5 +1478,154 @@ class ExampleUnitTest {
       sshServer.close()
       sshThread.join(2000)
     }
+  }
+
+  @Test
+  fun recordingScheduler_sessionTickActions_coverContinuousRotationAndRecovery() {
+    val segmentMs = 5L * 60L * 1000L
+
+    // Scheduled continuous recording stays active when alive and below chunk duration
+    assertEquals(
+      RecordingSchedulerEngine.SessionTickAction.KEEP_RECORDING,
+      RecordingSchedulerEngine.evaluateSessionAction(
+        triggerType = ClipTriggerType.SCHEDULED,
+        elapsedMs = 60_000L,
+        segmentDurationMs = segmentMs,
+        isScheduleStillActive = true,
+        isRecorderAlive = true
+      )
+    )
+
+    // Scheduled continuous recording rotates seamlessly when chunk duration elapses
+    assertEquals(
+      RecordingSchedulerEngine.SessionTickAction.ROTATE_CHUNK,
+      RecordingSchedulerEngine.evaluateSessionAction(
+        triggerType = ClipTriggerType.SCHEDULED,
+        elapsedMs = segmentMs,
+        segmentDurationMs = segmentMs,
+        isScheduleStillActive = true,
+        isRecorderAlive = true
+      )
+    )
+
+    // Scheduled continuous recording recovers immediately if codec died mid-chunk
+    assertEquals(
+      RecordingSchedulerEngine.SessionTickAction.RECOVER_DEAD_RECORDER,
+      RecordingSchedulerEngine.evaluateSessionAction(
+        triggerType = ClipTriggerType.SCHEDULED,
+        elapsedMs = 45_000L,
+        segmentDurationMs = segmentMs,
+        isScheduleStillActive = true,
+        isRecorderAlive = false
+      )
+    )
+
+    // Scheduled recording stops cleanly once the schedule window ends
+    assertEquals(
+      RecordingSchedulerEngine.SessionTickAction.STOP_ENDED_SCHEDULE,
+      RecordingSchedulerEngine.evaluateSessionAction(
+        triggerType = ClipTriggerType.SCHEDULED,
+        elapsedMs = 45_000L,
+        segmentDurationMs = segmentMs,
+        isScheduleStillActive = false,
+        isRecorderAlive = false
+      )
+    )
+
+    // Manual recording keeps going, rotates chunks, and auto-recovers even outside schedules
+    assertEquals(
+      RecordingSchedulerEngine.SessionTickAction.KEEP_RECORDING,
+      RecordingSchedulerEngine.evaluateSessionAction(
+        triggerType = ClipTriggerType.MANUAL,
+        elapsedMs = 120_000L,
+        segmentDurationMs = segmentMs,
+        isScheduleStillActive = false,
+        isRecorderAlive = true
+      )
+    )
+    assertEquals(
+      RecordingSchedulerEngine.SessionTickAction.ROTATE_CHUNK,
+      RecordingSchedulerEngine.evaluateSessionAction(
+        triggerType = ClipTriggerType.MANUAL,
+        elapsedMs = segmentMs + 100L,
+        segmentDurationMs = segmentMs,
+        isScheduleStillActive = false,
+        isRecorderAlive = true
+      )
+    )
+    assertEquals(
+      RecordingSchedulerEngine.SessionTickAction.RECOVER_DEAD_RECORDER,
+      RecordingSchedulerEngine.evaluateSessionAction(
+        triggerType = ClipTriggerType.MANUAL,
+        elapsedMs = 10_000L,
+        segmentDurationMs = segmentMs,
+        isScheduleStillActive = false,
+        isRecorderAlive = false
+      )
+    )
+  }
+
+  @Test
+  fun recordingScheduler_backoffAndErrorEmission_preventPrematureAbort() {
+    assertEquals(500L, RecordingSchedulerEngine.computeRetryBackoffMs(0))
+    assertEquals(1_500L, RecordingSchedulerEngine.computeRetryBackoffMs(1))
+    assertEquals(3_000L, RecordingSchedulerEngine.computeRetryBackoffMs(2))
+    assertEquals(5_000L, RecordingSchedulerEngine.computeRetryBackoffMs(3))
+    assertEquals(10_000L, RecordingSchedulerEngine.computeRetryBackoffMs(12))
+
+    // If a chunk actually recorded frames before a hardware hiccup, rotate without surfacing fatal error
+    assertFalse(RecordingSchedulerEngine.shouldEmitRecordingError(hadFrames = true, consecutiveFailures = 0))
+    assertFalse(RecordingSchedulerEngine.shouldEmitRecordingError(hadFrames = true, consecutiveFailures = 5))
+    // Single 0-frame glitch backs off silently; repeated 0-frame failures surface diagnostic error
+    assertFalse(RecordingSchedulerEngine.shouldEmitRecordingError(hadFrames = false, consecutiveFailures = 1))
+    assertTrue(RecordingSchedulerEngine.shouldEmitRecordingError(hadFrames = false, consecutiveFailures = 2))
+  }
+
+  @Test
+  fun streamManager_surfaceRebindAndHeadlessGrabberGuards() {
+    val playerOne = Any()
+    val playerTwo = Any()
+
+    assertTrue(RtspStreamManager.needsSurfaceRebind(null, playerOne))
+    assertFalse(RtspStreamManager.needsSurfaceRebind(playerOne, playerOne))
+    assertTrue(RtspStreamManager.needsSurfaceRebind(playerOne, playerTwo))
+
+    // When a foreground TextureView is mounted and available, do NOT steal its surface with headless grabber
+    assertFalse(
+      RtspStreamManager.shouldAttachHeadlessGrabber(
+        isAppInForeground = true,
+        attachedSurfaceCount = 1,
+        hasAvailableTextureView = true
+      )
+    )
+    // In background or when no live TextureView is attached, attach headless grabber so recording continues
+    assertTrue(
+      RtspStreamManager.shouldAttachHeadlessGrabber(
+        isAppInForeground = false,
+        attachedSurfaceCount = 1,
+        hasAvailableTextureView = true
+      )
+    )
+    assertTrue(
+      RtspStreamManager.shouldAttachHeadlessGrabber(
+        isAppInForeground = true,
+        attachedSurfaceCount = 0,
+        hasAvailableTextureView = false
+      )
+    )
+  }
+
+  @Test
+  fun storageRetention_excludesActiveRecordingPathsFromPruning() {
+    val activePath = "/data/user/0/com.example/files/recordings/cam1_active.mp4"
+    val expiredPath1 = "/data/user/0/com.example/files/recordings/cam1_old1.mp4"
+    val expiredPath2 = "/data/user/0/com.example/files/recordings/cam2_old2.mp4"
+
+    val filtered = StorageRetentionEngine.filterExpiredCandidates(
+      candidatePaths = listOf(activePath, expiredPath1, expiredPath2),
+      protectedActivePaths = setOf(activePath)
+    )
+
+    assertEquals(listOf(expiredPath1, expiredPath2), filtered)
   }
 }

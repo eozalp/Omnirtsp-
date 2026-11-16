@@ -36,6 +36,9 @@ class StorageRetentionEngine(
     private val mutex = Mutex()
     private var cumulativePruned = 0
 
+    @Volatile
+    var activeRecordingPathsProvider: () -> Set<String> = { emptySet() }
+
     private val _status = MutableStateFlow(RetentionStatus())
     val status: StateFlow<RetentionStatus> = _status.asStateFlow()
 
@@ -44,12 +47,14 @@ class StorageRetentionEngine(
             mutex.withLock {
                 val config = database.cloudConfigDao().getCloudConfigSync() ?: CloudConfigEntity()
                 val windowMs = config.totalRetentionMillis()
+                val protectedPaths = runCatching { activeRecordingPathsProvider() }.getOrDefault(emptySet())
                 var prunedCount = 0
 
                 if (config.retentionEnabled && windowMs > 0L) {
                     val cutoff = nowMillis - windowMs
                     val expiredClips = database.recordedClipDao().getClipsOlderThan(cutoff)
                     for (clip in expiredClips) {
+                        if (clip.filePath in protectedPaths) continue
                         runCatching {
                             val localFile = File(clip.filePath)
                             if (localFile.exists()) {
@@ -65,11 +70,16 @@ class StorageRetentionEngine(
                         prunedCount += database.recordedClipDao().deleteClipsOlderThan(cutoff)
                     }
 
-                    // Sweep any orphaned raw files older than cutoff inside internal recordings folder
+                    // Sweep any orphaned raw files older than cutoff inside internal recordings folder,
+                    // while strictly excluding files actively open for ongoing chunk recording.
                     val recordingsDir = File(context.filesDir, "recordings")
                     if (recordingsDir.exists()) {
                         recordingsDir.listFiles()?.forEach { file ->
-                            if (file.isFile && file.lastModified() > 0L && file.lastModified() < cutoff) {
+                            if (file.isFile &&
+                                file.absolutePath !in protectedPaths &&
+                                file.lastModified() > 0L &&
+                                file.lastModified() < cutoff
+                            ) {
                                 if (file.delete()) {
                                     prunedCount++
                                 }
@@ -120,5 +130,10 @@ class StorageRetentionEngine(
             timestamps: List<Long>,
             cutoffTimestamp: Long
         ): List<Long> = timestamps.filter { it >= cutoffTimestamp }
+
+        fun filterExpiredCandidates(
+            candidatePaths: List<String>,
+            protectedActivePaths: Set<String>
+        ): List<String> = candidatePaths.filterNot { it in protectedActivePaths }
     }
 }

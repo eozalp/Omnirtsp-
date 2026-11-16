@@ -96,6 +96,7 @@ class RtspStreamManager(private val context: Context) {
         private set
 
     private val headlessGrabbers = ConcurrentHashMap<String, HeadlessGlFrameGrabber>()
+    private val grabberBoundPlayerMap = ConcurrentHashMap<String, WeakReference<ExoPlayer>>()
     private val mainHandler = Handler(Looper.getMainLooper())
 
     fun setAppInForeground(inForeground: Boolean) {
@@ -132,6 +133,7 @@ class RtspStreamManager(private val context: Context) {
     }
 
     private fun releaseHeadlessGrabber(cameraId: String) {
+        grabberBoundPlayerMap.remove(cameraId)
         headlessGrabbers.remove(cameraId)?.let { grabber ->
             val surface = grabber.surface
             if (surface != null) {
@@ -151,6 +153,32 @@ class RtspStreamManager(private val context: Context) {
             try {
                 playerMap[cameraId]?.setVideoTextureView(textureView)
             } catch (_: Exception) {}
+        }
+    }
+
+    fun onPlayerViewReleased(cameraId: String, releasedTextureView: TextureView?, releasedFromPlayer: ExoPlayer?) {
+        if (releasedTextureView != null) {
+            unregisterTextureView(cameraId, releasedTextureView)
+        }
+        val activePlayer = playerMap[cameraId] ?: releasedFromPlayer ?: return
+        val remainingTv = activeTextureViews[cameraId]?.get()
+        if (isAppInForeground &&
+            (attachedSurfaceCountMap[cameraId] ?: 0) > 0 &&
+            remainingTv != null &&
+            remainingTv !== releasedTextureView &&
+            remainingTv.isAvailable
+        ) {
+            runCatching { activePlayer.setVideoTextureView(remainingTv) }
+            surfaceGraceUntilMsMap[cameraId] = System.currentTimeMillis() + SURFACE_SWITCH_GRACE_MS
+            return
+        }
+        val grabber = headlessGrabbers[cameraId]
+        if (grabber != null && grabber.isReady) {
+            val surface = grabber.surface
+            if (surface != null) {
+                runCatching { activePlayer.setVideoSurface(surface) }
+                grabberBoundPlayerMap[cameraId] = WeakReference(activePlayer)
+            }
         }
     }
 
@@ -367,6 +395,25 @@ class RtspStreamManager(private val context: Context) {
 
         playerMap[camera.id] = player
         playerFlowMap.getOrPut(camera.id) { MutableStateFlow(player) }.value = player
+
+        // Re-bind the active UI TextureView or background HeadlessGlFrameGrabber immediately
+        // whenever ExoPlayer is rebuilt (e.g. watchdog recovery attempt >= 2), so decoding never stalls.
+        val activeTv = activeTextureViews[camera.id]?.get()
+        if (isAppInForeground &&
+            (attachedSurfaceCountMap[camera.id] ?: 0) > 0 &&
+            activeTv != null &&
+            activeTv.isAvailable
+        ) {
+            runCatching { player.setVideoTextureView(activeTv) }
+        } else {
+            val existingGrabber = headlessGrabbers[camera.id]
+            if (existingGrabber != null && existingGrabber.isReady) {
+                existingGrabber.surface?.let { s ->
+                    runCatching { player.setVideoSurface(s) }
+                    grabberBoundPlayerMap[camera.id] = WeakReference(player)
+                }
+            }
+        }
         return player
     }
 
@@ -479,6 +526,14 @@ class RtspStreamManager(private val context: Context) {
             kotlin.math.abs(existing.width - safeW) <= 16 &&
             kotlin.math.abs(existing.height - safeH) <= 16
         ) {
+            if (needsSurfaceRebind(grabberBoundPlayerMap[cameraId]?.get(), player)) {
+                existing.surface?.let { surface ->
+                    try {
+                        player.setVideoSurface(surface)
+                        grabberBoundPlayerMap[cameraId] = WeakReference(player)
+                    } catch (_: Exception) {}
+                }
+            }
             return existing
         }
         if (existing != null) {
@@ -494,6 +549,7 @@ class RtspStreamManager(private val context: Context) {
         if (surface != null) {
             try {
                 player.setVideoSurface(surface)
+                grabberBoundPlayerMap[cameraId] = WeakReference(player)
             } catch (_: Exception) {}
         }
         return created
@@ -510,18 +566,18 @@ class RtspStreamManager(private val context: Context) {
             )
         }
 
-        if (isAppInForeground &&
-            (attachedSurfaceCountMap[cameraId] ?: 0) > 0 &&
-            hasRenderedFrameMap[cameraId] == true
-        ) {
-            val tv = activeTextureViews[cameraId]?.get()
-            if (tv != null && tv.isAvailable && tv.width > 0 && tv.height > 0) {
+        val tv = activeTextureViews[cameraId]?.get()
+        val hasForegroundUiSurface = tv != null && tv.isAvailable && tv.width > 0 && tv.height > 0 &&
+            isAppInForeground && (attachedSurfaceCountMap[cameraId] ?: 0) > 0
+        if (hasForegroundUiSurface) {
+            if (hasRenderedFrameMap[cameraId] == true) {
                 return try {
-                    tv.getBitmap(width, height)
+                    tv?.getBitmap(width, height)
                 } catch (_: Throwable) {
                     null
                 }
             }
+            return null
         }
 
         val player = playerMap[cameraId] ?: return null
@@ -532,7 +588,7 @@ class RtspStreamManager(private val context: Context) {
     /**
      * Thread-safe capture helper intended for IO workers (RemoteHubServer, CameraStreamRecorder).
      * Never blocks the Main thread waiting for GPU frames: attaches a HeadlessGlFrameGrabber on Main
-     * if no foreground UI TextureView is active, then awaits the first GL frame on the caller's IO thread.
+     * only when no foreground UI TextureView is active, then awaits the first GL frame on the caller's IO thread.
      */
     fun captureFrameForBackgroundWorker(
         camera: CameraEntity,
@@ -549,12 +605,15 @@ class RtspStreamManager(private val context: Context) {
                 alignTo = alignTo
             )
             val tv = activeTextureViews[camera.id]?.get()
-            if (isAppInForeground &&
+            val foregroundSurfaceMounted = isAppInForeground &&
                 (attachedSurfaceCountMap[camera.id] ?: 0) > 0 &&
-                hasRenderedFrameMap[camera.id] == true &&
                 tv != null && tv.isAvailable && tv.width > 0 && tv.height > 0
-            ) {
-                return runCatching { tv.getBitmap(w, h) }.getOrNull()
+            if (foregroundSurfaceMounted) {
+                return if (hasRenderedFrameMap[camera.id] == true) {
+                    runCatching { tv?.getBitmap(w, h) }.getOrNull()
+                } else {
+                    null
+                }
             }
             return ensureHeadlessGrabberLocked(camera.id, existing, w, h)
                 ?.captureBitmap(w, h, waitIfEmptyMs = 0L)
@@ -579,16 +638,17 @@ class RtspStreamManager(private val context: Context) {
                 targetH = h
 
                 val tv = activeTextureViews[camera.id]?.get()
-                val canReadTextureView = isAppInForeground &&
+                val foregroundSurfaceMounted = isAppInForeground &&
                     (attachedSurfaceCountMap[camera.id] ?: 0) > 0 &&
-                    hasRenderedFrameMap[camera.id] == true &&
                     tv != null && tv.isAvailable && tv.width > 0 && tv.height > 0
 
-                if (canReadTextureView && tv != null) {
-                    directBitmap = try {
-                        tv.getBitmap(w, h)
-                    } catch (_: Throwable) {
-                        null
+                if (foregroundSurfaceMounted && tv != null) {
+                    if (hasRenderedFrameMap[camera.id] == true) {
+                        directBitmap = try {
+                            tv.getBitmap(w, h)
+                        } catch (_: Throwable) {
+                            null
+                        }
                     }
                 } else {
                     grabberRef = ensureHeadlessGrabberLocked(camera.id, player, w, h)
@@ -816,6 +876,7 @@ class RtspStreamManager(private val context: Context) {
 
     fun releasePlayer(cameraId: String) {
         releaseHeadlessGrabber(cameraId)
+        grabberBoundPlayerMap.remove(cameraId)
         playerMap.remove(cameraId)?.release()
         playerFlowMap.remove(cameraId)
         telemetryMap.remove(cameraId)
@@ -835,6 +896,7 @@ class RtspStreamManager(private val context: Context) {
 
     fun releaseAll() {
         headlessGrabbers.keys.toList().forEach { releaseHeadlessGrabber(it) }
+        grabberBoundPlayerMap.clear()
         for ((_, player) in playerMap) {
             try {
                 player.release()
@@ -1028,6 +1090,19 @@ class RtspStreamManager(private val context: Context) {
             val alignedW = ((rawW / safeAlign).roundToInt().coerceAtLeast(4) * safeAlign).coerceAtMost(safeMax)
             val alignedH = ((rawH / safeAlign).roundToInt().coerceAtLeast(4) * safeAlign).coerceAtMost(safeMax)
             return alignedW to alignedH
+        }
+
+        fun <T : Any> needsSurfaceRebind(boundTarget: T?, currentTarget: T): Boolean {
+            return boundTarget !== currentTarget
+        }
+
+        fun shouldAttachHeadlessGrabber(
+            isAppInForeground: Boolean,
+            attachedSurfaceCount: Int,
+            hasAvailableTextureView: Boolean
+        ): Boolean {
+            val foregroundUiMounted = isAppInForeground && attachedSurfaceCount > 0 && hasAvailableTextureView
+            return !foregroundUiMounted
         }
     }
 }

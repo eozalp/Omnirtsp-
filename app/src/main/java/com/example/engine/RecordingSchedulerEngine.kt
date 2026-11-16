@@ -57,7 +57,12 @@ class RecordingSchedulerEngine(
     private val cameraStreamRecorder = CameraStreamRecorder(context, streamManager)
 
     private val activeSessions = ConcurrentHashMap<String, ActiveRecordingSession>()
+    private val cameraLocks = ConcurrentHashMap<String, Any>()
+    private val lastCodecFinalizeJobs = ConcurrentHashMap<String, Job>()
     private val finalizeJobs = ConcurrentHashMap<String, Job>()
+    private val recoveringClipIds = ConcurrentHashMap<String, Boolean>()
+    private val consecutiveZeroFrameFailures = ConcurrentHashMap<String, Int>()
+    private val nextScheduledRetryAtMs = ConcurrentHashMap<String, Long>()
 
     private val _currentlyRecordingCameras = MutableStateFlow<Set<String>>(emptySet())
     val currentlyRecordingCameras: StateFlow<Set<String>> = _currentlyRecordingCameras.asStateFlow()
@@ -70,12 +75,18 @@ class RecordingSchedulerEngine(
 
     init {
         ensureRecordingsDirectory()
+        storageRetentionEngine.activeRecordingPathsProvider = {
+            activeSessions.values.map { it.filePath }.toSet()
+        }
         repairExistingEmptyRecordings()
         scope.launch {
             runCatching { storageRetentionEngine.enforceRetention() }
         }
         startSchedulerLoop()
     }
+
+    private fun cameraLock(cameraId: String): Any =
+        cameraLocks.getOrPut(cameraId) { Any() }
 
     private fun ensureRecordingsDirectory(): File {
         val dir = File(context.filesDir, "recordings")
@@ -85,13 +96,37 @@ class RecordingSchedulerEngine(
         return dir
     }
 
+    private fun buildClipFile(camera: CameraEntity): File {
+        val dir = ensureRecordingsDirectory()
+        val safeName = camera.name.replace(" ", "_").ifBlank { camera.id }
+        return File(dir, "clip_${safeName}_${System.currentTimeMillis()}.mp4")
+    }
+
     fun startManualRecording(camera: CameraEntity): String {
-        return startRecordingSession(camera, ClipTriggerType.MANUAL, null)
+        synchronized(cameraLock(camera.id)) {
+            val existing = activeSessions[camera.id]
+            if (existing != null &&
+                existing.triggerType == ClipTriggerType.MANUAL &&
+                cameraStreamRecorder.isRecorderAlive(camera.id, existing.clipId)
+            ) {
+                return existing.clipId
+            }
+            consecutiveZeroFrameFailures.remove(camera.id)
+            nextScheduledRetryAtMs.remove(camera.id)
+            if (existing != null) {
+                return rotateRecordingSessionLocked(existing, camera, ClipTriggerType.MANUAL)
+            }
+            return startRecordingSessionLocked(camera, ClipTriggerType.MANUAL, null)
+        }
     }
 
     fun stopRecording(cameraId: String) {
-        val session = activeSessions.remove(cameraId) ?: return
-        finishRecordingSession(session)
+        synchronized(cameraLock(cameraId)) {
+            consecutiveZeroFrameFailures.remove(cameraId)
+            nextScheduledRetryAtMs.remove(cameraId)
+            val session = activeSessions.remove(cameraId) ?: return
+            finishRecordingSession(session, keepRecordingState = false, emitErrorOnEmpty = true)
+        }
     }
 
     fun handleMotionTrigger(camera: CameraEntity, motionScore: Int) {
@@ -111,13 +146,17 @@ class RecordingSchedulerEngine(
 
                 // If a motion schedule is active or camera has motion detection enabled
                 if (isMotionScheduleActive || camera.isMotionDetectionEnabled) {
-                    val clipId = startRecordingSession(camera, ClipTriggerType.MOTION_ALERT, motionScore)
+                    val clipId = synchronized(cameraLock(camera.id)) {
+                        if (activeSessions.containsKey(camera.id)) return@launch
+                        startRecordingSessionLocked(camera, ClipTriggerType.MOTION_ALERT, motionScore)
+                    }
                     // Record for 15 seconds after motion
                     delay(15000)
-                    activeSessions[camera.id]?.let { session ->
-                        if (session.clipId == clipId) {
+                    synchronized(cameraLock(camera.id)) {
+                        val session = activeSessions[camera.id]
+                        if (session != null && session.clipId == clipId) {
                             activeSessions.remove(camera.id)
-                            finishRecordingSession(session, motionScore)
+                            finishRecordingSession(session, motionScore, keepRecordingState = false, emitErrorOnEmpty = true)
                         }
                     }
                 }
@@ -144,16 +183,14 @@ class RecordingSchedulerEngine(
         }
     }
 
-    private fun startRecordingSession(
+    private fun startRecordingSessionLocked(
         camera: CameraEntity,
         triggerType: ClipTriggerType,
-        motionScore: Int?
+        motionScore: Int?,
+        waitForCodecJob: Job? = null
     ): String {
         val clipId = UUID.randomUUID().toString()
-        val dir = ensureRecordingsDirectory()
-        val clipFile = File(dir, "clip_${camera.name.replace(" ", "_")}_${System.currentTimeMillis()}.mp4")
-
-        cameraStreamRecorder.startRecording(clipId, camera, clipFile, scope)
+        val clipFile = buildClipFile(camera)
 
         val session = ActiveRecordingSession(
             clipId = clipId,
@@ -168,12 +205,188 @@ class RecordingSchedulerEngine(
         activeSessions[camera.id] = session
         _currentlyRecordingCameras.value = activeSessions.keys.toSet()
         streamManager.updateRecordingState(camera.id, true)
+
+        cameraStreamRecorder.startRecording(
+            clipId = clipId,
+            camera = camera,
+            outputFile = clipFile,
+            scope = scope,
+            waitForPreviousFinalize = waitForCodecJob ?: lastCodecFinalizeJobs[camera.id],
+            onUnexpectedStop = { failed -> handleUnexpectedRecorderStop(failed) }
+        )
         return clipId
     }
 
-    private fun finishRecordingSession(session: ActiveRecordingSession, motionScore: Int = 0): Job {
+    private fun rotateRecordingSessionLocked(
+        existing: ActiveRecordingSession,
+        camera: CameraEntity,
+        newTriggerType: ClipTriggerType
+    ): String {
+        val newClipId = UUID.randomUUID().toString()
+        val newFile = buildClipFile(camera)
+        val newSession = ActiveRecordingSession(
+            clipId = newClipId,
+            cameraId = camera.id,
+            cameraName = camera.name,
+            startTimestamp = System.currentTimeMillis(),
+            triggerType = newTriggerType,
+            filePath = newFile.absolutePath,
+            cameraSnapshot = camera
+        )
+
+        // Swap session atomically BEFORE finalizing previous chunk so _currentlyRecordingCameras
+        // never flickers empty during chunk boundaries and KeepAlive service stays uninterrupted.
+        activeSessions[camera.id] = newSession
         _currentlyRecordingCameras.value = activeSessions.keys.toSet()
-        streamManager.updateRecordingState(session.cameraId, false)
+        streamManager.updateRecordingState(camera.id, true)
+
+        finishRecordingSession(
+            session = existing,
+            keepRecordingState = true,
+            emitErrorOnEmpty = true
+        )
+        val codecFinalizeJob = lastCodecFinalizeJobs[camera.id]
+
+        cameraStreamRecorder.startRecording(
+            clipId = newClipId,
+            camera = camera,
+            outputFile = newFile,
+            scope = scope,
+            waitForPreviousFinalize = codecFinalizeJob,
+            onUnexpectedStop = { failed -> handleUnexpectedRecorderStop(failed) }
+        )
+        return newClipId
+    }
+
+    private fun handleUnexpectedRecorderStop(failed: CameraStreamRecorder.ActiveRecorder) {
+        val cameraId = failed.camera.id
+        if (recoveringClipIds.putIfAbsent(failed.clipId, true) != null) return
+
+        scope.launch {
+            var placeholderClipId: String? = null
+            try {
+                val active: ActiveRecordingSession?
+                val shouldRecoverContinuous: Boolean
+                var codecFinalizeJob: Job? = null
+
+                synchronized(cameraLock(cameraId)) {
+                    active = activeSessions[cameraId]
+                    if (active == null || active.clipId != failed.clipId) {
+                        return@launch
+                    }
+
+                    if (active.triggerType == ClipTriggerType.MOTION_ALERT) {
+                        activeSessions.remove(cameraId, active)
+                        finishRecordingSession(
+                            session = active,
+                            keepRecordingState = false,
+                            emitErrorOnEmpty = failed.frameCount == 0 && !failed.initFailed
+                        )
+                        return@launch
+                    }
+
+                    shouldRecoverContinuous = true
+                    val hadFrames = failed.frameCount > 0
+                    val failures = if (hadFrames) {
+                        consecutiveZeroFrameFailures[cameraId] = 0
+                        0
+                    } else {
+                        ((consecutiveZeroFrameFailures[cameraId] ?: 0) + 1).also {
+                            consecutiveZeroFrameFailures[cameraId] = it
+                        }
+                    }
+
+                    val nextClipId = UUID.randomUUID().toString()
+                    val nextFile = buildClipFile(failed.camera)
+                    placeholderClipId = nextClipId
+                    recoveringClipIds[nextClipId] = true
+
+                    val placeholderSession = ActiveRecordingSession(
+                        clipId = nextClipId,
+                        cameraId = active.cameraId,
+                        cameraName = active.cameraName,
+                        startTimestamp = System.currentTimeMillis(),
+                        triggerType = active.triggerType,
+                        filePath = nextFile.absolutePath,
+                        cameraSnapshot = active.cameraSnapshot ?: failed.camera
+                    )
+                    activeSessions[cameraId] = placeholderSession
+                    _currentlyRecordingCameras.value = activeSessions.keys.toSet()
+                    streamManager.updateRecordingState(cameraId, true)
+
+                    finishRecordingSession(
+                        session = active,
+                        keepRecordingState = true,
+                        emitErrorOnEmpty = shouldEmitRecordingError(hadFrames, failures)
+                    )
+                    codecFinalizeJob = lastCodecFinalizeJobs[cameraId]
+                }
+
+                if (!shouldRecoverContinuous || active == null) return@launch
+
+                runCatching { withTimeoutOrNull(4_500L) { codecFinalizeJob?.join() } }
+
+                val failures = consecutiveZeroFrameFailures[cameraId] ?: 0
+                val backoffMs = if (failed.frameCount > 0) 400L else computeRetryBackoffMs(failures)
+                nextScheduledRetryAtMs[cameraId] = System.currentTimeMillis() + backoffMs
+
+                var waited = 0L
+                while (waited < backoffMs && isActive) {
+                    val step = minOf(200L, backoffMs - waited)
+                    delay(step)
+                    waited += step
+                    val current = activeSessions[cameraId]
+                    if (current == null || current.clipId != placeholderClipId) {
+                        return@launch
+                    }
+                }
+
+                val latestCamera = runCatching { database.cameraDao().getCameraById(cameraId) }.getOrNull()
+                    ?: active.cameraSnapshot
+                    ?: failed.camera
+
+                synchronized(cameraLock(cameraId)) {
+                    val current = activeSessions[cameraId]
+                    if (current == null || current.clipId != placeholderClipId) {
+                        return@launch
+                    }
+                    val targetFile = File(current.filePath)
+                    val refreshedSession = current.copy(
+                        startTimestamp = System.currentTimeMillis(),
+                        cameraSnapshot = latestCamera
+                    )
+                    activeSessions[cameraId] = refreshedSession
+                    _currentlyRecordingCameras.value = activeSessions.keys.toSet()
+                    streamManager.updateRecordingState(cameraId, true)
+
+                    cameraStreamRecorder.startRecording(
+                        clipId = refreshedSession.clipId,
+                        camera = latestCamera,
+                        outputFile = targetFile,
+                        scope = scope,
+                        waitForPreviousFinalize = lastCodecFinalizeJobs[cameraId],
+                        onUnexpectedStop = { nextFailed -> handleUnexpectedRecorderStop(nextFailed) }
+                    )
+                }
+            } catch (t: Throwable) {
+                Log.w("RecordingScheduler", "Auto-recovery failed for $cameraId: ${t.message}")
+            } finally {
+                placeholderClipId?.let { recoveringClipIds.remove(it) }
+                recoveringClipIds.remove(failed.clipId)
+            }
+        }
+    }
+
+    private fun finishRecordingSession(
+        session: ActiveRecordingSession,
+        motionScore: Int = 0,
+        keepRecordingState: Boolean = false,
+        emitErrorOnEmpty: Boolean = true
+    ): Job {
+        if (!keepRecordingState) {
+            _currentlyRecordingCameras.value = activeSessions.keys.toSet()
+            streamManager.updateRecordingState(session.cameraId, activeSessions.containsKey(session.cameraId))
+        }
 
         val file = File(session.filePath)
         val detachedRecorder = cameraStreamRecorder.detachRecorder(session.cameraId, expectedClipId = session.clipId)
@@ -181,21 +394,29 @@ class RecordingSchedulerEngine(
         val endTimestamp = System.currentTimeMillis()
         val durationSeconds = ((endTimestamp - session.startTimestamp) / 1000).toInt().coerceAtLeast(1)
 
+        val codecFinalizeJob = scope.launch {
+            if (detachedRecorder != null) {
+                runCatching { cameraStreamRecorder.finalizeRecorder(detachedRecorder) }
+            }
+        }
+        lastCodecFinalizeJobs[session.cameraId] = codecFinalizeJob
+
         val job = scope.launch {
             try {
-                if (detachedRecorder != null) {
-                    cameraStreamRecorder.finalizeRecorder(detachedRecorder)
-                }
+                codecFinalizeJob.join()
 
                 if (!StorageTimelineEngine.isPlayableClipFile(file)) {
                     runCatching {
                         if (file.exists()) file.delete()
                     }
                     Log.w("RecordingScheduler", "No real video frames decoded for ${session.cameraName}; discarded empty file")
-                    _recordingErrors.tryEmit(session.cameraName)
+                    if (emitErrorOnEmpty) {
+                        _recordingErrors.tryEmit(session.cameraName)
+                    }
                     return@launch
                 }
 
+                consecutiveZeroFrameFailures[session.cameraId] = 0
                 val actualSizeMb = (file.length().toFloat() / (1024f * 1024f)).coerceAtLeast(0.1f)
                 val clip = RecordedClipEntity(
                     id = session.clipId,
@@ -231,7 +452,7 @@ class RecordingSchedulerEngine(
                 }
 
                 database.recordedClipDao().insertClip(clip.copy(localExportUri = exportedUri))
-                storageRetentionEngine.enforceRetention()
+                runCatching { storageRetentionEngine.enforceRetention() }
 
                 // Auto cloud sync
                 if (config?.autoSyncRecordings == true) {
@@ -254,9 +475,13 @@ class RecordingSchedulerEngine(
     suspend fun stopAllRecordingsAndFlush(timeoutMs: Long = 6_000L) {
         schedulerLoopJob?.cancel()
         val sessionsToStop = activeSessions.entries.mapNotNull { (camId, session) ->
-            if (activeSessions.remove(camId, session)) session else null
+            synchronized(cameraLock(camId)) {
+                if (activeSessions.remove(camId, session)) session else null
+            }
         }
-        val jobs = sessionsToStop.map { finishRecordingSession(it) } + finalizeJobs.values.toList()
+        val jobs = sessionsToStop.map {
+            finishRecordingSession(it, keepRecordingState = false, emitErrorOnEmpty = false)
+        } + finalizeJobs.values.toList()
         if (jobs.isNotEmpty()) {
             withTimeoutOrNull(timeoutMs) {
                 jobs.joinAll()
@@ -277,6 +502,7 @@ class RecordingSchedulerEngine(
                     val camerasById = enabledCameras.associateBy { it.id }
 
                     val continuousTargetCameraIds = mutableSetOf<String>()
+                    val now = System.currentTimeMillis()
                     for (schedule in schedules) {
                         if (isScheduleCurrentlyActive(schedule)) {
                             activeList.add(schedule)
@@ -284,15 +510,13 @@ class RecordingSchedulerEngine(
                                 for (camera in enabledCameras) {
                                     if (isCameraTargetedBySchedule(camera.id, schedule)) {
                                         continuousTargetCameraIds.add(camera.id)
-                                        val existing = activeSessions[camera.id]
-                                        if (existing == null) {
-                                            startRecordingSession(camera, ClipTriggerType.SCHEDULED, null)
-                                        } else if (existing.triggerType == ClipTriggerType.SCHEDULED &&
-                                            System.currentTimeMillis() - existing.startTimestamp >= segmentDurationMs
-                                        ) {
-                                            activeSessions.remove(camera.id)
-                                            finishRecordingSession(existing)
-                                            startRecordingSession(camera, ClipTriggerType.SCHEDULED, null)
+                                        val retryAllowed = now >= (nextScheduledRetryAtMs[camera.id] ?: 0L)
+                                        if (retryAllowed) {
+                                            synchronized(cameraLock(camera.id)) {
+                                                if (!activeSessions.containsKey(camera.id)) {
+                                                    startRecordingSessionLocked(camera, ClipTriggerType.SCHEDULED, null)
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -300,48 +524,71 @@ class RecordingSchedulerEngine(
                         }
                     }
 
-                    // Finalize scheduled continuous sessions when schedule ends, and rotate chunked manual/scheduled recordings
-                    val now = System.currentTimeMillis()
+                    // Single clean pass: end expired scheduled sessions, rotate MANUAL/SCHEDULED chunks
+                    // seamlessly, and recover any recorder whose codec stopped unexpectedly.
                     for ((camId, session) in activeSessions.entries.toList()) {
+                        if (recoveringClipIds.containsKey(session.clipId)) continue
                         val elapsed = now - session.startTimestamp
-                        when (session.triggerType) {
-                            ClipTriggerType.SCHEDULED -> {
-                                if (!continuousTargetCameraIds.contains(camId)) {
-                                    activeSessions.remove(camId)
-                                    finishRecordingSession(session)
-                                } else if (elapsed >= segmentDurationMs) {
-                                    activeSessions.remove(camId)
-                                    finishRecordingSession(session)
-                                    val cam = camerasById[camId] ?: session.cameraSnapshot
-                                    if (cam != null) {
-                                        startRecordingSession(cam, ClipTriggerType.SCHEDULED, null)
+                        val isAlive = cameraStreamRecorder.isRecorderAlive(camId, session.clipId)
+                        val action = evaluateSessionAction(
+                            triggerType = session.triggerType,
+                            elapsedMs = elapsed,
+                            segmentDurationMs = segmentDurationMs,
+                            isScheduleStillActive = continuousTargetCameraIds.contains(camId),
+                            isRecorderAlive = isAlive
+                        )
+
+                        when (action) {
+                            SessionTickAction.STOP_ENDED_SCHEDULE -> {
+                                synchronized(cameraLock(camId)) {
+                                    val latest = activeSessions[camId]
+                                    if (latest != null && latest.clipId == session.clipId &&
+                                        activeSessions.remove(camId, latest)
+                                    ) {
+                                        finishRecordingSession(latest, keepRecordingState = false, emitErrorOnEmpty = true)
                                     }
                                 }
                             }
-                            ClipTriggerType.MANUAL -> {
-                                if (elapsed >= segmentDurationMs) {
-                                    activeSessions.remove(camId)
-                                    finishRecordingSession(session)
-                                    val cam = camerasById[camId] ?: session.cameraSnapshot
-                                    if (cam != null) {
-                                        startRecordingSession(cam, ClipTriggerType.MANUAL, null)
+                            SessionTickAction.ROTATE_CHUNK -> {
+                                val cam = camerasById[camId] ?: session.cameraSnapshot
+                                if (cam != null) {
+                                    synchronized(cameraLock(camId)) {
+                                        val latest = activeSessions[camId]
+                                        if (latest != null && latest.clipId == session.clipId) {
+                                            rotateRecordingSessionLocked(latest, cam, latest.triggerType)
+                                        }
                                     }
                                 }
                             }
-                            ClipTriggerType.MOTION_ALERT -> Unit
+                            SessionTickAction.RECOVER_DEAD_RECORDER -> {
+                                val cam = camerasById[camId] ?: session.cameraSnapshot
+                                if (cam != null && !recoveringClipIds.containsKey(session.clipId)) {
+                                    synchronized(cameraLock(camId)) {
+                                        val latest = activeSessions[camId]
+                                        if (latest != null && latest.clipId == session.clipId &&
+                                            !cameraStreamRecorder.isRecorderAlive(camId, latest.clipId)
+                                        ) {
+                                            rotateRecordingSessionLocked(latest, cam, latest.triggerType)
+                                        }
+                                    }
+                                }
+                            }
+                            SessionTickAction.KEEP_RECORDING -> Unit
                         }
                     }
 
                     tickCount++
                     if (tickCount % 6 == 0) {
-                        storageRetentionEngine.enforceRetention()
+                        scope.launch {
+                            runCatching { storageRetentionEngine.enforceRetention() }
+                        }
                     }
 
                     _activeSchedulesState.value = activeList
                 } catch (t: Throwable) {
                     Log.w("RecordingScheduler", "Scheduler tick error: ${t.message}")
                 }
-                delay(5000) // check every 5 seconds for timely chunk splits
+                delay(5000) // check every 5 seconds for timely chunk splits & liveness
             }
         }
     }
@@ -382,9 +629,59 @@ class RecordingSchedulerEngine(
 
     fun release() {
         schedulerLoopJob?.cancel()
-        for ((_, session) in activeSessions) {
-            finishRecordingSession(session)
+        for ((camId, session) in activeSessions.entries.toList()) {
+            synchronized(cameraLock(camId)) {
+                if (activeSessions.remove(camId, session)) {
+                    finishRecordingSession(session, keepRecordingState = false, emitErrorOnEmpty = false)
+                }
+            }
         }
         activeSessions.clear()
+    }
+
+    enum class SessionTickAction {
+        KEEP_RECORDING,
+        ROTATE_CHUNK,
+        STOP_ENDED_SCHEDULE,
+        RECOVER_DEAD_RECORDER
+    }
+
+    companion object {
+        fun evaluateSessionAction(
+            triggerType: ClipTriggerType,
+            elapsedMs: Long,
+            segmentDurationMs: Long,
+            isScheduleStillActive: Boolean,
+            isRecorderAlive: Boolean
+        ): SessionTickAction {
+            return when (triggerType) {
+                ClipTriggerType.SCHEDULED -> when {
+                    !isScheduleStillActive -> SessionTickAction.STOP_ENDED_SCHEDULE
+                    !isRecorderAlive -> SessionTickAction.RECOVER_DEAD_RECORDER
+                    elapsedMs >= segmentDurationMs -> SessionTickAction.ROTATE_CHUNK
+                    else -> SessionTickAction.KEEP_RECORDING
+                }
+                ClipTriggerType.MANUAL -> when {
+                    !isRecorderAlive -> SessionTickAction.RECOVER_DEAD_RECORDER
+                    elapsedMs >= segmentDurationMs -> SessionTickAction.ROTATE_CHUNK
+                    else -> SessionTickAction.KEEP_RECORDING
+                }
+                ClipTriggerType.MOTION_ALERT -> SessionTickAction.KEEP_RECORDING
+            }
+        }
+
+        fun computeRetryBackoffMs(consecutiveZeroFrameFailures: Int): Long {
+            return when {
+                consecutiveZeroFrameFailures <= 0 -> 500L
+                consecutiveZeroFrameFailures == 1 -> 1_500L
+                consecutiveZeroFrameFailures == 2 -> 3_000L
+                consecutiveZeroFrameFailures == 3 -> 5_000L
+                else -> 10_000L
+            }
+        }
+
+        fun shouldEmitRecordingError(hadFrames: Boolean, consecutiveFailures: Int): Boolean {
+            return !hadFrames && consecutiveFailures >= 2
+        }
     }
 }

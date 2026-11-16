@@ -27,6 +27,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -71,7 +72,11 @@ class CameraStreamRecorder(
         var frameCount: Int = 0,
         var lastPresentationTimeUs: Long = -1L,
         var lastLiveFrame: Bitmap? = null,
-        var initFailed: Boolean = false
+        var initFailed: Boolean = false,
+        val fatalError: AtomicBoolean = AtomicBoolean(false),
+        @Volatile var consecutiveEncodeErrors: Int = 0,
+        var yuvArgbScratch: IntArray? = null,
+        var yuvBytesScratch: ByteArray? = null
     )
 
     private val activeRecorders = ConcurrentHashMap<String, ActiveRecorder>()
@@ -80,16 +85,26 @@ class CameraStreamRecorder(
         return activeRecorders.containsKey(cameraId)
     }
 
+    fun isRecorderAlive(cameraId: String, clipId: String): Boolean {
+        val current = activeRecorders[cameraId] ?: return false
+        return current.clipId == clipId &&
+            !current.isStopping.get() &&
+            !current.fatalError.get() &&
+            current.job?.isActive == true
+    }
+
     fun startRecording(
         clipId: String,
         camera: CameraEntity,
         outputFile: File,
-        scope: CoroutineScope
+        scope: CoroutineScope,
+        waitForPreviousFinalize: Job? = null,
+        onUnexpectedStop: ((ActiveRecorder) -> Unit)? = null
     ): ActiveRecorder {
         val previous = detachRecorder(camera.id)
-        if (previous != null) {
+        val previousFinalizeJob = waitForPreviousFinalize ?: previous?.let { prev ->
             scope.launch {
-                runCatching { finalizeRecorder(previous) }
+                runCatching { finalizeRecorder(prev) }
             }
         }
 
@@ -114,113 +129,166 @@ class CameraStreamRecorder(
         activeRecorders[camera.id] = recorder
 
         val job = scope.launch(singleThreadDispatcher) {
-            initializeEncoderOnThread(recorder)
-
-            var frameIndex = 0
-            while (isActive && !recorder.isStopping.get()) {
-                val loopStart = System.currentTimeMillis()
-                var frameBitmap: Bitmap? = null
-                try {
-                    val rawLiveBitmap = try {
-                        streamManager.captureFrameForBackgroundWorker(
-                            camera = camera,
-                            maxSide = maxOf(width, height),
-                            alignTo = 16,
-                            waitHeadlessFirstFrameMs = if (frameIndex == 0) 280L else 0L
-                        )
-                    } catch (_: Throwable) {
-                        null
-                    }
-
-                    val liveBitmap = if (rawLiveBitmap != null && !rawLiveBitmap.isRecycled) {
-                        if (rawLiveBitmap.width == width && rawLiveBitmap.height == height &&
-                            rawLiveBitmap.config == Bitmap.Config.ARGB_8888
-                        ) {
-                            rawLiveBitmap
-                        } else {
-                            try {
-                                val scaled = Bitmap.createScaledBitmap(rawLiveBitmap, width, height, true)
-                                val argb = if (scaled.config == Bitmap.Config.ARGB_8888) {
-                                    scaled
-                                } else {
-                                    scaled.copy(Bitmap.Config.ARGB_8888, false).also {
-                                        if (!scaled.isRecycled) scaled.recycle()
-                                    }
-                                }
-                                if (rawLiveBitmap !== argb && !rawLiveBitmap.isRecycled) {
-                                    rawLiveBitmap.recycle()
-                                }
-                                argb
-                            } catch (_: Throwable) {
-                                rawLiveBitmap
-                            }
-                        }
-                    } else {
-                        null
-                    }
-
-                    if (liveBitmap != null && !liveBitmap.isRecycled) {
-                        val copyForCache = runCatching {
-                            liveBitmap.copy(Bitmap.Config.ARGB_8888, false)
-                        }.getOrNull()
-                        if (copyForCache != null) {
-                            recorder.lastLiveFrame?.let { old ->
-                                if (!old.isRecycled) old.recycle()
-                            }
-                            recorder.lastLiveFrame = copyForCache
-                        }
-                    }
-
-                    val cachedFrame = recorder.lastLiveFrame
-                    frameBitmap = when {
-                        liveBitmap != null && !liveBitmap.isRecycled -> liveBitmap
-                        recorder.frameCount > 0 && cachedFrame != null && !cachedFrame.isRecycled ->
-                            runCatching { cachedFrame.copy(Bitmap.Config.ARGB_8888, false) }.getOrNull()
-                        else -> null
-                    }
-
-                    val codec = recorder.codec
-                    val muxer = recorder.muxer
-                    if (frameBitmap != null && !recorder.initFailed && codec != null && muxer != null && !recorder.isStopping.get()) {
-                        if (frameIndex == 0) {
-                            runCatching {
-                                val syncBundle = Bundle().apply {
-                                    putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
-                                }
-                                codec.setParameters(syncBundle)
-                            }
-                        }
-                        val rawPtsUs = (System.nanoTime() - recorder.startTimeNano) / 1000L
-                        val ptsUs = maxOf(rawPtsUs, recorder.lastPresentationTimeUs + 33_333L)
-                        recorder.lastPresentationTimeUs = ptsUs
-
-                        encodeFrame(
-                            codec = codec,
-                            muxer = muxer,
-                            bitmap = frameBitmap,
-                            width = width,
-                            height = height,
-                            presentationTimeUs = ptsUs,
-                            recorder = recorder
-                        )
-                        frameIndex++
-                        recorder.frameCount = frameIndex
-                    }
-                } catch (t: Throwable) {
-                    Log.w("CameraStreamRecorder", "Record loop frame error for ${camera.id}: ${t.message}")
-                } finally {
-                    frameBitmap?.let { bmp ->
-                        if (!bmp.isRecycled && bmp !== recorder.lastLiveFrame) {
-                            bmp.recycle()
-                        }
+            try {
+                if (previousFinalizeJob != null) {
+                    withTimeoutOrNull(5_000L) {
+                        previousFinalizeJob.join()
                     }
                 }
+                if (!isActive || recorder.isStopping.get()) {
+                    return@launch
+                }
 
-                if (recorder.isStopping.get()) break
+                initializeEncoderOnThread(recorder)
+                if (recorder.initFailed && isActive && !recorder.isStopping.get()) {
+                    delay(350L)
+                    if (isActive && !recorder.isStopping.get()) {
+                        recorder.initFailed = false
+                        initializeEncoderOnThread(recorder)
+                    }
+                }
+                if (recorder.initFailed) {
+                    recorder.fatalError.set(true)
+                    return@launch
+                }
 
-                val elapsed = System.currentTimeMillis() - loopStart
-                val sleepMs = (100L - elapsed).coerceAtLeast(15L)
-                delay(sleepMs)
+                var frameIndex = 0
+                while (isActive && !recorder.isStopping.get()) {
+                    val loopStart = System.currentTimeMillis()
+                    var rawLiveBitmap: Bitmap? = null
+                    var liveBitmap: Bitmap? = null
+                    var frameBitmap: Bitmap? = null
+                    var attemptingEncode = false
+                    try {
+                        rawLiveBitmap = try {
+                            streamManager.captureFrameForBackgroundWorker(
+                                camera = camera,
+                                maxSide = maxOf(width, height),
+                                alignTo = 16,
+                                waitHeadlessFirstFrameMs = if (frameIndex == 0) 400L else 0L
+                            )
+                        } catch (_: Throwable) {
+                            null
+                        }
+
+                        liveBitmap = if (rawLiveBitmap != null && !rawLiveBitmap.isRecycled) {
+                            if (rawLiveBitmap.width == width && rawLiveBitmap.height == height &&
+                                rawLiveBitmap.config == Bitmap.Config.ARGB_8888
+                            ) {
+                                rawLiveBitmap
+                            } else {
+                                try {
+                                    val scaled = Bitmap.createScaledBitmap(rawLiveBitmap, width, height, true)
+                                    val argb = if (scaled.config == Bitmap.Config.ARGB_8888) {
+                                        scaled
+                                    } else {
+                                        scaled.copy(Bitmap.Config.ARGB_8888, false).also {
+                                            if (!scaled.isRecycled) scaled.recycle()
+                                        }
+                                    }
+                                    if (rawLiveBitmap !== argb && !rawLiveBitmap.isRecycled) {
+                                        rawLiveBitmap.recycle()
+                                    }
+                                    argb
+                                } catch (_: Throwable) {
+                                    rawLiveBitmap
+                                }
+                            }
+                        } else {
+                            null
+                        }
+
+                        if (liveBitmap != null && !liveBitmap.isRecycled) {
+                            val copyForCache = runCatching {
+                                liveBitmap.copy(Bitmap.Config.ARGB_8888, false)
+                            }.getOrNull()
+                            if (copyForCache != null) {
+                                recorder.lastLiveFrame?.let { old ->
+                                    if (!old.isRecycled) old.recycle()
+                                }
+                                recorder.lastLiveFrame = copyForCache
+                            }
+                        }
+
+                        val cachedFrame = recorder.lastLiveFrame
+                        frameBitmap = when {
+                            liveBitmap != null && !liveBitmap.isRecycled -> liveBitmap
+                            recorder.frameCount > 0 && cachedFrame != null && !cachedFrame.isRecycled ->
+                                runCatching { cachedFrame.copy(Bitmap.Config.ARGB_8888, false) }.getOrNull()
+                            else -> null
+                        }
+
+                        val codec = recorder.codec
+                        val muxer = recorder.muxer
+                        if (frameBitmap != null && !recorder.initFailed && codec != null && muxer != null && !recorder.isStopping.get()) {
+                            if (frameIndex == 0) {
+                                runCatching {
+                                    val syncBundle = Bundle().apply {
+                                        putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+                                    }
+                                    codec.setParameters(syncBundle)
+                                }
+                            }
+                            val rawPtsUs = (System.nanoTime() - recorder.startTimeNano) / 1000L
+                            val ptsUs = maxOf(rawPtsUs, recorder.lastPresentationTimeUs + 33_333L)
+                            recorder.lastPresentationTimeUs = ptsUs
+
+                            attemptingEncode = true
+                            encodeFrame(
+                                codec = codec,
+                                muxer = muxer,
+                                bitmap = frameBitmap,
+                                width = width,
+                                height = height,
+                                presentationTimeUs = ptsUs,
+                                recorder = recorder
+                            )
+                            recorder.consecutiveEncodeErrors = 0
+                            frameIndex++
+                            recorder.frameCount = frameIndex
+                        }
+                    } catch (t: Throwable) {
+                        Log.w("CameraStreamRecorder", "Record loop frame error for ${camera.id}: ${t.message}")
+                        if (attemptingEncode) {
+                            recorder.consecutiveEncodeErrors++
+                            if (recorder.consecutiveEncodeErrors >= MAX_CONSECUTIVE_ENCODE_ERRORS) {
+                                Log.e(
+                                    "CameraStreamRecorder",
+                                    "Aborting wedged encoder for ${camera.id} after ${recorder.consecutiveEncodeErrors} consecutive failures"
+                                )
+                                recorder.fatalError.set(true)
+                                break
+                            }
+                        }
+                    } finally {
+                        if (rawLiveBitmap != null && rawLiveBitmap !== liveBitmap &&
+                            rawLiveBitmap !== frameBitmap && !rawLiveBitmap.isRecycled &&
+                            rawLiveBitmap !== recorder.lastLiveFrame
+                        ) {
+                            rawLiveBitmap.recycle()
+                        }
+                        if (liveBitmap != null && liveBitmap !== frameBitmap &&
+                            !liveBitmap.isRecycled && liveBitmap !== recorder.lastLiveFrame
+                        ) {
+                            liveBitmap.recycle()
+                        }
+                        frameBitmap?.let { bmp ->
+                            if (!bmp.isRecycled && bmp !== recorder.lastLiveFrame) {
+                                bmp.recycle()
+                            }
+                        }
+                    }
+
+                    if (recorder.isStopping.get() || recorder.fatalError.get()) break
+
+                    val elapsed = System.currentTimeMillis() - loopStart
+                    val sleepMs = (100L - elapsed).coerceAtLeast(15L)
+                    delay(sleepMs)
+                }
+            } finally {
+                if (!recorder.isStopping.get()) {
+                    onUnexpectedStop?.invoke(recorder)
+                }
             }
         }
 
@@ -364,70 +432,103 @@ class CameraStreamRecorder(
     suspend fun finalizeRecorder(recorder: ActiveRecorder): Long {
         recorder.isStopping.set(true)
         try {
-            recorder.job?.join()
+            withTimeoutOrNull(3_000L) {
+                recorder.job?.join()
+            }
         } catch (_: Throwable) {}
 
         return try {
-            withContext(recorder.encoderDispatcher) {
-                val codec = recorder.codec
-                val muxer = recorder.muxer
+            val finalizedBytes = withTimeoutOrNull(4_000L) {
+                withContext(recorder.encoderDispatcher) {
+                    val codec = recorder.codec
+                    val muxer = recorder.muxer
 
-                if (!recorder.initFailed && codec != null && muxer != null) {
-                    try {
-                        val lastReal = recorder.lastLiveFrame
-                        if (recorder.frameCount > 0 && lastReal != null && !lastReal.isRecycled) {
-                            var safetyFrames = recorder.frameCount
-                            while (safetyFrames < 3) {
-                                val pts = maxOf(0L, recorder.lastPresentationTimeUs + 100_000L)
-                                recorder.lastPresentationTimeUs = pts
-                                encodeFrame(codec, muxer, lastReal, recorder.width, recorder.height, pts, recorder)
-                                safetyFrames++
-                                recorder.frameCount = safetyFrames
-                            }
-                        }
-
-                        if (recorder.frameCount > 0) {
-                            if (recorder.glInputSurface != null && recorder.inputSurface != null) {
-                                codec.signalEndOfInputStream()
-                            } else {
-                                val inputIndex = codec.dequeueInputBuffer(20_000)
-                                if (inputIndex >= 0) {
-                                    val eosPts = (recorder.lastPresentationTimeUs + 100_000L).coerceAtLeast(0L)
-                                    codec.queueInputBuffer(
-                                        inputIndex,
-                                        0,
-                                        0,
-                                        eosPts,
-                                        MediaCodec.BUFFER_FLAG_END_OF_STREAM
-                                    )
+                    if (!recorder.initFailed && codec != null && muxer != null) {
+                        try {
+                            val lastReal = recorder.lastLiveFrame
+                            if (recorder.frameCount > 0 && lastReal != null && !lastReal.isRecycled) {
+                                var safetyFrames = recorder.frameCount
+                                while (safetyFrames < 3) {
+                                    val pts = maxOf(0L, recorder.lastPresentationTimeUs + 100_000L)
+                                    recorder.lastPresentationTimeUs = pts
+                                    encodeFrame(codec, muxer, lastReal, recorder.width, recorder.height, pts, recorder)
+                                    safetyFrames++
+                                    recorder.frameCount = safetyFrames
                                 }
                             }
-                            drainCodec(codec, muxer, recorder, endOfStream = true)
-                        }
 
-                        if (recorder.isMuxerStarted) {
-                            muxer.stop()
+                            if (recorder.frameCount > 0) {
+                                if (recorder.glInputSurface != null && recorder.inputSurface != null) {
+                                    codec.signalEndOfInputStream()
+                                } else {
+                                    val inputIndex = codec.dequeueInputBuffer(20_000)
+                                    if (inputIndex >= 0) {
+                                        val eosPts = (recorder.lastPresentationTimeUs + 100_000L).coerceAtLeast(0L)
+                                        codec.queueInputBuffer(
+                                            inputIndex,
+                                            0,
+                                            0,
+                                            eosPts,
+                                            MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                                        )
+                                    }
+                                }
+                                drainCodec(codec, muxer, recorder, endOfStream = true)
+                            }
+
+                            if (recorder.isMuxerStarted) {
+                                muxer.stop()
+                            }
+                        } catch (e: Throwable) {
+                            Log.w("CameraStreamRecorder", "finalizeRecorder error: ${e.message}")
+                        } finally {
+                            runCatching { codec.stop() }
+                            runCatching { codec.release() }
+                            runCatching { recorder.glInputSurface?.release() }
+                            runCatching { recorder.inputSurface?.release() }
+                            runCatching { muxer.release() }
+                            recorder.codec = null
+                            recorder.muxer = null
+                            recorder.glInputSurface = null
+                            recorder.inputSurface = null
                         }
-                    } catch (e: Throwable) {
-                        Log.w("CameraStreamRecorder", "finalizeRecorder error: ${e.message}")
-                    } finally {
-                        runCatching { codec.stop() }
-                        runCatching { codec.release() }
-                        runCatching { recorder.glInputSurface?.release() }
-                        runCatching { recorder.inputSurface?.release() }
-                        runCatching { muxer.release() }
-                        recorder.codec = null
-                        recorder.muxer = null
-                        recorder.glInputSurface = null
-                        recorder.inputSurface = null
+                    }
+
+                    recorder.lastLiveFrame?.let { bmp ->
+                        if (!bmp.isRecycled) bmp.recycle()
+                    }
+                    recorder.lastLiveFrame = null
+                    recorder.yuvArgbScratch = null
+                    recorder.yuvBytesScratch = null
+
+                    if (recorder.frameCount > 0 &&
+                        recorder.isMuxerStarted &&
+                        StorageTimelineEngine.isPlayableClipFile(recorder.outputFile)
+                    ) {
+                        recorder.outputFile.length()
+                    } else {
+                        runCatching {
+                            if (recorder.outputFile.exists()) recorder.outputFile.delete()
+                        }
+                        0L
                     }
                 }
-
+            }
+            finalizedBytes ?: run {
+                // Bounded timeout fallback: force-release codec/muxer so hardware encoder slots never leak
+                runCatching { recorder.codec?.stop() }
+                runCatching { recorder.codec?.release() }
+                runCatching { recorder.glInputSurface?.release() }
+                runCatching { recorder.inputSurface?.release() }
+                runCatching { recorder.muxer?.release() }
+                recorder.codec = null
+                recorder.muxer = null
+                recorder.glInputSurface = null
+                recorder.inputSurface = null
                 recorder.lastLiveFrame?.let { bmp ->
                     if (!bmp.isRecycled) bmp.recycle()
                 }
                 recorder.lastLiveFrame = null
-
                 if (recorder.frameCount > 0 &&
                     recorder.isMuxerStarted &&
                     StorageTimelineEngine.isPlayableClipFile(recorder.outputFile)
@@ -450,6 +551,18 @@ class CameraStreamRecorder(
         return finalizeRecorder(recorder)
     }
 
+    private fun getOrAllocArgbScratch(recorder: ActiveRecorder, size: Int): IntArray {
+        val existing = recorder.yuvArgbScratch
+        if (existing != null && existing.size == size) return existing
+        return IntArray(size).also { recorder.yuvArgbScratch = it }
+    }
+
+    private fun getOrAllocYuvBytesScratch(recorder: ActiveRecorder, size: Int): ByteArray {
+        val existing = recorder.yuvBytesScratch
+        if (existing != null && existing.size >= size) return existing
+        return ByteArray(size).also { recorder.yuvBytesScratch = it }
+    }
+
     private fun encodeFrame(
         codec: MediaCodec,
         muxer: MediaMuxer,
@@ -469,18 +582,24 @@ class CameraStreamRecorder(
         val inputIndex = codec.dequeueInputBuffer(15_000)
         if (inputIndex >= 0) {
             var writtenSize = 0
+            val argb = getOrAllocArgbScratch(recorder, width * height)
             if (recorder.useInputImage) {
                 val image = runCatching { codec.getInputImage(inputIndex) }.getOrNull()
                 if (image != null) {
-                    encodeArgbToImage(bitmap, image, width, height)
+                    encodeArgbToImage(bitmap, image, width, height, argb)
                     writtenSize = width * height * 3 / 2
                 }
             }
             if (writtenSize == 0) {
                 val inputBuffer = runCatching { codec.getInputBuffer(inputIndex) }.getOrNull()
                 if (inputBuffer != null) {
-                    val argb = IntArray(width * height)
                     bitmap.getPixels(argb, 0, width, 0, 0, width, height)
+                    val isPlanar = recorder.colorFormat == MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar
+                    val safeStride = recorder.inputStride.coerceAtLeast(width)
+                    val safeSlice = recorder.inputSliceHeight.coerceAtLeast(height)
+                    val ySize = safeStride * safeSlice
+                    val uvSize = if (isPlanar) 2 * (safeStride / 2) * (safeSlice / 2) else safeStride * (safeSlice / 2)
+                    val scratch = getOrAllocYuvBytesScratch(recorder, ySize + uvSize)
                     writtenSize = writeArgbToYuv420Buffer(
                         argb = argb,
                         width = width,
@@ -488,7 +607,8 @@ class CameraStreamRecorder(
                         stride = recorder.inputStride,
                         sliceHeight = recorder.inputSliceHeight,
                         output = inputBuffer,
-                        isPlanar = recorder.colorFormat == MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar
+                        isPlanar = isPlanar,
+                        scratchBytes = scratch
                     )
                 }
             }
@@ -548,9 +668,14 @@ class CameraStreamRecorder(
         }
     }
 
-    private fun encodeArgbToImage(bitmap: Bitmap, image: Image, width: Int, height: Int) {
-        val argb = IntArray(width * height)
-        bitmap.getPixels(argb, 0, width, 0, 0, width, height)
+    private fun encodeArgbToImage(
+        bitmap: Bitmap,
+        image: Image,
+        width: Int,
+        height: Int,
+        argbScratch: IntArray = IntArray(width * height)
+    ) {
+        bitmap.getPixels(argbScratch, 0, width, 0, 0, width, height)
 
         val planes = image.planes
         val yPlane = planes[0]
@@ -575,7 +700,7 @@ class CameraStreamRecorder(
             val vRowOffset = uvRow * vRowStride
 
             for (i in 0 until width) {
-                val c = argb[j * width + i]
+                val c = argbScratch[j * width + i]
                 val r = (c shr 16) and 0xFF
                 val g = (c shr 8) and 0xFF
                 val b = c and 0xFF
@@ -737,7 +862,7 @@ class CameraStreamRecorder(
                     runCatching { EGL14.eglDestroyContext(eglDisplay, eglContext) }
                     eglContext = EGL14.EGL_NO_CONTEXT
                 }
-                runCatching { EGL14.eglTerminate(eglDisplay) }
+                runCatching { EGL14.eglReleaseThread() }
                 eglDisplay = EGL14.EGL_NO_DISPLAY
             }
         }
@@ -745,6 +870,7 @@ class CameraStreamRecorder(
 
     companion object {
         private const val EGL_RECORDABLE_ANDROID = 0x3142
+        private const val MAX_CONSECUTIVE_ENCODE_ERRORS = 3
 
         private const val VS_SOURCE = """
             attribute vec4 aPosition;
@@ -809,7 +935,8 @@ class CameraStreamRecorder(
             stride: Int,
             sliceHeight: Int,
             output: ByteBuffer,
-            isPlanar: Boolean
+            isPlanar: Boolean,
+            scratchBytes: ByteArray? = null
         ): Int {
             val safeStride = stride.coerceAtLeast(width)
             val safeSliceHeight = sliceHeight.coerceAtLeast(height)
@@ -826,7 +953,11 @@ class CameraStreamRecorder(
                 return 0
             }
 
-            val yuvBytes = ByteArray(totalRequired)
+            val yuvBytes = if (scratchBytes != null && scratchBytes.size >= totalRequired) {
+                scratchBytes
+            } else {
+                ByteArray(totalRequired)
+            }
             val uBase = yPlaneSize
             val vBase = yPlaneSize + chromaStride * chromaRows
 
@@ -849,11 +980,11 @@ class CameraStreamRecorder(
                         if (isPlanar) {
                             val uIdx = uBase + uvRow * chromaStride + uvCol
                             val vIdx = vBase + uvRow * chromaStride + uvCol
-                            if (uIdx < yuvBytes.size) yuvBytes[uIdx] = u
-                            if (vIdx < yuvBytes.size) yuvBytes[vIdx] = v
+                            if (uIdx < totalRequired) yuvBytes[uIdx] = u
+                            if (vIdx < totalRequired) yuvBytes[vIdx] = v
                         } else {
                             val uvIdx = uBase + uvRow * safeStride + i
-                            if (uvIdx + 1 < yuvBytes.size) {
+                            if (uvIdx + 1 < totalRequired) {
                                 yuvBytes[uvIdx] = u
                                 yuvBytes[uvIdx + 1] = v
                             }
@@ -863,7 +994,7 @@ class CameraStreamRecorder(
             }
 
             output.clear()
-            output.put(yuvBytes)
+            output.put(yuvBytes, 0, totalRequired)
             output.flip()
             return totalRequired
         }

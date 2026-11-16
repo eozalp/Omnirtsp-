@@ -320,9 +320,7 @@ fun RtspVideoPlayer(
                     onRelease = { playerView ->
                         val tv = (playerView.videoSurfaceView as? TextureView)
                             ?: (0 until playerView.childCount).mapNotNull { playerView.getChildAt(it) as? TextureView }.firstOrNull()
-                        if (tv != null) {
-                            sharedStreamManager.unregisterTextureView(camera.id, tv)
-                        }
+                        val detachedFromPlayer = playerView.player as? ExoPlayer
                         if (playerViewRef === playerView) {
                             playerViewRef = null
                         }
@@ -330,6 +328,7 @@ fun RtspVideoPlayer(
                             playerView.onPause()
                             playerView.player = null
                         } catch (ignored: Exception) {}
+                        sharedStreamManager.onPlayerViewReleased(camera.id, tv, detachedFromPlayer)
                     },
                     modifier = Modifier
                         .fillMaxSize()

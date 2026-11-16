@@ -392,7 +392,7 @@ class HeadlessGlFrameGrabber(
                 runCatching { EGL14.eglDestroyContext(eglDisplay, eglContext) }
                 eglContext = EGL14.EGL_NO_CONTEXT
             }
-            runCatching { EGL14.eglTerminate(eglDisplay) }
+            runCatching { EGL14.eglReleaseThread() }
             eglDisplay = EGL14.EGL_NO_DISPLAY
         }
     }
