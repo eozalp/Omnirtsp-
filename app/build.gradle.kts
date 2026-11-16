@@ -63,7 +63,23 @@ android {
     compose = true
     buildConfig = true
   }
-  testOptions { unitTests { isIncludeAndroidResources = true } }
+  testOptions {
+    unitTests {
+      isIncludeAndroidResources = true
+      all {
+        it.maxHeapSize = "2048m"
+        it.minHeapSize = "512m"
+        it.jvmArgs("-XX:MaxMetaspaceSize=512m", "-XX:+HeapDumpOnOutOfMemoryError")
+        it.testLogging {
+          events("failed", "skipped")
+          exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+          showExceptions = true
+          showCauses = true
+          showStackTraces = true
+        }
+      }
+    }
+  }
   dependenciesInfo {
     includeInApk = false
     includeInBundle = true

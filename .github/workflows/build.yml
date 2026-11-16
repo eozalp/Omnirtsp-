@@ -163,6 +163,15 @@ jobs:
             gradle :app:lintDebug --stacktrace -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8" || true
           fi
 
+      - name: Print Unit Test Failures (if any)
+        if: failure()
+        run: |
+          echo "=== Test Failure Summary ==="
+          find app/build/test-results -name "TEST-*.xml" -exec grep -lE "<failure|<error" {} \; | while read -r f; do
+            echo "--- $f ---"
+            cat "$f"
+          done
+
       - name: Upload Test Results
         if: always()
         uses: actions/upload-artifact@v6
