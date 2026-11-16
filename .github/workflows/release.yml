@@ -34,6 +34,13 @@ jobs:
           echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
 
+          grep -q "24333f8a63b6825ea9c5514f83c2829b004d1fee" "$SDK_ROOT/licenses/android-sdk-license" 2>/dev/null || \
+            printf "\n8933bad161af4178b1185d1a37fbf41ea5269c55\nd56f5187479451eabf01fb78af6dfcb131a6481e\n24333f8a63b6825ea9c5514f83c2829b004d1fee\n" >> "$SDK_ROOT/licenses/android-sdk-license"
+          grep -q "84831b9409646a918e30573bab4c9c91346d8abd" "$SDK_ROOT/licenses/android-sdk-preview-license" 2>/dev/null || \
+            printf "\n84831b9409646a918e30573bab4c9c91346d8abd\n" >> "$SDK_ROOT/licenses/android-sdk-preview-license"
+          grep -q "33b6a2b64607f11b759f320ef9dff4ae5c47d97a" "$SDK_ROOT/licenses/google-gdk-license" 2>/dev/null || \
+            printf "\n33b6a2b64607f11b759f320ef9dff4ae5c47d97a\n" >> "$SDK_ROOT/licenses/google-gdk-license"
+
           SDKMANAGER=""
           for candidate in \
             "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
@@ -49,19 +56,29 @@ jobs:
             SDKMANAGER="$(command -v sdkmanager)"
           fi
 
-          if [ -n "$SDKMANAGER" ]; then
-            echo "Using sdkmanager: $SDKMANAGER"
-            yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null 2>&1 || true
-            "$SDKMANAGER" --sdk_root="$SDK_ROOT" "cmdline-tools;latest" >/dev/null 2>&1 || true
-            if [ -x "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
-              SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
-            fi
-            yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null 2>&1 || true
-            "$SDKMANAGER" --sdk_root="$SDK_ROOT" "platform-tools" "build-tools;36.0.0" "platforms;android-36" "platforms;android-36.1" || true
+          if [ -z "$SDKMANAGER" ]; then
+            echo "::error::sdkmanager not found under $SDK_ROOT"
+            exit 1
           fi
 
-          grep -q "24333f8a63b6825ea9c5514f83c2829b004d1fee" "$SDK_ROOT/licenses/android-sdk-license" 2>/dev/null || \
-            printf "\n8933bad161af4178b1185d1a37fbf41ea5269c55\nd56f5187479451eabf01fb78af6dfcb131a6481e\n24333f8a63b6825ea9c5514f83c2829b004d1fee\n" >> "$SDK_ROOT/licenses/android-sdk-license"
+          echo "Using sdkmanager: $SDKMANAGER"
+          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" --sdk_root="$SDK_ROOT" "cmdline-tools;latest" || echo "Warning: cmdline-tools;latest update returned non-zero"
+          if [ -x "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null 2>&1 || true
+
+          for pkg in "platform-tools" "build-tools;36.0.0" "platforms;android-36" "platforms;android-36.1"; do
+            echo "Installing SDK package: $pkg"
+            yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" "$pkg" || echo "Warning: failed installing $pkg"
+          done
+
+          if [ ! -d "$SDK_ROOT/platforms/android-36.1" ]; then
+            echo "::error::Required SDK platform android-36.1 was not installed under $SDK_ROOT/platforms"
+            "$SDKMANAGER" --sdk_root="$SDK_ROOT" --list_installed || true
+            exit 1
+          fi
 
           if [ -d "$SDK_ROOT/platform-tools" ]; then
             echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
@@ -130,17 +147,17 @@ jobs:
       - name: Run Test Suite
         run: |
           if [ -f gradlew ]; then
-            ./gradlew testDebugUnitTest --stacktrace
+            ./gradlew testDebugUnitTest --stacktrace -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8"
           else
-            gradle testDebugUnitTest --stacktrace
+            gradle testDebugUnitTest --stacktrace -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8"
           fi
 
       - name: Build Release APK & Bundle
         run: |
           if [ -f gradlew ]; then
-            ./gradlew assembleRelease bundleRelease --stacktrace
+            ./gradlew assembleRelease bundleRelease --stacktrace -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8"
           else
-            gradle assembleRelease bundleRelease --stacktrace
+            gradle assembleRelease bundleRelease --stacktrace -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8"
           fi
 
       - name: Upload Release Artifacts
