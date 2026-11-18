@@ -23,6 +23,7 @@ import java.nio.FloatBuffer
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Offscreen EGL14 + OpenGL ES 2.0 OES frame grabber.
@@ -57,6 +58,20 @@ class HeadlessGlFrameGrabber(
 
     @Volatile
     private var isInitialized: Boolean = false
+
+    private val decodedFrameCounter = AtomicLong(0L)
+
+    @Volatile
+    var lastFrameArrivalAtMs: Long = 0L
+        private set
+
+    @Volatile
+    private var consecutiveGlErrors: Int = 0
+
+    @Volatile
+    private var glContextLost: Boolean = false
+
+    fun getReceivedFrameCount(): Long = decodedFrameCounter.get()
 
     private var eglDisplay: EGLDisplay = EGL14.EGL_NO_DISPLAY
     private var eglContext: EGLContext = EGL14.EGL_NO_CONTEXT
@@ -119,7 +134,7 @@ class HeadlessGlFrameGrabber(
     }
 
     val isReady: Boolean
-        get() = !released.get() && isInitialized && surface?.isValid == true && initError == null
+        get() = !released.get() && !glContextLost && isInitialized && surface?.isValid == true && initError == null
 
     /**
      * Returns an independent copy of the latest decoded RGBA frame scaled to [targetWidth] x [targetHeight],
@@ -147,16 +162,17 @@ class HeadlessGlFrameGrabber(
             }
         }
 
-        // If a fresh frame arrived since our last glReadPixels (e.g. consumer was idle), draw it now
-        if (!released.get() && hasReceivedFirstFrame && (hasQueuedNewFrame || now - lastCaptureAtMs > 120L)) {
+        // If a fresh frame arrived since our last glReadPixels, render & read it on GL thread
+        if (!released.get() && hasReceivedFirstFrame && hasQueuedNewFrame) {
             val drawLatch = CountDownLatch(1)
             glHandler.post {
                 try {
-                    if (!released.get() && hasQueuedNewFrame && eglDisplay != EGL14.EGL_NO_DISPLAY) {
-                        EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
-                        surfaceTexture?.updateTexImage()
-                        hasQueuedNewFrame = false
-                        renderAndReadPixelsLocked()
+                    if (!released.get() && !glContextLost && hasQueuedNewFrame && eglDisplay != EGL14.EGL_NO_DISPLAY) {
+                        if (EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)) {
+                            surfaceTexture?.updateTexImage()
+                            hasQueuedNewFrame = false
+                            renderAndReadPixelsLocked()
+                        }
                     }
                 } catch (_: Throwable) {
                 } finally {
@@ -317,9 +333,15 @@ class HeadlessGlFrameGrabber(
         val st = surfaceTexture ?: return
         if (released.get() || eglDisplay == EGL14.EGL_NO_DISPLAY) return
         try {
-            EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
+            if (!EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)) {
+                recordGlError()
+                return
+            }
             st.updateTexImage()
+            consecutiveGlErrors = 0
             val now = System.currentTimeMillis()
+            lastFrameArrivalAtMs = now
+            decodedFrameCounter.incrementAndGet()
             val hasFirst = hasReceivedFirstFrame
             val consumerRecentlyActive = (now - lastConsumerRequestAtMs) <= CONSUMER_ACTIVE_WINDOW_MS
             val intervalElapsed = (now - lastCaptureAtMs) >= MIN_CAPTURE_INTERVAL_MS
@@ -337,6 +359,15 @@ class HeadlessGlFrameGrabber(
                 hasQueuedNewFrame = true
             }
         } catch (_: Throwable) {
+            recordGlError()
+        }
+    }
+
+    private fun recordGlError() {
+        val next = consecutiveGlErrors + 1
+        consecutiveGlErrors = next
+        if (next >= 3) {
+            glContextLost = true
         }
     }
 
@@ -345,7 +376,9 @@ class HeadlessGlFrameGrabber(
         val buf = readBuffer ?: return
         if (eglDisplay == EGL14.EGL_NO_DISPLAY) return
 
-        EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
+        if (!EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)) {
+            return
+        }
         st.getTransformMatrix(texMatrix)
 
         GLES20.glViewport(0, 0, width, height)

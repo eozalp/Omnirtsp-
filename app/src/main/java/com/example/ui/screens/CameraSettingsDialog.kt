@@ -571,7 +571,7 @@ fun CameraSettingsDialog(
                     Button(
                         onClick = {
                             val trimmedUrl = rtspUrl.trim()
-                            if (trimmedUrl.isBlank() || !trimmedUrl.contains("://")) {
+                            if (!com.example.engine.RtspStreamManager.isValidStreamUrl(trimmedUrl)) {
                                 rtspUrlError = AppLocaleManager.getString(context, R.string.cam_rtsp_url_required)
                                 return@Button
                             }

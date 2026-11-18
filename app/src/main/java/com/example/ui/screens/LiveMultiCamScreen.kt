@@ -65,6 +65,7 @@ import androidx.compose.material.icons.filled.ViewAgenda
 import androidx.compose.material.icons.filled.VpnLock
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.material.icons.filled.BatteryAlert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -86,6 +87,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -110,11 +112,15 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.R
 import com.example.data.model.CameraEntity
 import com.example.engine.DiscoveredCamera
 import com.example.engine.EndpointKind
 import com.example.i18n.AppLocaleManager
+import com.example.service.SurveillanceKeepAliveService
 import com.example.ui.components.RtspVideoPlayer
 import com.example.ui.components.VideoRotationDialog
 import com.example.ui.components.computeEffectiveContainerAspectRatio
@@ -166,6 +172,20 @@ fun LiveMultiCamScreen(
     var showOverlayPermissionDialog by remember { mutableStateOf(false) }
     var showExitAppDialog by remember { mutableStateOf(false) }
     var canDrawOverlays by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
+    var isBatteryUnrestricted by remember { mutableStateOf(viewModel.isBatteryOptimizationIgnored()) }
+    var batteryBannerDismissed by remember { mutableStateOf(false) }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, context) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                canDrawOverlays = Settings.canDrawOverlays(context)
+                isBatteryUnrestricted = viewModel.isBatteryOptimizationIgnored()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     val overlayPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
@@ -723,6 +743,69 @@ fun LiveMultiCamScreen(
                 }
             }
 
+            // Battery Optimization Warning Banner when recording is active under Restricted/Optimized battery mode
+            val showBatteryBanner = SurveillanceKeepAliveService.shouldShowBatteryOptimizationBanner(
+                activeRecordingCount = recordingCameras.size,
+                isBatteryOptimizationIgnored = isBatteryUnrestricted,
+                isDismissed = batteryBannerDismissed
+            )
+            AnimatedVisibility(visible = showBatteryBanner) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .testTag("live_battery_optimization_banner"),
+                    color = NeonAmber.copy(alpha = 0.14f),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, NeonAmber.copy(alpha = 0.7f))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(start = 12.dp, top = 4.dp, bottom = 4.dp, end = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.BatteryAlert,
+                            contentDescription = null,
+                            tint = NeonAmber,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = stringResource(R.string.live_battery_warning_banner),
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f).padding(end = 4.dp)
+                        )
+                        TextButton(
+                            onClick = { viewModel.openBatteryOptimizationSettings() },
+                            modifier = Modifier.testTag("live_battery_fix_btn")
+                        ) {
+                            Text(
+                                text = stringResource(R.string.live_battery_fix_action),
+                                color = NeonAmber,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Black,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                        IconButton(
+                            onClick = { batteryBannerDismissed = true },
+                            modifier = Modifier.size(48.dp).testTag("live_battery_dismiss_btn")
+                        ) {
+                            Icon(
+                                Icons.Default.Close,
+                                contentDescription = stringResource(R.string.live_battery_dismiss_desc),
+                                tint = NeonAmber,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
             // Empty State or Camera Grid
             if (cameras.isEmpty()) {
                 Box(
@@ -776,7 +859,7 @@ fun LiveMultiCamScreen(
                         }
                     ) { camera ->
                         val player by viewModel.streamManager.getPlayerFlow(camera.id).collectAsState()
-                        LaunchedEffect(camera.id, camera.rtspUrl) {
+                        LaunchedEffect(camera.id, camera.rtspUrl, camera.username, camera.password, camera.transport) {
                             viewModel.streamManager.getOrCreatePlayer(camera)
                         }
                         val telemetry by viewModel.streamManager.getTelemetryFlow(camera.id).collectAsState()

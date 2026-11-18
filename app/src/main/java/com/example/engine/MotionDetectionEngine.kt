@@ -19,9 +19,10 @@ import com.example.data.model.CameraEntity
 import com.example.data.model.MotionAlertEntity
 import com.example.data.model.MotionSeverity
 import com.example.i18n.AppLocaleManager
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -39,7 +40,8 @@ class MotionDetectionEngine(
     private val database: AppDatabase,
     private val streamManager: RtspStreamManager
 ) {
-    private val scope = CoroutineScope(Dispatchers.Default + Job())
+    private val exceptionHandler = CoroutineExceptionHandler { _, _ -> }
+    private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob() + exceptionHandler)
     private val notificationManager =
         context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
@@ -251,48 +253,52 @@ class MotionDetectionEngine(
         )
 
         scope.launch {
-            database.motionAlertDao().insertAlert(alert)
-            _motionAlertEvents.emit(alert)
-            streamManager.updateMotionState(camera.id, true)
+            runCatching {
+                database.motionAlertDao().insertAlert(alert)
+                _motionAlertEvents.emit(alert)
+            }
+            runCatching { streamManager.updateMotionState(camera.id, true) }
 
             // Notify recorder engine
-            onMotionTriggered?.invoke(camera, alert)
+            runCatching { onMotionTriggered?.invoke(camera, alert) }
 
-            // Send Android system notification
-            showSystemNotification(alert)
+            // Send Android system notification (may throw SecurityException if POST_NOTIFICATIONS denied)
+            runCatching { showSystemNotification(alert) }
 
             // Auto-clear live motion flag after 3 seconds
             delay(3000)
-            streamManager.updateMotionState(camera.id, false)
+            runCatching { streamManager.updateMotionState(camera.id, false) }
         }
     }
 
     private fun showSystemNotification(alert: MotionAlertEntity) {
-        val intent = Intent(context, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            putExtra("OPEN_ALERT_ID", alert.id)
-            putExtra("CAMERA_ID", alert.cameraId)
-        }
-        val pendingIntent = PendingIntent.getActivity(
-            context,
-            alert.id.hashCode(),
-            intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
+        try {
+            val intent = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra("OPEN_ALERT_ID", alert.id)
+                putExtra("CAMERA_ID", alert.cameraId)
+            }
+            val pendingIntent = PendingIntent.getActivity(
+                context,
+                alert.id.hashCode(),
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
 
-        createNotificationChannel()
+            createNotificationChannel()
 
-        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_stat_omniview)
-            .setContentTitle("🚨 ${AppLocaleManager.getString(context, R.string.alerts_notif_title, alert.cameraName)}")
-            .setContentText(alert.description)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setCategory(NotificationCompat.CATEGORY_ALARM)
-            .setAutoCancel(true)
-            .setContentIntent(pendingIntent)
-            .build()
+            val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_stat_omniview)
+                .setContentTitle("🚨 ${AppLocaleManager.getString(context, R.string.alerts_notif_title, alert.cameraName)}")
+                .setContentText(alert.description)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setCategory(NotificationCompat.CATEGORY_ALARM)
+                .setAutoCancel(true)
+                .setContentIntent(pendingIntent)
+                .build()
 
-        notificationManager.notify(alert.id.hashCode(), notification)
+            notificationManager.notify(alert.id.hashCode(), notification)
+        } catch (_: Throwable) {}
     }
 
     fun release() {

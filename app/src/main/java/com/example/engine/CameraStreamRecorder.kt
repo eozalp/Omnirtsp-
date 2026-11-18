@@ -76,6 +76,7 @@ class CameraStreamRecorder(
         var initFailed: Boolean = false,
         val fatalError: AtomicBoolean = AtomicBoolean(false),
         @Volatile var consecutiveEncodeErrors: Int = 0,
+        @Volatile var failureReason: String? = null,
         var yuvArgbScratch: IntArray? = null,
         var yuvBytesScratch: ByteArray? = null
     )
@@ -132,7 +133,7 @@ class CameraStreamRecorder(
         val job = scope.launch(singleThreadDispatcher) {
             try {
                 if (previousFinalizeJob != null) {
-                    withTimeoutOrNull(5_000L) {
+                    withTimeoutOrNull(9_000L) {
                         previousFinalizeJob.join()
                     }
                 }
@@ -142,13 +143,14 @@ class CameraStreamRecorder(
 
                 initializeEncoderOnThread(recorder)
                 if (recorder.initFailed && isActive && !recorder.isStopping.get()) {
-                    delay(350L)
+                    delay(400L)
                     if (isActive && !recorder.isStopping.get()) {
                         recorder.initFailed = false
                         initializeEncoderOnThread(recorder)
                     }
                 }
                 if (recorder.initFailed) {
+                    recorder.failureReason = "ENCODER_ERROR"
                     recorder.fatalError.set(true)
                     return@launch
                 }
@@ -163,6 +165,7 @@ class CameraStreamRecorder(
                     var frameBitmap: Bitmap? = null
                     var attemptingEncode = false
                     var capturedFromHeadless = false
+                    var captureDurationMs = 0L
                     try {
                         val reuseBuf = recorder.captureScratchBitmap?.takeIf {
                             !it.isRecycled && it.width == width && it.height == height
@@ -170,18 +173,20 @@ class CameraStreamRecorder(
                             Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
                         }.getOrNull()?.also { recorder.captureScratchBitmap = it }
 
+                        val captureStartMs = System.currentTimeMillis()
                         val capture = try {
                             streamManager.captureFrameForRecording(
                                 camera = camera,
                                 maxSide = maxOf(width, height),
                                 alignTo = 16,
-                                waitHeadlessFirstFrameMs = if (frameIndex == 0) 400L else 0L,
+                                waitHeadlessFirstFrameMs = if (frameIndex == 0) 500L else 0L,
                                 reuseBitmap = reuseBuf,
                                 previousRenderedToken = lastCapturedToken
                             )
                         } catch (_: Throwable) {
                             RtspStreamManager.CapturedVideoFrame(null)
                         }
+                        captureDurationMs = System.currentTimeMillis() - captureStartMs
 
                         capturedFromHeadless = capture.isFromHeadless
                         if (capture.renderedFrameToken > 0) {
@@ -284,6 +289,7 @@ class CameraStreamRecorder(
                                     "CameraStreamRecorder",
                                     "Aborting wedged encoder for ${camera.id} after ${recorder.consecutiveEncodeErrors} consecutive failures"
                                 )
+                                recorder.failureReason = "ENCODER_ERROR"
                                 recorder.fatalError.set(true)
                                 break
                             }
@@ -319,15 +325,29 @@ class CameraStreamRecorder(
                     if (recorder.isStopping.get() || recorder.fatalError.get()) break
 
                     val isForeground = !capturedFromHeadless && streamManager.isForegroundCaptureActive(camera.id)
-                    val targetIntervalMs = computeTargetFrameIntervalMs(
+                    val baseIntervalMs = computeTargetFrameIntervalMs(
                         activeRecorderCount = activeRecorders.size,
                         isForegroundCapture = isForeground
                     )
+                    val adaptiveExtraMs = if (isForeground && captureDurationMs > 65L) {
+                        (captureDurationMs - 40L).coerceAtMost(150L)
+                    } else {
+                        0L
+                    }
+                    val startupPauseMs = if (recorder.frameCount == 0 && frameBitmap == null) 150L else 0L
+                    val targetIntervalMs = maxOf(baseIntervalMs + adaptiveExtraMs, startupPauseMs)
                     val elapsed = System.currentTimeMillis() - loopStart
                     val sleepMs = (targetIntervalMs - elapsed).coerceAtLeast(15L)
                     delay(sleepMs)
                 }
             } finally {
+                if (recorder.frameCount == 0 && recorder.failureReason == null) {
+                    recorder.failureReason = if (!streamManager.hasLiveOrGrabberFrames(camera.id)) {
+                        "STREAM_DISCONNECTED"
+                    } else {
+                        "ENCODER_ERROR"
+                    }
+                }
                 if (!recorder.isStopping.get()) {
                     onUnexpectedStop?.invoke(recorder)
                 }
@@ -474,13 +494,13 @@ class CameraStreamRecorder(
     suspend fun finalizeRecorder(recorder: ActiveRecorder): Long {
         recorder.isStopping.set(true)
         try {
-            withTimeoutOrNull(3_000L) {
+            withTimeoutOrNull(2_500L) {
                 recorder.job?.join()
             }
         } catch (_: Throwable) {}
 
         return try {
-            val finalizedBytes = withTimeoutOrNull(4_000L) {
+            val finalizedBytes = withTimeoutOrNull(7_000L) {
                 withContext(recorder.encoderDispatcher) {
                     val codec = recorder.codec
                     val muxer = recorder.muxer
@@ -501,25 +521,29 @@ class CameraStreamRecorder(
 
                             if (recorder.frameCount > 0) {
                                 if (recorder.glInputSurface != null && recorder.inputSurface != null) {
-                                    codec.signalEndOfInputStream()
+                                    runCatching { codec.signalEndOfInputStream() }
                                 } else {
-                                    val inputIndex = codec.dequeueInputBuffer(20_000)
+                                    val inputIndex = runCatching { codec.dequeueInputBuffer(20_000) }.getOrDefault(-1)
                                     if (inputIndex >= 0) {
                                         val eosPts = (recorder.lastPresentationTimeUs + 100_000L).coerceAtLeast(0L)
-                                        codec.queueInputBuffer(
-                                            inputIndex,
-                                            0,
-                                            0,
-                                            eosPts,
-                                            MediaCodec.BUFFER_FLAG_END_OF_STREAM
-                                        )
+                                        runCatching {
+                                            codec.queueInputBuffer(
+                                                inputIndex,
+                                                0,
+                                                0,
+                                                eosPts,
+                                                MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                                            )
+                                        }
                                     }
                                 }
-                                drainCodec(codec, muxer, recorder, endOfStream = true)
+                                runCatching { drainCodec(codec, muxer, recorder, endOfStream = true) }
                             }
 
                             if (recorder.isMuxerStarted) {
-                                muxer.stop()
+                                runCatching { muxer.stop() }.onFailure { err ->
+                                    Log.w("CameraStreamRecorder", "muxer.stop failed: ${err.message}")
+                                }
                             }
                         } catch (e: Throwable) {
                             Log.w("CameraStreamRecorder", "finalizeRecorder error: ${e.message}")
@@ -561,24 +585,7 @@ class CameraStreamRecorder(
                 }
             }
             finalizedBytes ?: run {
-                // Bounded timeout fallback: force-release codec/muxer so hardware encoder slots never leak
-                runCatching { recorder.codec?.stop() }
-                runCatching { recorder.codec?.release() }
-                runCatching { recorder.glInputSurface?.release() }
-                runCatching { recorder.inputSurface?.release() }
-                runCatching { recorder.muxer?.release() }
-                recorder.codec = null
-                recorder.muxer = null
-                recorder.glInputSurface = null
-                recorder.inputSurface = null
-                recorder.lastLiveFrame?.let { bmp ->
-                    if (!bmp.isRecycled) bmp.recycle()
-                }
-                recorder.captureScratchBitmap?.let { bmp ->
-                    if (!bmp.isRecycled) bmp.recycle()
-                }
-                recorder.lastLiveFrame = null
-                recorder.captureScratchBitmap = null
+                Log.w("CameraStreamRecorder", "finalizeRecorder timed out waiting on encoder thread for ${recorder.camera.id}")
                 if (recorder.frameCount > 0 &&
                     recorder.isMuxerStarted &&
                     StorageTimelineEngine.isPlayableClipFile(recorder.outputFile)
@@ -680,8 +687,12 @@ class CameraStreamRecorder(
     ) {
         val bufferInfo = MediaCodec.BufferInfo()
         var eosEmptyTries = 0
+        val eosStartMs = if (endOfStream) System.currentTimeMillis() else 0L
 
         while (true) {
+            if (endOfStream && hasEosDrainTimedOut(eosStartMs, System.currentTimeMillis())) {
+                break
+            }
             val timeoutUs = if (endOfStream) 10_000L else 0L
             val outIndex = codec.dequeueOutputBuffer(bufferInfo, timeoutUs)
             when {
@@ -694,7 +705,7 @@ class CameraStreamRecorder(
                     }
                 }
                 outIndex == MediaCodec.INFO_TRY_AGAIN_LATER -> {
-                    if (!endOfStream || ++eosEmptyTries >= 80) {
+                    if (!endOfStream || ++eosEmptyTries >= 40) {
                         break
                     }
                 }
@@ -856,7 +867,9 @@ class CameraStreamRecorder(
 
         fun drawBitmap(bitmap: Bitmap, presentationTimeUs: Long) {
             if (bitmap.isRecycled || eglDisplay == EGL14.EGL_NO_DISPLAY) return
-            EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
+            check(EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)) {
+                "eglMakeCurrent failed in EncoderGlInputSurface"
+            }
 
             GLES20.glViewport(0, 0, width, height)
             GLES20.glClearColor(0f, 0f, 0f, 1f)
@@ -883,7 +896,9 @@ class CameraStreamRecorder(
             GLES20.glDisableVertexAttribArray(aTexCoordLoc)
 
             EGLExt.eglPresentationTimeANDROID(eglDisplay, eglSurface, presentationTimeUs * 1000L)
-            EGL14.eglSwapBuffers(eglDisplay, eglSurface)
+            check(EGL14.eglSwapBuffers(eglDisplay, eglSurface)) {
+                "eglSwapBuffers failed in EncoderGlInputSurface"
+            }
         }
 
         fun release() {
@@ -920,7 +935,12 @@ class CameraStreamRecorder(
 
     companion object {
         private const val EGL_RECORDABLE_ANDROID = 0x3142
-        private const val MAX_CONSECUTIVE_ENCODE_ERRORS = 3
+        private const val MAX_CONSECUTIVE_ENCODE_ERRORS = 6
+        const val MAX_EOS_DRAIN_MS = 1_800L
+
+        fun hasEosDrainTimedOut(startMs: Long, nowMs: Long, maxMs: Long = MAX_EOS_DRAIN_MS): Boolean {
+            return (nowMs - startMs) >= maxMs
+        }
 
         fun computeTargetFrameIntervalMs(
             activeRecorderCount: Int,

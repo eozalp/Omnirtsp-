@@ -616,4 +616,10 @@
     <string name="snapshot_saved_status">Anlık görüntü kaydedildi (%1$s)</string>
     <string name="snapshot_failed_status">Anlık görüntü alınamadı: %1$s kamerasından çözümlenmiş video karesi yok</string>
     <string name="recording_no_frames_error">%1$s kaydı iptal edildi: canlı video karesi alınamadı</string>
+    <string name="recording_low_storage_error">%1$s kaydı duraklatıldı: cihaz depolama alanı neredeyse dolu</string>
+    <string name="recording_encoder_error">%1$s kaydı yeniden başlatıldı: video kodlayıcı meşgul veya sıfırlandı</string>
+    <string name="recording_saf_permission_warning">%1$s dahili depolamaya kaydedildi: seçili klasör izni sona ermiş (Depolama sekmesinden yeniden seçin)</string>
+    <string name="live_battery_warning_banner">Arka plan kaydı ~4 dk sonra durabilir — Pil ayarını Kısıtlamasız yapın</string>
+    <string name="live_battery_fix_action">AYARLA</string>
+    <string name="live_battery_dismiss_desc">Pil uyarısını kapat</string>
 </resources>

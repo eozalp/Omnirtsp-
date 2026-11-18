@@ -64,10 +64,8 @@ class StorageRetentionEngine(
                         if (!clip.localExportUri.isNullOrBlank()) {
                             DeviceStorageExporter.deleteExportedClip(context, clip.localExportUri)
                         }
-                    }
-
-                    if (expiredClips.isNotEmpty()) {
-                        prunedCount += database.recordedClipDao().deleteClipsOlderThan(cutoff)
+                        database.recordedClipDao().deleteClipById(clip.id)
+                        prunedCount++
                     }
 
                     // Sweep any orphaned raw files older than cutoff inside internal recordings folder,

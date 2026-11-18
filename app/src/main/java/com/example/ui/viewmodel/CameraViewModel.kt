@@ -39,6 +39,7 @@ import com.example.engine.RetentionStatus
 import com.example.engine.RtspStreamManager
 import com.example.engine.StorageConnectionTestResult
 import com.example.engine.StorageRetentionEngine
+import com.example.engine.SurveillanceRuntime
 import com.example.i18n.AppLocaleManager
 import com.example.service.FloatingCameraOverlayService
 import com.example.service.FloatingOverlayStateHolder
@@ -79,28 +80,15 @@ data class FloatingWindowState(
 
 class CameraViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val database = AppDatabase.getDatabase(application)
-    val streamManager = RtspStreamManager.getInstance(application)
+    private val runtime = SurveillanceRuntime.getInstance(application)
+    private val database = runtime.database
+    val streamManager = runtime.streamManager
     val onvifPtzClient = OnvifPtzClient(application)
     val cameraDiscoveryEngine = CameraDiscoveryEngine(application, onvifPtzClient)
-    val cloudStorageManager = CloudStorageManager(application, database)
-    val storageRetentionEngine = StorageRetentionEngine(application, database)
-    val recordingSchedulerEngine = RecordingSchedulerEngine(
-        application,
-        database,
-        streamManager,
-        cloudStorageManager,
-        storageRetentionEngine
-    )
-    val motionDetectionEngine = MotionDetectionEngine(
-        application,
-        database,
-        streamManager
-    ).apply {
-        onMotionTriggered = { camera, alert ->
-            recordingSchedulerEngine.handleMotionTrigger(camera, alert.motionLevel)
-        }
-    }
+    val cloudStorageManager = runtime.cloudStorageManager
+    val storageRetentionEngine = runtime.storageRetentionEngine
+    val recordingSchedulerEngine = runtime.recordingSchedulerEngine
+    val motionDetectionEngine = runtime.motionDetectionEngine
 
     val cameras: StateFlow<List<CameraEntity>> = combine(
         database.cameraDao().getAllCameras(),
@@ -231,11 +219,19 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun observeRecordingErrors() {
         viewModelScope.launch {
-            recordingSchedulerEngine.recordingErrors.collect { cameraName ->
+            recordingSchedulerEngine.recordingDiagnostics.collect { event ->
+                val app = getApplication<Application>()
+                val resId = when (event.type) {
+                    RecordingSchedulerEngine.FailureType.LOW_STORAGE -> R.string.recording_low_storage_error
+                    RecordingSchedulerEngine.FailureType.ENCODER_ERROR -> R.string.recording_encoder_error
+                    RecordingSchedulerEngine.FailureType.SAF_PERMISSION_REVOKED -> R.string.recording_saf_permission_warning
+                    RecordingSchedulerEngine.FailureType.STREAM_DISCONNECTED,
+                    RecordingSchedulerEngine.FailureType.STORAGE_IO_ERROR -> R.string.recording_no_frames_error
+                }
                 _localExportStatus.value = AppLocaleManager.getString(
-                    getApplication(),
-                    R.string.recording_no_frames_error,
-                    cameraName
+                    app,
+                    resId,
+                    event.cameraName
                 )
             }
         }
@@ -273,22 +269,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun observeKeepAliveService() {
         viewModelScope.launch {
-            combine(
-                database.cloudConfigDao().getCloudConfig(),
-                recordingSchedulerEngine.currentlyRecordingCameras,
-                hubServerState,
-                _isShuttingDown
-            ) { cfg, activeRecs, hubState, shuttingDown ->
-                val shouldKeepAlive = !shuttingDown &&
-                    ((cfg?.keepAppAlive != false) || activeRecs.isNotEmpty() || hubState.isEnabled)
-                shouldKeepAlive to activeRecs.size
-            }.collect { (shouldKeepAlive, activeRecCount) ->
-                val app = getApplication<Application>()
-                if (shouldKeepAlive) {
-                    SurveillanceKeepAliveService.start(app, activeRecCount)
-                } else {
-                    SurveillanceKeepAliveService.stop(app)
-                }
+            hubServerState.collect { hubState ->
+                runtime.setHubActive(hubState.isEnabled)
             }
         }
     }
@@ -697,24 +679,23 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         if (_isShuttingDown.value) return
         _isShuttingDown.value = true
         viewModelScope.launch {
-            try {
-                withContext(Dispatchers.IO) {
-                    recordingSchedulerEngine.stopAllRecordingsAndFlush(timeoutMs = 6_000L)
-                }
-            } catch (_: Throwable) {}
             val app = getApplication<Application>()
             runCatching { FloatingOverlayStateHolder.closeAll() }
             runCatching { FloatingCameraOverlayService.stop(app) }
             runCatching { SurveillanceKeepAliveService.stop(app) }
             runCatching { remoteHubServer.stop() }
-            runCatching { motionDetectionEngine.release() }
-            runCatching { streamManager.releaseAll() }
+            try {
+                withContext(Dispatchers.IO) {
+                    runtime.shutdownCompletely(timeoutMs = 6_000L)
+                }
+            } catch (_: Throwable) {}
             onComplete()
         }
     }
 
     fun deleteCamera(camera: CameraEntity) {
         viewModelScope.launch {
+            recordingSchedulerEngine.stopRecording(camera.id)
             FloatingOverlayStateHolder.closeFloatingCamera(camera.id)
             if (FloatingOverlayStateHolder.floatingWindows.value.isEmpty()) {
                 FloatingCameraOverlayService.stop(getApplication())
@@ -1274,10 +1255,5 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     override fun onCleared() {
         super.onCleared()
         remoteHubServer.release()
-        if (!FloatingOverlayStateHolder.isSystemOverlayActive.value) {
-            streamManager.releaseAll()
-        }
-        motionDetectionEngine.release()
-        recordingSchedulerEngine.release()
     }
 }

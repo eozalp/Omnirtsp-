@@ -18,10 +18,17 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.example.MainActivity
 import com.example.R
+import com.example.engine.RecordingSchedulerEngine
+import com.example.engine.SurveillanceRuntime
 import com.example.i18n.AppLocaleManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 
 /**
  * Foreground Keep-Alive service holding partial CPU and Wi-Fi locks so Android
@@ -44,20 +51,49 @@ class SurveillanceKeepAliveService : Service() {
         startForegroundNotification()
     }
 
+    private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var currentActiveRecordings: Int = 0
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val runtime = SurveillanceRuntime.getIfInitialized()
+        val runtimeActiveCount = runtime?.activeRecordingCount() ?: 0
+        val persistedCount = RecordingSchedulerEngine.getPersistedManualCameraIds(applicationContext).size
+
         if (intent?.action == ACTION_STOP) {
+            if (runtimeActiveCount > 0 || currentActiveRecordings > 0 || persistedCount > 0) {
+                currentActiveRecordings = maxOf(runtimeActiveCount, currentActiveRecordings, persistedCount)
+                acquireLocks()
+                _isRunning.value = true
+                startForegroundNotification()
+                serviceScope.launch {
+                    runCatching {
+                        SurveillanceRuntime.getInstance(applicationContext).resumePersistedRecordingsIfNeeded()
+                    }
+                }
+                return START_STICKY
+            }
             releaseLocks()
             _isRunning.value = false
             ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
         }
-        currentActiveRecordings = intent?.getIntExtra(EXTRA_ACTIVE_REC_COUNT, currentActiveRecordings) ?: 0
+
+        val extraCount = intent?.getIntExtra(EXTRA_ACTIVE_REC_COUNT, currentActiveRecordings) ?: currentActiveRecordings
+        currentActiveRecordings = maxOf(extraCount, runtimeActiveCount, persistedCount)
         acquireLocks()
         _isRunning.value = true
         startForegroundNotification()
+
+        // If Android/Samsung restarted this START_STICKY service after killing the process
+        // (intent == null) or runtime isn't up yet, rebuild SurveillanceRuntime and resume recordings.
+        if (intent == null || runtime == null || persistedCount > runtimeActiveCount) {
+            serviceScope.launch {
+                runCatching {
+                    SurveillanceRuntime.getInstance(applicationContext).resumePersistedRecordingsIfNeeded()
+                }
+            }
+        }
         return START_STICKY
     }
 
@@ -65,6 +101,7 @@ class SurveillanceKeepAliveService : Service() {
 
     override fun onDestroy() {
         releaseLocks()
+        serviceScope.cancel()
         _isRunning.value = false
         super.onDestroy()
     }
@@ -152,7 +189,7 @@ class SurveillanceKeepAliveService : Service() {
             AppLocaleManager.getString(this, R.string.keepalive_notif_text)
         }
 
-        val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_omniview)
             .setContentTitle(AppLocaleManager.getString(this, R.string.keepalive_notif_title))
             .setContentText(bodyText)
@@ -164,8 +201,12 @@ class SurveillanceKeepAliveService : Service() {
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setContentIntent(openAppIntent)
-            .addAction(0, AppLocaleManager.getString(this, R.string.keepalive_notif_stop), stopIntent)
-            .build()
+
+        if (currentActiveRecordings == 0) {
+            builder.addAction(0, AppLocaleManager.getString(this, R.string.keepalive_notif_stop), stopIntent)
+        }
+
+        val notification: Notification = builder.build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             ServiceCompat.startForeground(
@@ -189,6 +230,10 @@ class SurveillanceKeepAliveService : Service() {
         private val _isRunning = MutableStateFlow(false)
         val isRunning: StateFlow<Boolean> = _isRunning.asStateFlow()
 
+        @Volatile
+        var lastStartError: String? = null
+            private set
+
         fun start(context: Context, activeRecordingCount: Int = 0) {
             try {
                 val intent = Intent(context, SurveillanceKeepAliveService::class.java).apply {
@@ -196,7 +241,11 @@ class SurveillanceKeepAliveService : Service() {
                     putExtra(EXTRA_ACTIVE_REC_COUNT, activeRecordingCount)
                 }
                 ContextCompat.startForegroundService(context, intent)
-            } catch (_: Exception) {}
+                lastStartError = null
+            } catch (e: Exception) {
+                lastStartError = e.message ?: e.javaClass.simpleName
+                android.util.Log.w("SurveillanceKeepAlive", "Unable to start foreground service: ${e.message}")
+            }
         }
 
         fun stop(context: Context) {
@@ -218,6 +267,14 @@ class SurveillanceKeepAliveService : Service() {
             return Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
+        }
+
+        fun shouldShowBatteryOptimizationBanner(
+            activeRecordingCount: Int,
+            isBatteryOptimizationIgnored: Boolean,
+            isDismissed: Boolean
+        ): Boolean {
+            return activeRecordingCount > 0 && !isBatteryOptimizationIgnored && !isDismissed
         }
     }
 }

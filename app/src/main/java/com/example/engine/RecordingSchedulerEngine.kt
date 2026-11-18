@@ -55,6 +55,8 @@ class RecordingSchedulerEngine(
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + exceptionHandler)
     private var schedulerLoopJob: Job? = null
     private val cameraStreamRecorder = CameraStreamRecorder(context, streamManager)
+    private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val persistedIdsLock = Any()
 
     private val activeSessions = ConcurrentHashMap<String, ActiveRecordingSession>()
     private val cameraLocks = ConcurrentHashMap<String, Any>()
@@ -73,6 +75,9 @@ class RecordingSchedulerEngine(
     private val _recordingErrors = MutableSharedFlow<String>(extraBufferCapacity = 16)
     val recordingErrors: SharedFlow<String> = _recordingErrors.asSharedFlow()
 
+    private val _recordingDiagnostics = MutableSharedFlow<RecordingDiagnosticEvent>(extraBufferCapacity = 16)
+    val recordingDiagnostics: SharedFlow<RecordingDiagnosticEvent> = _recordingDiagnostics.asSharedFlow()
+
     init {
         ensureRecordingsDirectory()
         storageRetentionEngine.activeRecordingPathsProvider = {
@@ -81,8 +86,80 @@ class RecordingSchedulerEngine(
         repairExistingEmptyRecordings()
         scope.launch {
             runCatching { storageRetentionEngine.enforceRetention() }
+            runCatching { resumePersistedRecordingsIfNeeded() }
         }
         startSchedulerLoop()
+    }
+
+    fun getPersistedManualCameraIds(): Set<String> = synchronized(persistedIdsLock) {
+        parsePersistedManualCameraIds(prefs.getString(KEY_MANUAL_REC_CAMERA_IDS, null))
+    }
+
+    private fun persistManualCameraId(cameraId: String) {
+        synchronized(persistedIdsLock) {
+            val updated = parsePersistedManualCameraIds(prefs.getString(KEY_MANUAL_REC_CAMERA_IDS, null))
+                .toMutableSet()
+            if (updated.add(cameraId)) {
+                prefs.edit().putString(
+                    KEY_MANUAL_REC_CAMERA_IDS,
+                    serializePersistedManualCameraIds(updated)
+                ).apply()
+            }
+        }
+    }
+
+    private fun unpersistManualCameraId(cameraId: String) {
+        synchronized(persistedIdsLock) {
+            val updated = parsePersistedManualCameraIds(prefs.getString(KEY_MANUAL_REC_CAMERA_IDS, null))
+                .toMutableSet()
+            if (updated.remove(cameraId)) {
+                prefs.edit().putString(
+                    KEY_MANUAL_REC_CAMERA_IDS,
+                    serializePersistedManualCameraIds(updated)
+                ).apply()
+            }
+        }
+    }
+
+    fun clearPersistedManualCameraIds() {
+        synchronized(persistedIdsLock) {
+            prefs.edit().remove(KEY_MANUAL_REC_CAMERA_IDS).apply()
+        }
+    }
+
+    suspend fun resumePersistedRecordingsIfNeeded() {
+        runCatching {
+            val enabledCameras = database.cameraDao().getEnabledCameras()
+            if (enabledCameras.isEmpty()) return
+            val persistedIds = getPersistedManualCameraIds()
+            val schedules = database.scheduleDao().getActiveSchedules()
+            val activeContinuousTargets = enabledCameras.filter { cam ->
+                schedules.any { sched ->
+                    isScheduleCurrentlyActive(sched) &&
+                        sched.mode == RecordingMode.CONTINUOUS &&
+                        isCameraTargetedBySchedule(cam.id, sched)
+                }
+            }
+            val manualToResume = filterRecoverableManualCameras(
+                enabledCameras = enabledCameras,
+                persistedIds = persistedIds,
+                activeSessionIds = activeSessions.keys
+            )
+            val camerasToWarm = (manualToResume + activeContinuousTargets).distinctBy { it.id }
+            if (camerasToWarm.isNotEmpty()) {
+                streamManager.warmUpStreams(camerasToWarm)
+            }
+            manualToResume.forEach { cam ->
+                startManualRecording(cam)
+            }
+            activeContinuousTargets.forEach { cam ->
+                synchronized(cameraLock(cam.id)) {
+                    if (!activeSessions.containsKey(cam.id)) {
+                        startRecordingSessionLocked(cam, ClipTriggerType.SCHEDULED, null)
+                    }
+                }
+            }
+        }
     }
 
     private fun cameraLock(cameraId: String): Any =
@@ -103,7 +180,11 @@ class RecordingSchedulerEngine(
     }
 
     fun startManualRecording(camera: CameraEntity): String {
+        if (cloudStorageManager.checkFreeSpaceMb() < LOW_STORAGE_CLEANUP_MB) {
+            scope.launch { runCatching { storageRetentionEngine.enforceRetention() } }
+        }
         synchronized(cameraLock(camera.id)) {
+            persistManualCameraId(camera.id)
             val existing = activeSessions[camera.id]
             if (existing != null &&
                 existing.triggerType == ClipTriggerType.MANUAL &&
@@ -122,6 +203,7 @@ class RecordingSchedulerEngine(
 
     fun stopRecording(cameraId: String) {
         synchronized(cameraLock(cameraId)) {
+            unpersistManualCameraId(cameraId)
             consecutiveZeroFrameFailures.remove(cameraId)
             nextScheduledRetryAtMs.remove(cameraId)
             val session = activeSessions.remove(cameraId) ?: return
@@ -324,7 +406,11 @@ class RecordingSchedulerEngine(
 
                 if (!shouldRecoverContinuous || active == null) return@launch
 
-                runCatching { withTimeoutOrNull(4_500L) { codecFinalizeJob?.join() } }
+                runCatching { withTimeoutOrNull(9_000L) { codecFinalizeJob?.join() } }
+
+                if (cloudStorageManager.checkFreeSpaceMb() < LOW_STORAGE_CLEANUP_MB) {
+                    runCatching { storageRetentionEngine.enforceRetention() }
+                }
 
                 val failures = consecutiveZeroFrameFailures[cameraId] ?: 0
                 val backoffMs = if (failed.frameCount > 0) 400L else computeRetryBackoffMs(failures)
@@ -358,6 +444,10 @@ class RecordingSchedulerEngine(
                     activeSessions[cameraId] = refreshedSession
                     _currentlyRecordingCameras.value = activeSessions.keys.toSet()
                     streamManager.updateRecordingState(cameraId, true)
+
+                    // Clear recovery lock for the new clipId BEFORE starting the recorder so an
+                    // immediate failure on the next chunk never gets suppressed by recoveringClipIds.
+                    placeholderClipId?.let { recoveringClipIds.remove(it) }
 
                     cameraStreamRecorder.startRecording(
                         clipId = refreshedSession.clipId,
@@ -409,9 +499,25 @@ class RecordingSchedulerEngine(
                     runCatching {
                         if (file.exists()) file.delete()
                     }
-                    Log.w("RecordingScheduler", "No real video frames decoded for ${session.cameraName}; discarded empty file")
+                    val freeMb = cloudStorageManager.checkFreeSpaceMb()
+                    val failureType = classifyZeroFrameFailure(
+                        freeSpaceMb = freeMb,
+                        recorderFailureReason = detachedRecorder?.failureReason,
+                        recorderInitFailed = detachedRecorder?.initFailed == true
+                    )
+                    Log.w(
+                        "RecordingScheduler",
+                        "No real video frames decoded for ${session.cameraName} (type=$failureType, freeMb=$freeMb); discarded empty file"
+                    )
                     if (emitErrorOnEmpty) {
                         _recordingErrors.tryEmit(session.cameraName)
+                        _recordingDiagnostics.tryEmit(
+                            RecordingDiagnosticEvent(
+                                cameraName = session.cameraName,
+                                type = failureType,
+                                detail = detachedRecorder?.failureReason
+                            )
+                        )
                     }
                     return@launch
                 }
@@ -448,6 +554,19 @@ class RecordingSchedulerEngine(
                         }
                         LocalSaveDestination.APP_INTERNAL -> null
                     }
+                    if (exportResult != null && exportResult.isFailure) {
+                        val ex = exportResult.exceptionOrNull()
+                        Log.w("RecordingScheduler", "Device folder export failed for ${session.cameraName}: ${ex?.message}")
+                        if (ex is SecurityException) {
+                            _recordingDiagnostics.tryEmit(
+                                RecordingDiagnosticEvent(
+                                    cameraName = session.cameraName,
+                                    type = FailureType.SAF_PERMISSION_REVOKED,
+                                    detail = ex.message
+                                )
+                            )
+                        }
+                    }
                     exportedUri = exportResult?.getOrNull()?.toString()
                 }
 
@@ -474,6 +593,7 @@ class RecordingSchedulerEngine(
      */
     suspend fun stopAllRecordingsAndFlush(timeoutMs: Long = 6_000L) {
         schedulerLoopJob?.cancel()
+        clearPersistedManualCameraIds()
         val sessionsToStop = activeSessions.entries.mapNotNull { (camId, session) ->
             synchronized(cameraLock(camId)) {
                 if (activeSessions.remove(camId, session)) session else null
@@ -501,8 +621,20 @@ class RecordingSchedulerEngine(
                     val enabledCameras = database.cameraDao().getEnabledCameras()
                     val camerasById = enabledCameras.associateBy { it.id }
 
+                    if (cloudStorageManager.checkFreeSpaceMb() < LOW_STORAGE_CLEANUP_MB) {
+                        runCatching { storageRetentionEngine.enforceRetention() }
+                    }
+
                     val continuousTargetCameraIds = mutableSetOf<String>()
                     val now = System.currentTimeMillis()
+                    val persistedManualIds = getPersistedManualCameraIds()
+                    val manualCandidates = filterRecoverableManualCameras(
+                        enabledCameras = enabledCameras,
+                        persistedIds = persistedManualIds,
+                        activeSessionIds = activeSessions.keys
+                    ).filter { now >= (nextScheduledRetryAtMs[it.id] ?: 0L) }
+
+                    val scheduledCandidates = mutableListOf<CameraEntity>()
                     for (schedule in schedules) {
                         if (isScheduleCurrentlyActive(schedule)) {
                             activeList.add(schedule)
@@ -511,15 +643,36 @@ class RecordingSchedulerEngine(
                                     if (isCameraTargetedBySchedule(camera.id, schedule)) {
                                         continuousTargetCameraIds.add(camera.id)
                                         val retryAllowed = now >= (nextScheduledRetryAtMs[camera.id] ?: 0L)
-                                        if (retryAllowed) {
-                                            synchronized(cameraLock(camera.id)) {
-                                                if (!activeSessions.containsKey(camera.id)) {
-                                                    startRecordingSessionLocked(camera, ClipTriggerType.SCHEDULED, null)
-                                                }
-                                            }
+                                        if (retryAllowed && !activeSessions.containsKey(camera.id)) {
+                                            scheduledCandidates.add(camera)
                                         }
                                     }
                                 }
+                            }
+                        }
+                    }
+
+                    val camerasToWarm = (manualCandidates + scheduledCandidates)
+                        .distinctBy { it.id }
+                        .filter { streamManager.getPlayer(it.id) == null }
+                    if (camerasToWarm.isNotEmpty()) {
+                        streamManager.warmUpStreams(camerasToWarm)
+                    }
+
+                    for (cam in manualCandidates) {
+                        synchronized(cameraLock(cam.id)) {
+                            if (!activeSessions.containsKey(cam.id) &&
+                                getPersistedManualCameraIds().contains(cam.id)
+                            ) {
+                                startRecordingSessionLocked(cam, ClipTriggerType.MANUAL, null)
+                            }
+                        }
+                    }
+
+                    for (camera in scheduledCandidates) {
+                        synchronized(cameraLock(camera.id)) {
+                            if (!activeSessions.containsKey(camera.id)) {
+                                startRecordingSessionLocked(camera, ClipTriggerType.SCHEDULED, null)
                             }
                         }
                     }
@@ -639,6 +792,20 @@ class RecordingSchedulerEngine(
         activeSessions.clear()
     }
 
+    enum class FailureType {
+        STREAM_DISCONNECTED,
+        LOW_STORAGE,
+        ENCODER_ERROR,
+        STORAGE_IO_ERROR,
+        SAF_PERMISSION_REVOKED
+    }
+
+    data class RecordingDiagnosticEvent(
+        val cameraName: String,
+        val type: FailureType,
+        val detail: String? = null
+    )
+
     enum class SessionTickAction {
         KEEP_RECORDING,
         ROTATE_CHUNK,
@@ -647,6 +814,57 @@ class RecordingSchedulerEngine(
     }
 
     companion object {
+        private const val PREFS_NAME = "omniview_recording_prefs"
+        private const val KEY_MANUAL_REC_CAMERA_IDS = "persisted_manual_camera_ids"
+        private const val LOW_STORAGE_CLEANUP_MB = 25L
+        private const val LOW_STORAGE_CRITICAL_MB = 15L
+
+        fun parsePersistedManualCameraIds(raw: String?): Set<String> {
+            if (raw.isNullOrBlank()) return emptySet()
+            return raw.split(',')
+                .asSequence()
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+                .toCollection(linkedSetOf())
+        }
+
+        fun serializePersistedManualCameraIds(ids: Set<String>): String {
+            return ids.asSequence()
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+                .distinct()
+                .sorted()
+                .joinToString(",")
+        }
+
+        fun filterRecoverableManualCameras(
+            enabledCameras: List<CameraEntity>,
+            persistedIds: Set<String>,
+            activeSessionIds: Set<String>
+        ): List<CameraEntity> {
+            if (persistedIds.isEmpty() || enabledCameras.isEmpty()) return emptyList()
+            return enabledCameras.filter { cam ->
+                cam.id in persistedIds && cam.id !in activeSessionIds
+            }
+        }
+
+        fun getPersistedManualCameraIds(context: Context): Set<String> {
+            val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return parsePersistedManualCameraIds(prefs.getString(KEY_MANUAL_REC_CAMERA_IDS, null))
+        }
+
+        fun classifyZeroFrameFailure(
+            freeSpaceMb: Long,
+            recorderFailureReason: String?,
+            recorderInitFailed: Boolean
+        ): FailureType {
+            return when {
+                freeSpaceMb in 0L until LOW_STORAGE_CRITICAL_MB -> FailureType.LOW_STORAGE
+                recorderInitFailed || recorderFailureReason == "ENCODER_ERROR" -> FailureType.ENCODER_ERROR
+                else -> FailureType.STREAM_DISCONNECTED
+            }
+        }
+
         fun evaluateSessionAction(
             triggerType: ClipTriggerType,
             elapsedMs: Long,

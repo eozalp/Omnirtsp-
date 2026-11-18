@@ -2,10 +2,15 @@ package com.example
 
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onFirst
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTextReplacement
 import com.example.i18n.AppLocaleManager
 import org.junit.Before
 import org.junit.Rule
@@ -73,5 +78,33 @@ class MainActivityRobolectricTest {
         composeTestRule.onNodeWithTag("confirm_exit_app_btn").assertIsDisplayed()
         composeTestRule.onNodeWithText("Cancel").performClick()
         composeTestRule.waitForIdle()
+    }
+
+    @Test
+    fun mainActivity_addingSecondCamera_mountsBothCardsWithoutCrash() {
+        composeTestRule.waitForIdle()
+
+        // Add first camera
+        composeTestRule.onNodeWithTag("add_camera_fab").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("camera_settings_dialog").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("cam_name_input").performTextReplacement("CamOne")
+        composeTestRule.onNodeWithTag("cam_rtsp_url_input").performTextInput("rtsp://192.168.1.50:554/stream1")
+        composeTestRule.onNodeWithTag("save_camera_button").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+
+        // Add second camera
+        composeTestRule.onNodeWithTag("add_camera_fab").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("camera_settings_dialog").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("cam_name_input").performTextReplacement("CamTwo")
+        composeTestRule.onNodeWithTag("cam_rtsp_url_input").performTextInput("rtsp://192.168.1.51:554/stream1")
+        composeTestRule.onNodeWithTag("save_camera_button").performScrollTo().performClick()
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("camera_matrix_grid").assertIsDisplayed()
+        composeTestRule.onAllNodesWithText("CamOne").onFirst().assertIsDisplayed()
+        composeTestRule.onAllNodesWithText("CamTwo").onFirst().assertIsDisplayed()
+        composeTestRule.onAllNodesWithText("2 Cams", substring = true).onFirst().assertIsDisplayed()
     }
 }

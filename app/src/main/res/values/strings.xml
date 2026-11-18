@@ -616,4 +616,10 @@
     <string name="snapshot_saved_status">Snapshot saved (%1$s)</string>
     <string name="snapshot_failed_status">Snapshot failed: no decoded video frame available from %1$s</string>
     <string name="recording_no_frames_error">Recording discarded for %1$s: no live video frames were received</string>
+    <string name="recording_low_storage_error">Recording paused for %1$s: device storage is nearly full</string>
+    <string name="recording_encoder_error">Recording restarted for %1$s: video encoder busy or reset</string>
+    <string name="recording_saf_permission_warning">Saved internally for %1$s: selected folder permission expired (re-pick folder in Storage)</string>
+    <string name="live_battery_warning_banner">Background recording may pause after ~4 min — set Battery to Unrestricted</string>
+    <string name="live_battery_fix_action">FIX</string>
+    <string name="live_battery_dismiss_desc">Dismiss battery warning</string>
 </resources>

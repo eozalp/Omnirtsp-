@@ -45,6 +45,7 @@ import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import java.util.Base64
 import com.example.service.FloatingOverlayStateHolder
+import com.example.service.SurveillanceKeepAliveService
 import com.example.ui.components.ResizeCorner
 import com.example.ui.components.baseWidthFromActualWidthDp
 import com.example.ui.components.computeCoverFrameSizeForRotation
@@ -1648,5 +1649,202 @@ class ExampleUnitTest {
     assertEquals(300L, RtspStreamManager.quantizeLatencyMs(312L))
     assertEquals(300L, RtspStreamManager.quantizeLatencyMs(318L))
     assertEquals(350L, RtspStreamManager.quantizeLatencyMs(340L))
+  }
+
+  @Test
+  fun streamManager_transportSelectionAndHeadlessHealthEvaluation() {
+    assertTrue(RtspStreamManager.resolveUseTcpTransport(RtspTransport.TCP, 3))
+    assertFalse(RtspStreamManager.resolveUseTcpTransport(RtspTransport.UDP, 0))
+    assertTrue(RtspStreamManager.resolveUseTcpTransport(RtspTransport.AUTO, 0))
+    assertTrue(RtspStreamManager.resolveUseTcpTransport(RtspTransport.AUTO, 1))
+    assertTrue(RtspStreamManager.resolveUseTcpTransport(RtspTransport.AUTO, 2))
+    assertFalse(RtspStreamManager.resolveUseTcpTransport(RtspTransport.AUTO, 3))
+    assertTrue(RtspStreamManager.resolveUseTcpTransport(RtspTransport.AUTO, 4))
+
+    val headlessAlive = RtspStreamManager.evaluateLiveVideoHealth(
+      isLiveRtsp = true,
+      isPlaying = true,
+      playbackState = Player.STATE_READY,
+      hasError = false,
+      hasSelectedVideoTrack = true,
+      rawBufferedMs = 200L,
+      currentRenderedFrames = 500,
+      previousRenderedFrames = 500,
+      currentPositionMs = 30_000L,
+      previousPositionMs = 30_000L,
+      hasAttachedSurface = false,
+      headlessFrameProgressed = true
+    )
+    assertTrue(headlessAlive.healthyProgress)
+    assertEquals(0, headlessAlive.stallIncrement)
+    assertTrue(headlessAlive.isLive)
+  }
+
+  @Test
+  fun recordingScheduler_classifiesZeroFrameFailuresAccurately() {
+    assertEquals(
+      RecordingSchedulerEngine.FailureType.LOW_STORAGE,
+      RecordingSchedulerEngine.classifyZeroFrameFailure(
+        freeSpaceMb = 8L,
+        recorderFailureReason = null,
+        recorderInitFailed = false
+      )
+    )
+    assertEquals(
+      RecordingSchedulerEngine.FailureType.ENCODER_ERROR,
+      RecordingSchedulerEngine.classifyZeroFrameFailure(
+        freeSpaceMb = 500L,
+        recorderFailureReason = "ENCODER_ERROR",
+        recorderInitFailed = false
+      )
+    )
+    assertEquals(
+      RecordingSchedulerEngine.FailureType.ENCODER_ERROR,
+      RecordingSchedulerEngine.classifyZeroFrameFailure(
+        freeSpaceMb = 500L,
+        recorderFailureReason = null,
+        recorderInitFailed = true
+      )
+    )
+    assertEquals(
+      RecordingSchedulerEngine.FailureType.STREAM_DISCONNECTED,
+      RecordingSchedulerEngine.classifyZeroFrameFailure(
+        freeSpaceMb = 500L,
+        recorderFailureReason = "STREAM_DISCONNECTED",
+        recorderInitFailed = false
+      )
+    )
+  }
+
+  @Test
+  fun recordingScheduler_persistedManualCameraIds_parseSerializeAndFilter() {
+    assertEquals(emptySet<String>(), RecordingSchedulerEngine.parsePersistedManualCameraIds(null))
+    assertEquals(emptySet<String>(), RecordingSchedulerEngine.parsePersistedManualCameraIds(" ,  , "))
+
+    val parsed = RecordingSchedulerEngine.parsePersistedManualCameraIds("cam_2, cam_1 ,,cam_2 ")
+    assertEquals(setOf("cam_2", "cam_1"), parsed)
+    assertEquals("cam_1,cam_2", RecordingSchedulerEngine.serializePersistedManualCameraIds(parsed))
+
+    val cam1 = CameraEntity(id = "cam_1", name = "C230", rtspUrl = "rtsp://192.168.1.10/stream1")
+    val cam2 = CameraEntity(id = "cam_2", name = "C520WS", rtspUrl = "rtsp://192.168.1.11/stream1")
+    val cam3 = CameraEntity(id = "cam_3", name = "Gate", rtspUrl = "rtsp://192.168.1.12/stream1")
+
+    val recoverable = RecordingSchedulerEngine.filterRecoverableManualCameras(
+      enabledCameras = listOf(cam1, cam2, cam3),
+      persistedIds = setOf("cam_1", "cam_2", "cam_deleted"),
+      activeSessionIds = setOf("cam_1")
+    )
+    assertEquals(listOf("cam_2"), recoverable.map { it.id })
+  }
+
+  @Test
+  fun streamManager_fastPathHeadlessCapture_requiresBackgroundReadyBoundPlayer() {
+    assertTrue(
+      RtspStreamManager.shouldUseFastPathHeadlessCapture(
+        isForegroundCaptureActive = false,
+        hasReadyGrabber = true,
+        hasPlayer = true,
+        boundMatchesPlayer = true
+      )
+    )
+    assertFalse(
+      RtspStreamManager.shouldUseFastPathHeadlessCapture(
+        isForegroundCaptureActive = true,
+        hasReadyGrabber = true,
+        hasPlayer = true,
+        boundMatchesPlayer = true
+      )
+    )
+    assertFalse(
+      RtspStreamManager.shouldUseFastPathHeadlessCapture(
+        isForegroundCaptureActive = false,
+        hasReadyGrabber = false,
+        hasPlayer = true,
+        boundMatchesPlayer = true
+      )
+    )
+    assertFalse(
+      RtspStreamManager.shouldUseFastPathHeadlessCapture(
+        isForegroundCaptureActive = false,
+        hasReadyGrabber = true,
+        hasPlayer = false,
+        boundMatchesPlayer = false
+      )
+    )
+    assertFalse(
+      RtspStreamManager.shouldUseFastPathHeadlessCapture(
+        isForegroundCaptureActive = false,
+        hasReadyGrabber = true,
+        hasPlayer = true,
+        boundMatchesPlayer = false
+      )
+    )
+  }
+
+  @Test
+  fun cameraStreamRecorder_eosDrainTimeout_capsAtDeadline() {
+    assertFalse(CameraStreamRecorder.hasEosDrainTimedOut(startMs = 1_000L, nowMs = 2_799L, maxMs = 1_800L))
+    assertTrue(CameraStreamRecorder.hasEosDrainTimedOut(startMs = 1_000L, nowMs = 2_800L, maxMs = 1_800L))
+    assertTrue(CameraStreamRecorder.hasEosDrainTimedOut(startMs = 1_000L, nowMs = 5_000L, maxMs = 1_800L))
+  }
+
+  @Test
+  fun keepAliveService_batteryBannerVisibility_evaluatesRecordingAndDismissState() {
+    assertTrue(
+      SurveillanceKeepAliveService.shouldShowBatteryOptimizationBanner(
+        activeRecordingCount = 2,
+        isBatteryOptimizationIgnored = false,
+        isDismissed = false
+      )
+    )
+    assertFalse(
+      SurveillanceKeepAliveService.shouldShowBatteryOptimizationBanner(
+        activeRecordingCount = 0,
+        isBatteryOptimizationIgnored = false,
+        isDismissed = false
+      )
+    )
+    assertFalse(
+      SurveillanceKeepAliveService.shouldShowBatteryOptimizationBanner(
+        activeRecordingCount = 2,
+        isBatteryOptimizationIgnored = true,
+        isDismissed = false
+      )
+    )
+    assertFalse(
+      SurveillanceKeepAliveService.shouldShowBatteryOptimizationBanner(
+        activeRecordingCount = 2,
+        isBatteryOptimizationIgnored = false,
+        isDismissed = true
+      )
+    )
+  }
+
+  @Test
+  fun streamManager_urlValidationAndConfigSignature_preventInvalidSecondCameraCrash() {
+    assertTrue(RtspStreamManager.isValidStreamUrl("rtsp://192.168.1.50:554/stream1"))
+    assertTrue(RtspStreamManager.isValidStreamUrl("RTSPS://cam.local/live"))
+    assertTrue(RtspStreamManager.isValidStreamUrl("http://192.168.1.60:8080/video.mp4"))
+
+    assertFalse(RtspStreamManager.isValidStreamUrl(""))
+    assertFalse(RtspStreamManager.isValidStreamUrl("rtsp://"))
+    assertFalse(RtspStreamManager.isValidStreamUrl("rtsp:///stream1"))
+    assertFalse(RtspStreamManager.isValidStreamUrl("ftp://192.168.1.50/stream1"))
+    assertFalse(RtspStreamManager.isValidStreamUrl("rtsp://192.168.1.50/bad space"))
+
+    val baseCam = CameraEntity(
+      id = "cam_2",
+      name = "C520WS",
+      rtspUrl = "rtsp://192.168.1.51:554/stream1",
+      username = "admin",
+      password = "secret",
+      transport = RtspTransport.TCP
+    )
+    val sameConfig = RtspStreamManager.computeStreamConfigSignature(baseCam)
+    val changedPass = RtspStreamManager.computeStreamConfigSignature(baseCam.copy(password = "newpass"))
+    val changedTransport = RtspStreamManager.computeStreamConfigSignature(baseCam.copy(transport = RtspTransport.UDP))
+
+    assertTrue(sameConfig != changedPass)
+    assertTrue(sameConfig != changedTransport)
   }
 }
